@@ -26,13 +26,26 @@ Read [plan](DNS_SERVICE_PLAN.md), [foundation](agent-docs/foundation.md), and
 
 ## 🧰 Development
 
+Requirements: stable Rust and, for container builds, a Docker-compatible engine.
+
+Linux and macOS:
+
 ```bash
-./scripts/dev-macos.sh check
-./scripts/dev-macos.sh build
-./scripts/dev-macos.sh release
+./scripts/dev.sh check
+./scripts/dev.sh build
+./scripts/dev.sh release
 ```
 
-`release` creates local Docker image `lumen:local`. It is a foundation image
+Windows PowerShell:
+
+```powershell
+.\scripts\dev.ps1 check
+.\scripts\dev.ps1 build
+.\scripts\dev.ps1 release
+```
+
+`release` creates local image `lumen:local`. Docker Desktop, OrbStack, Podman,
+or another compatible engine may provide image runtime. It is a foundation image
 until DNS listeners exist.
 
 ## 🤝 Contributing

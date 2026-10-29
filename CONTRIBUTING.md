@@ -9,8 +9,10 @@
 ## Checks
 
 ```bash
-./scripts/dev-macos.sh check
+./scripts/dev.sh check
 ```
+
+On Windows PowerShell, run `.\scripts\dev.ps1 check`.
 
 This checks format, Clippy, and tests. CI checks Linux, macOS, and Windows.
 
