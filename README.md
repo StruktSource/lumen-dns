@@ -22,7 +22,8 @@ Foundation stage. **Not a DNS server yet.** Do not use Lumen in production.
 - **Your visibility** — local dashboard, Prometheus, Grafana-ready metrics.
 
 Read [plan](DNS_SERVICE_PLAN.md), [foundation](docs/foundation.md), and
-[architecture](docs/architecture.md) before DNS-path changes.
+[architecture](docs/architecture.md) before DNS-path changes. Track shipped and
+next work in [implementation checklist](docs/progress.md).
 
 ## 🧰 Development
 
