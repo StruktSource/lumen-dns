@@ -21,7 +21,7 @@ Foundation stage. **Not a DNS server yet.** Do not use Lumen in production.
 - **Your deployment** — Docker, OrbStack, LXC, Unraid, bare metal, x86_64, ARM64.
 - **Your visibility** — local dashboard, Prometheus, Grafana-ready metrics.
 
-Read [plan](DNS_SERVICE_PLAN.md), [foundation](agent-docs/foundation.md), and
+Read [plan](DNS_SERVICE_PLAN.md), [foundation](docs/foundation.md), and
 [architecture](docs/architecture.md) before DNS-path changes.
 
 ## 🧰 Development

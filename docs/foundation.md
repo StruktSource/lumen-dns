@@ -31,7 +31,7 @@ mixing trusted DNS-path code with control-plane code.
 ├── web/                       # Optional web UI; no DNS-path dependency
 ├── deploy/                    # Docker, Compose, LXC, systemd, Unraid examples
 ├── docs/                      # User and operator documentation
-├── agent-docs/                # Architecture and implementation decisions
+├── docs/                      # Architecture and implementation decisions
 ├── tests/                     # Cross-crate integration and conformance tests
 ├── fuzz/                      # Cargo-fuzz targets for untrusted input
 └── scripts/                   # Repeatable release and verification helpers
