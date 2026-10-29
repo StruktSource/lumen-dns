@@ -72,7 +72,7 @@ Use Semantic Versioning: `MAJOR.MINOR.PATCH`.
 - `MAJOR`: breaking public API, config, data, behavior, or cluster changes.
 - One workspace version lives in root `Cargo.toml`. Release binaries, containers, API, and docs use same version.
 - Release builds include version, Git revision, build target, and Rust toolchain in `lumen --version`.
-- Pin toolchain in `rust-toolchain.toml`. Update minimum supported Rust version only in a minor or major release, never silently in a patch.
+- Local development uses the installed stable Rust toolchain. CI pins its Rust version. Update minimum supported Rust version only in a minor or major release, never silently in a patch.
 - API starts at `/v1`. Breaking API changes require `/v2` or a major release.
 - Config schema has explicit version field and migrations. Service rejects unknown future schema versions.
 
