@@ -109,6 +109,7 @@ fn parse_name_end(packet: &[u8], start: usize) -> Result<usize, ParseError> {
     let mut index = start;
     let mut labels = 0_usize;
     let mut jumps = 0_usize;
+    let mut expanded_len = 1_usize;
     let mut encoded_end = None;
     loop {
         let Some(&length) = packet.get(index) else {
@@ -123,7 +124,7 @@ fn parse_name_end(packet: &[u8], start: usize) -> Result<usize, ParseError> {
                 return Err(ParseError::InvalidName);
             };
             let target = usize::from((u16::from(length & 0x3f) << 8) | u16::from(tail));
-            if target < HEADER_LEN || target >= packet.len() || jumps == 16 {
+            if target < HEADER_LEN || target >= index - 1 || jumps == 16 {
                 return Err(ParseError::InvalidName);
             }
             encoded_end.get_or_insert(index + 1);
@@ -138,6 +139,10 @@ fn parse_name_end(packet: &[u8], start: usize) -> Result<usize, ParseError> {
             .checked_add(usize::from(length))
             .ok_or(ParseError::InvalidName)?;
         if end > packet.len() {
+            return Err(ParseError::InvalidName);
+        }
+        expanded_len += usize::from(length) + 1;
+        if expanded_len > 255 {
             return Err(ParseError::InvalidName);
         }
         index = end;
@@ -177,5 +182,25 @@ mod tests {
         let mut query = QUERY;
         query[7] = 1;
         assert!(Query::parse(&query).is_err());
+    }
+
+    #[test]
+    fn rejects_forward_pointers_and_loops() {
+        let mut packet = vec![0; 12];
+        packet.extend_from_slice(&[0xc0, 0x0e, 0]);
+        assert!(parse_name_end(&packet, 12).is_err());
+        packet[13] = 12;
+        assert!(parse_name_end(&packet, 12).is_err());
+    }
+
+    #[test]
+    fn rejects_name_over_255_bytes() {
+        let mut packet = vec![0; 12];
+        for _ in 0..4 {
+            packet.push(63);
+            packet.extend_from_slice(&[b'a'; 63]);
+        }
+        packet.push(0);
+        assert!(parse_name_end(&packet, 12).is_err());
     }
 }

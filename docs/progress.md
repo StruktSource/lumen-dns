@@ -27,6 +27,7 @@ documented. It does **not** mean production-ready unless stated.
 - [x] Unit tests for valid and invalid DNS question handling
 - [x] UDP listener base
 - [x] TCP listener base with DNS-over-TCP framing
+- [x] TCP connection cap and read/write timeouts
 - [x] Safe default response: `SERVFAIL` until resolver exists
 - [ ] IPv4 and IPv6 listener integration tests
 - [ ] Recursive resolver and root-hints handling
@@ -35,7 +36,7 @@ documented. It does **not** mean production-ready unless stated.
 - [ ] DNSSEC trust-anchor management and validation
 - [ ] Upstream forwarding mode
 - [ ] Encrypted upstream resolver support
-- [ ] Query timeout, retry, concurrency, and client rate limits
+- [ ] Resolver query timeout, retry, concurrency, and client rate limits
 - [ ] Basic resolver health and query metrics
 - [ ] DNS conformance and sustained-load tests
 

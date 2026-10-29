@@ -4,7 +4,12 @@ use lumen_proto::{MAX_MESSAGE_SIZE, Query, Rcode, malformed_response};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream, UdpSocket},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
+    time::Duration,
 };
 
 fn main() -> std::io::Result<()> {
@@ -18,9 +23,10 @@ fn main() -> std::io::Result<()> {
         );
         return Ok(());
     }
-    let tcp_bind = bind.clone();
-    thread::spawn(move || serve_tcp(&tcp_bind));
-    serve_udp(&bind)
+    let tcp = TcpListener::bind(&bind)?;
+    let udp = UdpSocket::bind(&bind)?;
+    thread::spawn(move || serve_tcp(&tcp));
+    serve_udp(&udp, &bind)
 }
 
 fn answer(packet: &[u8]) -> Vec<u8> {
@@ -30,8 +36,7 @@ fn answer(packet: &[u8]) -> Vec<u8> {
     )
 }
 
-fn serve_udp(bind: &str) -> std::io::Result<()> {
-    let socket = UdpSocket::bind(bind)?;
+fn serve_udp(socket: &UdpSocket, bind: &str) -> std::io::Result<()> {
     println!(
         "Lumen UDP/TCP transport listening on {bind}; resolver unavailable, returns SERVFAIL."
     );
@@ -43,17 +48,24 @@ fn serve_udp(bind: &str) -> std::io::Result<()> {
     }
 }
 
-fn serve_tcp(bind: &str) -> std::io::Result<()> {
-    let listener = TcpListener::bind(bind)?;
+fn serve_tcp(listener: &TcpListener) {
+    let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming().flatten() {
-        thread::spawn(|| {
+        if active.fetch_add(1, Ordering::Relaxed) >= 64 {
+            active.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        }
+        let active = Arc::clone(&active);
+        thread::spawn(move || {
             let _ = serve_tcp_client(stream);
+            active.fetch_sub(1, Ordering::Relaxed);
         });
     }
-    Ok(())
 }
 
 fn serve_tcp_client(mut stream: TcpStream) -> std::io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let mut length = [0_u8; 2];
     stream.read_exact(&mut length)?;
     let length = usize::from(u16::from_be_bytes(length));
