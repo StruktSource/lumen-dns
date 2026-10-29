@@ -1,0 +1,8 @@
+# Lumen continuity
+
+- 2026-10-29T21:08:30+01:00 [USER] [PLANS] Complete all Phase 1 secure resolver work; review code first and update README, TODO, and docs. Scope confirmed in chat.
+- 2026-10-29T21:08:30+01:00 [CODE] [DECISIONS] Use Hickory 0.26.3 and Rust 1.88 minimum. Keep all DNS client transports behind shared admission, cache, and resolver state. Default to loopback clients, local DNSSEC, recursive mode, no query history, and no management API.
+- 2026-10-29T21:08:30+01:00 [CODE] [PROGRESS] UDP/TCP/DoH/DoT/DoQ, IPv4/IPv6, recursion, validated forwarding, bounded caches, trust setup, resource caps, aggregate metrics, startup schema, fuzz/audit CI, and release packaging are implemented.
+- 2026-10-29T21:08:30+01:00 [CODE] [DISCOVERIES] Per-packet full rate-table scans were a flood risk. Cleanup now runs at most once per second. PowerShell native exit handling and platform release artifact collisions were fixed.
+- 2026-10-29T21:08:30+01:00 [CODE] [PLANS] Next slice is Phase 2 filtering. Automatic trust/certificate rotation, extended conformance/soak tests, external review, full CLI/API/UI, and distribution hardening remain tracked in TODO.md and docs/progress.md.
+- 2026-10-29T21:12:55+01:00 [TOOL] [OUTCOMES] Final checks passed: 21 offline tests, fmt, Clippy, Rust 1.88 all-target check, release builds, config validation, DNS/config ASan fuzz smoke, both RustSec audits, archive/checksum checks, and Linux ARM64 non-root read-only image checks. Public recursive DNSSEC smoke returned AD for valid domains and SERVFAIL for a broken domain with a 30-second deadline. See docs/verification.md for limits.

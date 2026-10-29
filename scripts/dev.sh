@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
+
 usage() {
   cat <<'EOF'
 Usage: ./scripts/dev.sh <check|build|image|release>
@@ -18,8 +20,8 @@ need_command() {
 
 check() {
   cargo fmt --check
-  cargo clippy --workspace --all-targets -- -D warnings
-  cargo test --workspace
+  cargo clippy --workspace --all-targets --locked -- -D warnings
+  cargo test --workspace --locked
 }
 
 image() {
@@ -30,8 +32,8 @@ image() {
 
 case "${1:-}" in
   check) check ;;
-  build) cargo build --workspace ;;
+  build) cargo build --workspace --locked ;;
   image) image ;;
-  release) check; cargo build --workspace --release; image ;;
+  release) check; cargo build --workspace --release --locked; image ;;
   *) usage; exit 2 ;;
 esac

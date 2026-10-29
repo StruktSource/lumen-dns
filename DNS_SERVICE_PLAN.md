@@ -70,6 +70,16 @@ Product name: **Lumen**. Organization: **Strukt**.
 - Clear install and upgrade guides for each deployment target.
 - Design for multi-service and cluster use. Start with safe standalone operation.
 
+## Implementation status — 2026-10-29
+
+Phase 1 secure resolver core is implemented. UDP/TCP/DoH/DoT/DoQ, IPv4/IPv6,
+iterative recursion, DNSSEC, bounded caches, verified upstream forwarding,
+resource admission, aggregate metrics, and offline regression tests are present.
+Startup schema and fuzz/audit CI also landed. This is a pre-release, not the
+complete first release. Phase 2 filtering is next. See
+[progress](docs/progress.md), [verification](docs/verification.md), and
+[TODO](TODO.md) for shipped scope and remaining release gates.
+
 ## Roadmap
 
 ### Phase 0 — Foundation
@@ -80,7 +90,7 @@ Product name: **Lumen**. Organization: **Strukt**.
 4. Create CI for formatting, linting, tests, fuzzing, releases, SBOM, and multi-arch containers.
 5. Add empty UI and API extension points without enabling API access.
 
-### Phase 1 — Secure resolver core
+### Phase 1 — Secure resolver core (implemented)
 
 1. Implement UDP, TCP, DoH, DoT, and DoQ listeners for IPv4 and IPv6.
 2. Implement recursive resolver, cache, root hints, delegation handling, and DNSSEC validation.
@@ -114,7 +124,7 @@ Product name: **Lumen**. Organization: **Strukt**.
 
 ### Phase 5 — Advanced DNS and availability
 
-1. Complete first-class DoH, DoT, and DoQ listeners with certificate and key management.
+1. Extend Phase 1 DoH, DoT, and DoQ with automated certificate/key lifecycle management.
 2. Add split DNS, local records, conditional forwarding, and safe local service discovery.
 3. Add HA, multi-service, cluster config replication, and cache strategy.
 4. Add optional DNS threat feeds and enterprise policy features without changing privacy defaults.
@@ -122,8 +132,6 @@ Product name: **Lumen**. Organization: **Strukt**.
 
 ## Later decisions
 
-- Exact license: permissive or copyleft.
 - UI technology and whether UI ships in default image.
-- Query-log database and retention defaults.
 - HA/cluster consistency model.
 - Certificate automation and encrypted-listener defaults.

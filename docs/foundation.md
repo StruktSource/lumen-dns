@@ -1,106 +1,77 @@
-# Lumen Foundation
+# Lumen foundation
 
-## Identity
+## Identity and scope
 
-- Product name: **Lumen**.
-- Organization: **Strukt**.
-- Purpose: private, self-hosted DNS filtering and validating resolver.
-- Implementation language: Rust, stable channel.
+Lumen is private, self-hosted DNS software by Strukt. Rust, Apache-2.0, workspace
+version `0.1.0`. Phase 1 implements the resolver core; filtering and management
+remain planned. See [progress](progress.md) for exact shipped scope.
 
-## Rust workspace layout
-
-Use one Cargo workspace. Keep protocol, policy, and deployment code separate.
-This makes core resolver tests fast and lets CLI, API, and UI evolve without
-mixing trusted DNS-path code with control-plane code.
+## Workspace
 
 ```text
-.
-├── Cargo.toml                 # Workspace only; shared metadata and lint rules
-├── rust-toolchain.toml        # Pinned stable Rust toolchain
-├── crates/
-│   ├── lumen-proto/           # DNS wire format, packet limits, protocol types
-│   ├── lumen-resolver/        # Recursive resolver, forwarding, cache, DNSSEC
-│   ├── lumen-filter/          # Rules, blocklists, profiles, decision engine
-│   ├── lumen-config/          # Config schema, validation, safe reloads
-│   ├── lumen-api/             # Authenticated HTTP API and webhook support
-│   ├── lumen-observability/   # Logs, health checks, Prometheus metrics
-│   └── lumen-core/            # Service lifecycle and component wiring
-├── apps/
-│   ├── lumen/                 # Main daemon binary
-│   └── lumenctl/              # Administrative CLI binary
-├── web/                       # Optional web UI; no DNS-path dependency
-├── deploy/                    # Docker, Compose, LXC, systemd, Unraid examples
-├── docs/                      # User and operator documentation
-├── docs/                      # Architecture and implementation decisions
-├── tests/                     # Cross-crate integration and conformance tests
-├── fuzz/                      # Cargo-fuzz targets for untrusted input
-└── scripts/                   # Repeatable release and verification helpers
+apps/lumen/          daemon startup and signal handling
+apps/lumenctl/       administrative CLI foundation
+crates/lumen-proto/  bounded DNS wire admission and full message decoding
+crates/lumen-config/ schema 1, validation, safe defaults, bounded file reads
+crates/lumen-resolver/ recursive/forward modes, DNSSEC, cache and trust setup
+crates/lumen-core/   client transports, limits, lifecycle and aggregate metrics
+crates/lumen-api/    reserved /v1 boundary; no API listener
+config/             recursive and explicit encrypted-forwarding examples
+web/                blank optional UI shell
+fuzz/               DNS/config fuzz targets; separate Cargo workspace
+scripts/            local checks, builds, packaging
+.agent/             concise project continuity notes
 ```
 
-Rules:
+`lumen-filter`, configuration persistence, extended observability, deployment
+examples, and a full CLI are future slices. Protocol parsing never imports UI,
+API, storage, or resolver code. `lumen-core` wires components; resolver business
+rules stay in `lumen-resolver`. Hickory owns DNS algorithms and cryptography;
+Lumen does not implement custom DNSSEC crypto.
 
-- DNS packet handling stays in `lumen-proto`; no UI, API, or storage imports.
-- `lumen-resolver` and `lumen-filter` have no web-UI dependency.
-- `lumen-core` composes components; business rules stay in owned crates.
-- Binaries remain thin. They parse startup options and call library crates.
-- New crates need a clear owner, tests, documentation, and dependency reason.
+## Runtime and compatibility
+
+Minimum Rust: 1.88, required by Hickory 0.26.3. `rust-toolchain.toml` selects the
+installed stable channel. CI and Docker pin 1.95.0; CI also checks the 1.88 MSRV.
+No unsafe code is allowed in Lumen crates. Platform CI targets Linux, macOS, and
+Windows; the resolver uses portable Tokio/rustls/ring transports. Runtime claims
+must be backed by the [verification record](verification.md).
+
+## Contracts
+
+- Startup [configuration schema](configuration.md) is versioned; unknown fields
+  and future versions fail closed. Migrations/reload are not implemented.
+- DNS errors use protocol response codes. Startup errors are local and do not
+  dump configuration, keys, query packets, or query names.
+- [Metrics](resolver.md#metrics-and-health) have stable `lumen_dns_` names with
+  no client/domain labels. Liveness has a separate loopback endpoint.
+- Future API starts at `/v1`; authentication, authorization, and audit must be
+  complete before API routes can be exposed. DNS-over-HTTPS is a DNS transport,
+  not a management API.
+- Future storage uses SQLite for configuration and optional history. Hot DNS
+  caches remain bounded in memory. Query history and external telemetry are off.
+- Operators opt into each encrypted listener and each upstream; recursive mode
+  has no implicit upstream fallback.
 
 ## First-release boundaries
 
-- Ship recursive resolution, filtering, DNSSEC validation, UDP, TCP, DoH, DoT, and DoQ.
-- Setup chooses enabled built-in modules. Future plugins use separate, permissioned extension points.
-- Ship CLI, config file, and a blank UI shell.
-- Do not expose API access in first release. Reserve API crate, route namespace, versioning, auth, and audit model now.
-- Resolve recursively or forward upstream only when operator selects that module at setup.
+The intended first release includes recursive resolution, filtering, DNSSEC,
+UDP/TCP/DoH/DoT/DoQ, setup-selected built-in modules, CLI/config, and a blank UI.
+Phase 1 alone does not satisfy that full release scope. Optional plugins come
+later. API access stays disabled until its security work is complete.
 
-## Current Phase 1 slice
+## Version and release policy
 
-- `lumen-proto` parses one bounded, uncompressed DNS question and encodes error responses. Full message and compressed-name decoding remain to be implemented.
-- `lumen` listens on UDP and TCP when started with `lumen --bind ADDRESS`.
-- Until resolver work exists, validated queries return `SERVFAIL`; malformed packets return `FORMERR`.
-- This transport base is for development only. Do not point router or device DNS at it yet.
+Use SemVer. `0.y.z` is preview and may change config/storage/public contracts.
+Stable `1.0.0` requires proven resolver/filter behavior, migration and upgrade
+paths, deployment validation, and security review. Patch releases fix bugs;
+minor releases add compatible features; breaking stable contracts require a
+major release. MSRV increases need explicit minor/major release notes.
 
-## Data and privacy defaults
+One version lives in root `Cargo.toml`. Platform release archives have unique
+names, include both binaries and startup documentation, and carry SHA-256
+checksums. SBOM, signed images, reproducible-release verification, and embedded
+Git revision/target metadata remain release-hardening work.
 
-- SQLite stores configuration, list metadata, devices, groups, profiles, and future opt-in history.
-- Query logs default off.
-- Dashboards use aggregate counters only by default.
-- Optional anonymous and full history modes default to seven-day retention.
-- Operators choose retention, devices/groups, and logged fields. Privacy choices are not global-only switches.
-
-## Version policy
-
-Use Semantic Versioning: `MAJOR.MINOR.PATCH`.
-
-- `0.y.z`: public preview. API, config, storage, and cluster behavior may change.
-- `1.0.0`: only after recursive resolution, filtering, migration, and upgrade paths are proven stable.
-- `PATCH`: bug fixes and security fixes. No intended public API or config break.
-- `MINOR`: backward-compatible features. Deprecated items get migration notes and removal target.
-- `MAJOR`: breaking public API, config, data, behavior, or cluster changes.
-- One workspace version lives in root `Cargo.toml`. Release binaries, containers, API, and docs use same version.
-- Release builds include version, Git revision, build target, and Rust toolchain in `lumen --version`.
-- Local development uses the installed stable Rust toolchain. CI pins its Rust version. Update minimum supported Rust version only in a minor or major release, never silently in a patch.
-- API starts at `/v1`. Breaking API changes require `/v2` or a major release.
-- Config schema has explicit version field and migrations. Service rejects unknown future schema versions.
-
-## License
-
-Use **Apache-2.0**.
-
-Why:
-
-- Clear patent rights and patent-termination terms protect contributors and users.
-- Permissive terms suit open-source self-hosting, commercial use, and distribution.
-- One license removes ambiguity for contributors and downstream packagers.
-
-Ship `LICENSE` at repository root. New source files state
-`SPDX-License-Identifier: Apache-2.0`. Accept contributions under Apache-2.0.
-
-## Initial repository files
-
-1. `Cargo.toml` workspace manifest.
-2. `rust-toolchain.toml` pinned to current stable Rust.
-3. `LICENSE` with Apache-2.0 text.
-4. `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `CODE_OF_CONDUCT.md`.
-5. `docs/architecture.md` and `docs/threat-model.md`.
-6. CI for `fmt`, `clippy`, tests, dependency audit, fuzz smoke test, and multi-architecture build.
+Contributions use Apache-2.0. New source files carry
+`SPDX-License-Identifier: Apache-2.0`.

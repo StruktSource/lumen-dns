@@ -14,7 +14,13 @@
 
 On Windows PowerShell, run `.\scripts\dev.ps1 check`.
 
-This checks format, Clippy, and tests. CI checks Linux, macOS, and Windows.
+This checks format, Clippy, and offline tests using the committed lockfile. Tests
+need IPv4/IPv6 loopback sockets. CI defines Linux, macOS, Windows, MSRV, audit,
+and fuzz jobs. See [verification](docs/verification.md) for commands and limits.
+
+Run `cargo audit` after dependency changes. DNS/config changes also need fuzz
+smoke runs; the fuzz workspace has its own committed lockfile. Keep protocol
+regressions local and deterministic. Do not make CI depend on public DNS.
 
 ## Rules
 

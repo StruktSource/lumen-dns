@@ -1,14 +1,51 @@
-# 🔒 Threat model
+# Threat model
 
-| Threat | Required control |
+## Implemented Phase 1 controls
+
+| Entry / threat | Control |
 | --- | --- |
-| Malformed DNS packets | Parser limits, fuzzing, timeouts, no unsafe code |
-| Cache poisoning | DNSSEC, bailiwick checks, randomized query state |
-| Resolver abuse | Rate limits, concurrency caps, recursion limits |
-| Malicious list | HTTPS, validation, atomic update, rollback |
-| Exposed management | Local default, scoped auth, audit trail, rate limits |
-| Sensitive history | Logs off, configurable retention and redaction |
-| Container impact | Non-root runtime, minimal image, read-only paths |
+| Malformed DNS, compression loops, forged section counts | Bounded full-message decoder, strict query shape, full consumption, parser regressions and fuzz targets |
+| Oversized packets / partial stream frames | Per-message cap; UDP oversize detection; whole-frame read/write deadlines |
+| Response loops and reflection | Incoming responses/short packets dropped; loopback/client CIDR defaults; rate/work caps; UDP response ceiling |
+| Idle or hostile TCP/TLS clients | Shared connection cap, TLS handshake/frame deadlines, bounded response work |
+| HTTP/2 body/header floods | Header/body/window/stream caps and deadlines; GET/POST/path/media checks |
+| QUIC resource exhaustion | Connection admission, transport windows, bounded streams, deadlines, no unidirectional streams or early data |
+| Cache poisoning and bad delegations | Hickory source/query matching, random query state, case randomization, bailiwick checks and DNSSEC |
+| Recursive access to local services | Hickory recommended authority-address filters retained; no automatic private-range exception for custom hints |
+| Bad upstream / certificate impostor | Local DNSSEC; explicit upstream IP and TLS name; verified CA chain; no insecure fallback |
+| DNSSEC computational load | Recursive depth, bounded validation cache, NSEC3 limits, outer query deadline |
+| Query floods / many client IPs | Global query slots, per-IP one-second rate windows, bounded client table, bounded UDP workers |
+| Listener silently fails | Daemon observes background task errors; startup binds all sockets before serving |
+| Query privacy | No query history, domain/client metric labels, or external telemetry; startup logs show only listener addresses |
+| Management exposure | No management API routes; metrics/liveness bind only loopback |
+| Container impact | Non-root UID 65532, no runtime key generation/download, minimal Debian runtime |
 
-Lumen cannot make a compromised host, router, device, or upstream resolver
-trustworthy. It keeps its own boundaries explicit and data local by default.
+Caches have configurable entry/TTL bounds, not a contractual RSS byte ceiling.
+Transient cache maintenance and protocol libraries use extra memory. Rate-limit
+state contains IP addresses only in transient bounded memory. Apply OS/container
+memory limits for hard resource isolation. Tests exercise overload and timeout
+paths but do not establish resistance to every denial-of-service strategy.
+
+## Trust and residual risks
+
+The host, startup config, supplied certificate keys, hints, trust anchors, and
+private CA bundles are administrator trust inputs. The operator controls network
+reachability, client CIDRs, key file access, clock accuracy, and renewal. DNSSEC
+authenticates signed DNS data, not the honesty of an upstream or the privacy of
+plaintext authoritative DNS. Unsigned zones can legitimately validate as insecure.
+
+Static root anchors need reviewed updates; automatic RFC 5011 rollover is not
+implemented. A compromised host/router/client or wrong operator trust input is
+outside Lumen's boundary. Hickory's recursive implementation remains upstream
+experimental; external review, broader conformance, and extended soak testing
+remain stable-release gates. Fuzz smoke tests and a clean dependency audit are
+useful checks, not a proof of security.
+
+## Later controls
+
+Filtering imports need bounded parsers, checked HTTPS fetches, validated atomic
+updates, and rollback. Future management requires auth, scoped roles, audit,
+rate limits, and explicit remote exposure. Optional query history needs retention,
+redaction, and access controls. These features remain disabled/unimplemented.
+
+See [security policy](../SECURITY.md) and [verification](verification.md).

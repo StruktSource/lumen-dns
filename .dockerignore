@@ -13,3 +13,8 @@ web
 *.sqlite-wal
 *.log
 *.md
+
+.serena
+.agent
+fuzz
+release

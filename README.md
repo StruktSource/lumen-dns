@@ -2,54 +2,65 @@
 
 > Private DNS, in your control.
 
-**Lumen** is open-source DNS software by [Strukt](https://github.com/StruktSource).
-It will unite recursive DNS, filtering, caching, and encrypted DNS in one small service.
+**Lumen** is open-source, self-hosted DNS software by [Strukt](https://github.com/StruktSource).
 
-## 🚧 Status
+## Status
 
-Foundation stage. **Not a DNS server yet.** Do not use Lumen in production.
+**Phase 1 implemented. Pre-release; production hardening is still in progress.**
 
-| Available now | Planned first release |
+| Available | Next |
 | --- | --- |
-| Rust workspace, CI, Docker base, CLI/UI/API foundations, bounded DNS parser, UDP/TCP transport base | Recursive resolver, DNSSEC, cache, filtering, DoH, DoT, DoQ |
+| UDP, TCP, DoH, DoT, DoQ on IPv4/IPv6 | Filtering, device policies, blocklist imports |
+| Recursive resolution, delegation checks, DNSSEC | Config reload and migrations |
+| Positive, negative, delegation, and validation caches | Full administrative CLI and web UI |
+| Explicit plaintext or encrypted upstream forwarding | Deployment guides, signed images, external review |
+| Startup config, client ACLs, resource limits, aggregate metrics | Extended interoperability and performance validation |
 
-## ✨ Direction
+Defaults: loopback clients only, recursive resolution, DNSSEC on, no query
+history, no telemetry, and no management API. Encrypted listeners require
+operator-supplied certificates and keys. Filtering is not implemented yet.
 
-- **Private** — no telemetry, no cloud need, query logs off.
-- **One service** — resolver, DNSSEC, cache, filtering, device policies.
-- **Your rules** — profiles, lists, local records, split DNS.
-- **Your deployment** — Docker, OrbStack, LXC, Unraid, bare metal, x86_64, ARM64.
-- **Your visibility** — local dashboard, Prometheus, Grafana-ready metrics.
+## Run
 
-Read [plan](DNS_SERVICE_PLAN.md), [foundation](docs/foundation.md), and
-[architecture](docs/architecture.md) before DNS-path changes. Track shipped and
-next work in [implementation checklist](docs/progress.md).
+Requirements: Rust 1.88 or newer; stable toolchain recommended. CI and container
+builds use Rust 1.95.0. No external DNS server is needed for automated tests.
 
-## 🧰 Development
-
-Requirements: stable Rust and, for container builds, a Docker-compatible engine.
-
-Linux and macOS:
-
-```bash
+```sh
 ./scripts/dev.sh check
-./scripts/dev.sh build
-./scripts/dev.sh release
+cargo run --locked --bin lumen -- --config config/lumen.toml --check
+cargo run --locked --bin lumen -- --config config/lumen.toml
 ```
 
-Windows PowerShell:
+In another terminal:
 
-```powershell
-.\scripts\dev.ps1 check
-.\scripts\dev.ps1 build
-.\scripts\dev.ps1 release
+```sh
+dig @127.0.0.1 -p 5353 example.com A
+dig @::1 -p 5353 example.com AAAA +tcp
+curl http://127.0.0.1:9153/metrics
 ```
 
-`release` creates local image `lumen:local`. Docker Desktop, OrbStack, Podman,
-or another compatible engine may provide image runtime. It is a foundation image
-until DNS listeners exist.
+`lumen --bind 127.0.0.1:5353` starts UDP/TCP with the same safe resolver defaults.
+`lumen --help` lists startup options. `config/forward.toml` is an explicit DoT
+forwarding example; running it sends DNS to its configured upstream.
 
-## 🤝 Contributing
+See [resolver guide](docs/resolver.md), [configuration reference](docs/configuration.md),
+[security boundaries](docs/threat-model.md), and [verification](docs/verification.md).
+Track remaining work in [TODO](TODO.md) and [implementation checklist](docs/progress.md).
+The [product plan](DNS_SERVICE_PLAN.md) describes the complete intended product.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md). Use [SECURITY.md](SECURITY.md) for
-security reports. Licensed under [Apache-2.0](LICENSE).
+## Build
+
+Linux/macOS: `./scripts/dev.sh <check|build|image|release>`.
+Windows PowerShell: `.\scripts\dev.ps1 <check|build|image|release>`.
+`release` checks code, builds optimized binaries, and creates local image
+`lumen:local`. It does not publish a release.
+
+Docker/OrbStack requires an accessible Docker-compatible engine. The image runs
+as UID 65532 with a loopback-only config. For host or network clients, mount a
+config that explicitly sets listener addresses and allowed client CIDRs. Native
+network-wide deployment examples remain Phase 4 work.
+
+## Contributing
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities through
+[SECURITY.md](SECURITY.md). Licensed under [Apache-2.0](LICENSE).
