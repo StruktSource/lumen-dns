@@ -22,7 +22,7 @@ pub struct Query {
 }
 
 impl Query {
-    /// Parses one standard DNS query without compressed question labels.
+    /// Parses one standard DNS query with bounded compression decoding.
     ///
     /// # Errors
     ///
@@ -37,8 +37,14 @@ impl Query {
         if flags & 0x8000 != 0 || (flags >> 11) & 0x0f != 0 {
             return Err(ParseError::UnsupportedOperation);
         }
+        if flags & 0x0240 != 0 {
+            return Err(ParseError::InvalidFlags);
+        }
         if u16::from_be_bytes([packet[4], packet[5]]) != 1 {
             return Err(ParseError::QuestionCount);
+        }
+        if packet[6..10] != [0; 4] {
+            return Err(ParseError::UnexpectedRecords);
         }
 
         let question_end = parse_question_end(packet)?;
@@ -80,21 +86,52 @@ pub enum ParseError {
     InvalidLength,
     UnsupportedOperation,
     QuestionCount,
+    InvalidFlags,
+    UnexpectedRecords,
+    InvalidQuestion,
     InvalidName,
 }
 
 fn parse_question_end(packet: &[u8]) -> Result<usize, ParseError> {
-    let mut index = HEADER_LEN;
+    let question_end = parse_name_end(packet, HEADER_LEN)?
+        .checked_add(4)
+        .ok_or(ParseError::InvalidName)?;
+    if question_end > packet.len() {
+        return Err(ParseError::InvalidName);
+    }
+    if packet[question_end - 4..question_end] == [0, 0, 0, 0] {
+        return Err(ParseError::InvalidQuestion);
+    }
+    Ok(question_end)
+}
+
+fn parse_name_end(packet: &[u8], start: usize) -> Result<usize, ParseError> {
+    let mut index = start;
     let mut labels = 0_usize;
+    let mut jumps = 0_usize;
+    let mut encoded_end = None;
     loop {
         let Some(&length) = packet.get(index) else {
             return Err(ParseError::InvalidName);
         };
         index += 1;
         if length == 0 {
-            break;
+            return Ok(encoded_end.unwrap_or(index));
         }
-        if length & 0xc0 != 0 || length > 63 || labels == 127 {
+        if length & 0xc0 == 0xc0 {
+            let Some(&tail) = packet.get(index) else {
+                return Err(ParseError::InvalidName);
+            };
+            let target = usize::from((u16::from(length & 0x3f) << 8) | u16::from(tail));
+            if target < HEADER_LEN || target >= packet.len() || jumps == 16 {
+                return Err(ParseError::InvalidName);
+            }
+            encoded_end.get_or_insert(index + 1);
+            index = target;
+            jumps += 1;
+            continue;
+        }
+        if length & 0xc0 != 0 || labels == 127 {
             return Err(ParseError::InvalidName);
         }
         let end = index
@@ -106,16 +143,11 @@ fn parse_question_end(packet: &[u8]) -> Result<usize, ParseError> {
         index = end;
         labels += 1;
     }
-    let question_end = index.checked_add(4).ok_or(ParseError::InvalidName)?;
-    if question_end > packet.len() {
-        return Err(ParseError::InvalidName);
-    }
-    Ok(question_end)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Query, Rcode};
+    use super::{Query, Rcode, parse_name_end};
 
     const QUERY: [u8; 29] = [
         0xbe, 0xef, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 7, b'e', b'x', b'a', b'm', b'p',
@@ -131,9 +163,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_compressed_question_name() {
+    fn decodes_bounded_name_compression() {
+        let mut packet = vec![0; 12];
+        packet.extend_from_slice(&[
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
+        ]);
+        packet.extend_from_slice(&[3, b'w', b'w', b'w', 0xc0, 0x0c]);
+        assert_eq!(parse_name_end(&packet, 25), Ok(31));
+    }
+
+    #[test]
+    fn rejects_query_with_answer_records() {
         let mut query = QUERY;
-        query[12] = 0xc0;
+        query[7] = 1;
         assert!(Query::parse(&query).is_err());
     }
 }

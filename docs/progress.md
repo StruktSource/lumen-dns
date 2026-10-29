@@ -22,7 +22,7 @@ documented. It does **not** mean production-ready unless stated.
 
 ## Phase 1 — DNS transport and resolver
 
-- [x] Bounded DNS wire parser for one standard, uncompressed question
+- [x] Bounded DNS wire parser with bounded name-compression decoding
 - [x] DNS error-response encoder
 - [x] Unit tests for valid and invalid DNS question handling
 - [x] UDP listener base
@@ -84,7 +84,6 @@ documented. It does **not** mean production-ready unless stated.
 
 ## Next technical slice
 
-1. Add DNS name compression decoding and strict query validation tests.
-2. Define resolver interfaces and root-hints source.
-3. Implement iterative resolution with hard timeout and recursion limits.
-4. Add bounded positive/negative cache before upstream forwarding.
+1. Define resolver interfaces and root-hints source.
+2. Implement iterative resolution with hard timeout and recursion limits.
+3. Add bounded positive/negative cache before upstream forwarding.

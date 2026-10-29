@@ -55,7 +55,7 @@ Rules:
 
 ## Current Phase 1 slice
 
-- `lumen-proto` parses one bounded, uncompressed DNS question and encodes safe error responses.
+- `lumen-proto` parses one bounded DNS question, including bounded name compression, and encodes safe error responses.
 - `lumen` listens on UDP and TCP when started with `lumen --bind ADDRESS`.
 - Until resolver work exists, validated queries return `SERVFAIL`; malformed packets return `FORMERR`.
 - This transport base is for development only. Do not point router or device DNS at it yet.
