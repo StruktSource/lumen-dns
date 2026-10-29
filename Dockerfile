@@ -1,7 +1,7 @@
 FROM rust:1.95.0-slim-bookworm AS build
 WORKDIR /source
 COPY . .
-RUN cargo build --locked --release --package lumen
+RUN cargo +1.95.0 build --locked --release --package lumen
 
 FROM debian:bookworm-slim
 RUN useradd --system --uid 65532 --create-home lumen

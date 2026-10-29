@@ -22,7 +22,7 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install 1.95.0 --profile minimal
       - name: Build release binary
-        run: cargo build --locked --release --package lumen --package lumenctl
+        run: cargo +1.95.0 build --locked --release --package lumen --package lumenctl
       - name: Upload release binaries
         uses: actions/upload-artifact@v7
         with:

@@ -3,3 +3,13 @@
 *.sqlite-shm
 *.sqlite-wal
 .env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+.direnv/
+*.log
+*.profraw
+*.profdata
+coverage/
