@@ -6,7 +6,12 @@
 
 ## Status
 
-**Phase 1 implemented. Pre-release; production hardening is still in progress.**
+**The DNS resolver works today.** Lumen can resolve queries recursively, validate
+DNSSEC, cache answers, and serve plaintext or encrypted DNS. It can also forward
+queries to a configured upstream.
+
+Lumen is pre-release. Filtering, device policies, and a management UI are still
+planned; wider testing and security review remain before production readiness.
 
 | Available | Next |
 | --- | --- |
