@@ -57,7 +57,8 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [ ] Extended Prometheus metrics and Grafana dashboard
 - [ ] Authenticated `/v1` API, scoped roles, audit events
 - [ ] Webhooks and Home Assistant examples
-- [ ] Functional web UI
+- [ ] Local UI prototype with mock data after the first filtering slice
+- [ ] Functional web UI after config persistence/reload and API security
 - [ ] Opt-in anonymous/full query history
 
 ## Phase 4 — Deployment
