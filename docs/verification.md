@@ -117,3 +117,12 @@ published.
 External DNS/DNSSEC conformance suites, extended soak/abuse tests, production
 memory/performance measurements, automatic trust rollover, signed images,
 reproducible releases, and independent security review remain release gates.
+
+## CI socket regression fixes
+
+CI reported a Windows QUIC client socket error and a Linux TCP restart bind
+error. The DoQ test now supplies an explicitly bound socket. Unix TCP listeners
+set `SO_REUSEADDR`, and the shutdown regression restarts the actual service.
+After the fix, the full macOS ARM64 checks and all eight Linux ARM64 container
+integration tests passed. Windows and Ubuntu x86_64 hosted CI must still verify
+their respective fixes.

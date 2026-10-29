@@ -234,6 +234,10 @@ fn raw_socket(address: SocketAddr, tcp: bool) -> io::Result<Socket> {
         if tcp { Type::STREAM } else { Type::DGRAM },
         Some(if tcp { Protocol::TCP } else { Protocol::UDP }),
     )?;
+    #[cfg(unix)]
+    if tcp {
+        socket.set_reuse_address(true)?;
+    }
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
     }

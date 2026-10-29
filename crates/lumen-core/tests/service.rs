@@ -428,14 +428,18 @@ async fn encrypted_listeners_ipv4_ipv6_and_doh_contract() {
             .0,
             http::StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
-        let mut endpoint = quinn::Endpoint::client(
-            if doq.is_ipv4() {
-                "127.0.0.1:0"
-            } else {
-                "[::1]:0"
-            }
-            .parse()
-            .unwrap(),
+        let socket = std::net::UdpSocket::bind(if doq.is_ipv4() {
+            "127.0.0.1:0"
+        } else {
+            "[::1]:0"
+        })
+        .unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            None,
+            socket,
+            Arc::new(quinn::TokioRuntime),
         )
         .unwrap();
         endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
@@ -552,7 +556,8 @@ async fn connection_rate_concurrency_limits_and_shutdown() {
             .is_err()
     );
     server.shutdown().await;
-    let _new = TcpListener::bind(bind).await.unwrap();
+    let mut restarted = RunningServer::start(config(fixture.address, bind)).unwrap();
+    restarted.shutdown().await;
 }
 
 #[tokio::test]
