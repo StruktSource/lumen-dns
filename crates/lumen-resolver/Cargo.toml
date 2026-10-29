@@ -1,0 +1,18 @@
+[package]
+name = "lumen-resolver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lumen-config = { path = "../lumen-config" }
+lumen-proto = { path = "../lumen-proto" }
+hickory-server.workspace = true
+tokio.workspace = true
+rustls.workspace = true
+async-trait = "0.1"
+
+[lints]
+workspace = true

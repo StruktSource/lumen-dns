@@ -1,10 +1,17 @@
-//! Bounded DNS wire parsing and minimal response encoding.
+// SPDX-License-Identifier: Apache-2.0
+//! Bounded DNS wire parsing, full message decoding, and safe error responses.
 
-/// Largest packet accepted by the initial transport layer.
-pub const MAX_MESSAGE_SIZE: usize = 4096;
-const HEADER_LEN: usize = 12;
+pub use hickory_proto;
+use hickory_proto::{
+    op::{Message, OpCode, ResponseCode},
+    rr::{DNSClass, RecordType},
+    serialize::binary::{BinDecodable, BinDecoder},
+};
 
-/// DNS return codes used by the initial listener.
+/// DNS-over-TCP's wire-format ceiling. Each listener may set a lower cap.
+pub const MAX_MESSAGE_SIZE: usize = 65535;
+
+/// Error codes used before resolution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Rcode {
@@ -13,216 +20,195 @@ pub enum Rcode {
     Refused = 5,
 }
 
-/// A validated, single-question DNS query.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A fully decoded, single-question standard query.
+#[derive(Clone, Debug)]
 pub struct Query {
-    id: u16,
-    recursion_desired: bool,
-    question: Vec<u8>,
+    pub message: Message,
 }
 
 impl Query {
-    /// Parses one standard DNS query with an uncompressed question name.
+    /// Parse all sections; reject hidden trailing data, unsupported operations,
+    /// invalid flags, invalid questions, and query records other than one OPT.
     ///
     /// # Errors
-    ///
-    /// Returns [`ParseError`] when packet length, header, or question encoding
-    /// violates the initial transport limits.
+    /// Returns a non-sensitive error for invalid DNS wire data.
     pub fn parse(packet: &[u8]) -> Result<Self, ParseError> {
-        if packet.len() < HEADER_LEN || packet.len() > MAX_MESSAGE_SIZE {
-            return Err(ParseError::InvalidLength);
+        if packet.len() < 12 || packet.len() > MAX_MESSAGE_SIZE {
+            return Err(ParseError);
         }
-
-        let flags = u16::from_be_bytes([packet[2], packet[3]]);
-        if flags & 0x8000 != 0 || (flags >> 11) & 0x0f != 0 {
-            return Err(ParseError::UnsupportedOperation);
+        if packet[2] & 0xfa != 0 || packet[3] & 0x4f != 0 {
+            return Err(ParseError);
         }
-        if flags & 0x0240 != 0 {
-            return Err(ParseError::InvalidFlags);
+        if packet[4..10] != [0, 1, 0, 0, 0, 0] || u16::from_be_bytes([packet[10], packet[11]]) > 1 {
+            return Err(ParseError);
         }
-        if u16::from_be_bytes([packet[4], packet[5]]) != 1 {
-            return Err(ParseError::QuestionCount);
-        }
-        if packet[6..10] != [0; 4] {
-            return Err(ParseError::UnexpectedRecords);
-        }
-
-        let question_end = parse_question_end(packet)?;
-        // The first question has no earlier DNS names to reference. Never echo
-        // pointers into sections omitted from the response.
-        let mut offset = HEADER_LEN;
-        while packet[offset] != 0 {
-            let length = packet[offset];
-            if length & 0xc0 != 0 {
-                return Err(ParseError::InvalidName);
+        // The first name has no previous name to reference. Never echo a pointer
+        // to a section that may be omitted from the response.
+        let mut offset = 12;
+        let mut expanded = 1;
+        loop {
+            let length = usize::from(*packet.get(offset).ok_or(ParseError)?);
+            offset += 1;
+            if length == 0 {
+                break;
             }
-            offset += usize::from(length) + 1;
+            expanded += length + 1;
+            if length > 63 || expanded > 255 {
+                return Err(ParseError);
+            }
+            offset += length;
+            if offset >= packet.len() {
+                return Err(ParseError);
+            }
         }
-        Ok(Self {
-            id: u16::from_be_bytes([packet[0], packet[1]]),
-            recursion_desired: flags & 0x0100 != 0,
-            question: packet[HEADER_LEN..question_end].to_vec(),
-        })
+        let message = decode_message(packet)?;
+        let query = message.queries.first().ok_or(ParseError)?;
+        if query.query_type() == RecordType::ZERO
+            || query.query_class() != DNSClass::IN
+            || message.signature.is_some()
+            || !message.additionals.is_empty()
+        {
+            return Err(ParseError);
+        }
+        Ok(Self { message })
     }
 
-    /// Encodes a response that retains the validated question.
+    /// Encode an error while preserving the validated question and RD flag.
     #[must_use]
     pub fn response(&self, rcode: Rcode) -> Vec<u8> {
-        let mut response = Vec::with_capacity(HEADER_LEN + self.question.len());
-        response.extend_from_slice(&self.id.to_be_bytes());
-        let flags =
-            0x8000 | if self.recursion_desired { 0x0100 } else { 0 } | u16::from(rcode as u8);
-        response.extend_from_slice(&flags.to_be_bytes());
-        response.extend_from_slice(&1_u16.to_be_bytes());
-        response.extend_from_slice(&[0; 6]);
-        response.extend_from_slice(&self.question);
-        response
+        let mut message = Message::response(self.message.metadata.id, OpCode::Query);
+        message.metadata.recursion_desired = self.message.metadata.recursion_desired;
+        message.metadata.recursion_available = true;
+        message.metadata.response_code = ResponseCode::from(0, rcode as u8);
+        message.queries.clone_from(&self.message.queries);
+        message
+            .to_vec()
+            .unwrap_or_else(|_| malformed_response(&self.message.metadata.id.to_be_bytes()))
     }
 }
 
-/// Builds a bounded error response when the query could not be parsed.
+/// Decode full responses, including compressed names, with byte and record caps.
+///
+/// # Errors
+/// Rejects malformed, oversized, or partially consumed messages.
+pub fn decode_message(packet: &[u8]) -> Result<Message, ParseError> {
+    if !(12..=MAX_MESSAGE_SIZE).contains(&packet.len()) {
+        return Err(ParseError);
+    }
+    let records: usize = packet[4..12]
+        .chunks_exact(2)
+        .map(|n| usize::from(u16::from_be_bytes([n[0], n[1]])))
+        .sum();
+    if records > 4096 {
+        return Err(ParseError);
+    }
+    let mut decoder = BinDecoder::new(packet);
+    let message = Message::read(&mut decoder).map_err(|_| ParseError)?;
+    if decoder.index() != packet.len() {
+        return Err(ParseError);
+    }
+    Ok(message)
+}
+
+/// Header-only FORMERR, bounded even for unparseable input.
 #[must_use]
 pub fn malformed_response(packet: &[u8]) -> Vec<u8> {
     let id = packet.get(..2).unwrap_or(&[0, 0]);
-    let recursion_desired = packet.get(2).is_some_and(|flags| flags & 0x01 != 0);
-    let flags =
-        0x8000 | if recursion_desired { 0x0100 } else { 0 } | u16::from(Rcode::FormErr as u8);
+    let rd = packet.get(2).is_some_and(|flag| flag & 1 != 0);
+    let flags = 0x8081_u16 | if rd { 0x0100 } else { 0 };
     [id, &flags.to_be_bytes(), &[0; 8]].concat()
 }
 
-/// Parse failures deliberately expose no packet detail to remote clients.
+/// Parse errors never include packet contents or client query names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ParseError {
-    InvalidLength,
-    UnsupportedOperation,
-    QuestionCount,
-    InvalidFlags,
-    UnexpectedRecords,
-    InvalidQuestion,
-    InvalidName,
-}
+pub struct ParseError;
 
-fn parse_question_end(packet: &[u8]) -> Result<usize, ParseError> {
-    let question_end = parse_name_end(packet, HEADER_LEN)?
-        .checked_add(4)
-        .ok_or(ParseError::InvalidName)?;
-    if question_end > packet.len() {
-        return Err(ParseError::InvalidName);
-    }
-    if packet[question_end - 4..question_end - 2] == [0, 0]
-        || packet[question_end - 2..question_end] == [0, 0]
-    {
-        return Err(ParseError::InvalidQuestion);
-    }
-    Ok(question_end)
-}
-
-fn parse_name_end(packet: &[u8], start: usize) -> Result<usize, ParseError> {
-    let mut index = start;
-    let mut labels = 0_usize;
-    let mut jumps = 0_usize;
-    let mut expanded_len = 1_usize;
-    let mut encoded_end = None;
-    loop {
-        let Some(&length) = packet.get(index) else {
-            return Err(ParseError::InvalidName);
-        };
-        index += 1;
-        if length == 0 {
-            return Ok(encoded_end.unwrap_or(index));
-        }
-        if length & 0xc0 == 0xc0 {
-            let Some(&tail) = packet.get(index) else {
-                return Err(ParseError::InvalidName);
-            };
-            let target = usize::from((u16::from(length & 0x3f) << 8) | u16::from(tail));
-            if target < HEADER_LEN || target >= index - 1 || jumps == 16 {
-                return Err(ParseError::InvalidName);
-            }
-            encoded_end.get_or_insert(index + 1);
-            index = target;
-            jumps += 1;
-            continue;
-        }
-        if length & 0xc0 != 0 || labels == 127 {
-            return Err(ParseError::InvalidName);
-        }
-        let end = index
-            .checked_add(usize::from(length))
-            .ok_or(ParseError::InvalidName)?;
-        if end > packet.len() {
-            return Err(ParseError::InvalidName);
-        }
-        expanded_len += usize::from(length) + 1;
-        if expanded_len > 255 {
-            return Err(ParseError::InvalidName);
-        }
-        index = end;
-        labels += 1;
-    }
+/// Whether input is a response. Never answer responses, which could form loops.
+#[must_use]
+pub fn is_response(packet: &[u8]) -> bool {
+    packet.get(2).is_some_and(|flags| flags & 0x80 != 0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Query, Rcode, parse_name_end};
-
-    const QUERY: [u8; 29] = [
-        0xbe, 0xef, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 7, b'e', b'x', b'a', b'm', b'p',
-        b'l', b'e', 3, b'c', b'o', b'm', 0, 0, 1, 0, 1,
+    use super::*;
+    const QUERY: &[u8] = &[
+        0xbe, 0xef, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3,
+        b'c', b'o', b'm', 0, 0, 1, 0, 1,
     ];
 
     #[test]
-    fn preserves_question_in_server_failure() {
-        let query = Query::parse(&QUERY).expect("valid query");
-        let response = query.response(Rcode::ServFail);
-        assert_eq!(&response[..6], &[0xbe, 0xef, 0x81, 0x02, 0, 1]);
+    fn preserves_question_and_advertises_recursion() {
+        let response = Query::parse(QUERY).unwrap().response(Rcode::ServFail);
+        assert_eq!(&response[..6], &[0xbe, 0xef, 0x81, 0x82, 0, 1]);
         assert_eq!(&response[12..], &QUERY[12..]);
     }
-
     #[test]
-    fn decodes_bounded_name_compression() {
-        let mut packet = vec![0; 12];
-        packet.extend_from_slice(&[
-            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
-        ]);
-        packet.extend_from_slice(&[3, b'w', b'w', b'w', 0xc0, 0x0c]);
-        assert_eq!(parse_name_end(&packet, 25), Ok(31));
-    }
-
-    #[test]
-    fn rejects_query_with_answer_records() {
-        let mut query = QUERY;
-        query[7] = 1;
-        assert!(Query::parse(&query).is_err());
-    }
-
-    #[test]
-    fn rejects_zero_question_type_or_class() {
-        let mut query = QUERY;
-        query[26] = 0;
-        assert!(Query::parse(&query).is_err());
-        query = QUERY;
-        query[28] = 0;
-        assert!(Query::parse(&query).is_err());
-    }
-
-    #[test]
-    fn rejects_forward_pointers_and_loops() {
-        let mut packet = vec![0; 12];
-        packet.extend_from_slice(&[0xc0, 0x0e, 0]);
-        assert!(parse_name_end(&packet, 12).is_err());
-        packet[13] = 12;
-        assert!(parse_name_end(&packet, 12).is_err());
-    }
-
-    #[test]
-    fn rejects_name_over_255_bytes() {
-        let mut packet = vec![0; 12];
-        for _ in 0..4 {
-            packet.push(63);
-            packet.extend_from_slice(&[b'a'; 63]);
+    fn rejects_trailing_bytes_missing_opt_and_bad_flags() {
+        let mut data = QUERY.to_vec();
+        data.push(0);
+        assert!(Query::parse(&data).is_err());
+        let mut data = QUERY.to_vec();
+        data[11] = 1;
+        assert!(Query::parse(&data).is_err());
+        for (index, mask) in [(2, 0x80), (2, 0x02), (3, 0x40)] {
+            let mut data = QUERY.to_vec();
+            data[index] |= mask;
+            assert!(Query::parse(&data).is_err());
         }
-        packet.push(0);
-        assert!(parse_name_end(&packet, 12).is_err());
+    }
+    #[test]
+    fn accepts_edns_and_decodes_compressed_answers() {
+        let mut data = QUERY.to_vec();
+        data[11] = 1;
+        data.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 128, 0, 0, 0]);
+        assert!(Query::parse(&data).is_ok());
+        let mut data = QUERY.to_vec();
+        data[2] = 0x81;
+        data[7] = 1;
+        data.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, 1]);
+        assert_eq!(decode_message(&data).unwrap().answers.len(), 1);
+        let end = data.len();
+        data[end - 16] = 0xc0;
+        data[end - 15] = 255;
+        assert!(decode_message(&data).is_err());
+    }
+    #[test]
+    fn rejects_all_truncated_queries_and_compression_loops() {
+        for end in 0..QUERY.len() {
+            assert!(Query::parse(&QUERY[..end]).is_err());
+        }
+        let mut data = QUERY.to_vec();
+        data[12] = 0xc0;
+        data[13] = 12;
+        assert!(Query::parse(&data).is_err());
+        for index in [26, 28] {
+            let mut data = QUERY.to_vec();
+            data[index] = 0;
+            assert!(Query::parse(&data).is_err());
+        }
+        let mut data = vec![0; 12];
+        data[5] = 1;
+        for _ in 0..4 {
+            data.push(63);
+            data.extend_from_slice(&[b'a'; 63]);
+        }
+        data.extend_from_slice(&[0, 0, 1, 0, 1]);
+        assert!(Query::parse(&data).is_err());
+    }
+    #[test]
+    fn malformed_inputs_never_panic() {
+        let mut state = 42_u32;
+        for len in 0..2048 {
+            let data: Vec<u8> = (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    state.to_be_bytes()[0]
+                })
+                .collect();
+            let _ = Query::parse(&data);
+            let _ = decode_message(&data);
+            assert_eq!(malformed_response(&data).len(), 12);
+        }
     }
 }

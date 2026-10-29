@@ -1,4 +1,5 @@
 /target/
+/.serena/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
@@ -13,3 +14,7 @@
 *.profraw
 *.profdata
 coverage/
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/release/

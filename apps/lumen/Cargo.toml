@@ -8,7 +8,8 @@ repository.workspace = true
 
 [dependencies]
 lumen-core = { path = "../../crates/lumen-core" }
-lumen-proto = { path = "../../crates/lumen-proto" }
+lumen-config = { path = "../../crates/lumen-config" }
+tokio.workspace = true
 
 [lints]
 workspace = true

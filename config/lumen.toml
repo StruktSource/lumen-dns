@@ -1,0 +1,39 @@
+# Lumen startup schema 1. Paths resolve beside this file.
+schema_version = 1
+metrics = "127.0.0.1:9153"
+
+[listen]
+udp = ["127.0.0.1:5353", "[::1]:5353"]
+tcp = ["127.0.0.1:5353", "[::1]:5353"]
+dot = []
+doh = []
+doq = []
+allow_clients = ["127.0.0.0/8", "::1/128"]
+# Enable encrypted transports only with an operator-managed certificate and key.
+# dot = ["127.0.0.1:8853", "[::1]:8853"]
+# doh = ["127.0.0.1:8443", "[::1]:8443"]
+# doq = ["127.0.0.1:8853", "[::1]:8853"]
+# certificate = "tls/cert.pem"
+# private_key = "tls/key.pem"
+
+[resolver]
+mode = "recursive"
+dnssec = true
+cache_entries = 4096
+nameserver_cache_entries = 256
+validation_cache_entries = 4096
+positive_ttl_secs = 86400
+negative_ttl_secs = 3600
+recursion_depth = 24
+# Optional overrides: BIND-format root hints and DNSKEY-format trust anchors.
+# root_hints = "root.hints"
+# trust_anchor = "root.key"
+
+[limits]
+max_in_flight = 128
+max_connections = 64
+max_clients = 4096
+queries_per_second = 100
+query_timeout_ms = 10000
+io_timeout_ms = 5000
+max_message_bytes = 4096

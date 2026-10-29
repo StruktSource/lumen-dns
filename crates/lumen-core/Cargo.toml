@@ -6,5 +6,25 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+lumen-config = { path = "../lumen-config" }
+lumen-proto = { path = "../lumen-proto" }
+lumen-resolver = { path = "../lumen-resolver" }
+tokio.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+h2 = "0.4"
+http = "1"
+bytes = "1"
+socket2 = "0.6"
+base64 = "0.22"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+
+[dev-dependencies]
+rcgen = "0.14"
+hickory-server.workspace = true
+hickory-proto.workspace = true
+tempfile = "3"
+
 [lints]
 workspace = true
