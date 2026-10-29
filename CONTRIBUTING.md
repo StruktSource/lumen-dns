@@ -14,6 +14,10 @@
 
 On Windows PowerShell, run `.\scripts\dev.ps1 check`.
 
+Documentation-only pushes and pull requests skip CI. Mixed code and documentation
+changes run the full checks; manual CI runs remain available. Version tags still
+trigger the release workflow.
+
 This checks format, Clippy, and offline tests using the committed lockfile. Tests
 need IPv4/IPv6 loopback sockets. CI defines Linux, macOS, Windows, MSRV, audit,
 and fuzz jobs. See [verification](docs/verification.md) for commands and limits.

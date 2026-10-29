@@ -2,8 +2,24 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.mdx'
+      - '**/*.rst'
+      - 'docs/**'
+      - '.agent/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE/**'
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.mdx'
+      - '**/*.rst'
+      - 'docs/**'
+      - '.agent/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE/**'
   workflow_dispatch:
 
 permissions:
