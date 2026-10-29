@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 lumen-core = { path = "../../crates/lumen-core" }
+lumen-proto = { path = "../../crates/lumen-proto" }
 
 [lints]
 workspace = true

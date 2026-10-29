@@ -4,6 +4,7 @@ members = [
   "apps/lumenctl",
   "crates/lumen-api",
   "crates/lumen-core",
+  "crates/lumen-proto",
 ]
 resolver = "3"
 

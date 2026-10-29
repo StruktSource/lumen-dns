@@ -53,6 +53,13 @@ Rules:
 - Do not expose API access in first release. Reserve API crate, route namespace, versioning, auth, and audit model now.
 - Resolve recursively or forward upstream only when operator selects that module at setup.
 
+## Current Phase 1 slice
+
+- `lumen-proto` parses one bounded, uncompressed DNS question and encodes safe error responses.
+- `lumen` listens on UDP and TCP when started with `lumen --bind ADDRESS`.
+- Until resolver work exists, validated queries return `SERVFAIL`; malformed packets return `FORMERR`.
+- This transport base is for development only. Do not point router or device DNS at it yet.
+
 ## Data and privacy defaults
 
 - SQLite stores configuration, list metadata, devices, groups, profiles, and future opt-in history.

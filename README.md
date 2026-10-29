@@ -11,7 +11,7 @@ Foundation stage. **Not a DNS server yet.** Do not use Lumen in production.
 
 | Available now | Planned first release |
 | --- | --- |
-| Rust workspace, CI, release workflow, Docker base, CLI/UI/API foundations | Resolver, DNSSEC, filtering, cache, UDP, TCP, DoH, DoT, DoQ |
+| Rust workspace, CI, Docker base, CLI/UI/API foundations, bounded DNS parser, UDP/TCP transport base | Recursive resolver, DNSSEC, cache, filtering, DoH, DoT, DoQ |
 
 ## ✨ Direction
 
