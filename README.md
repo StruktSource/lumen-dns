@@ -49,7 +49,8 @@ curl http://127.0.0.1:9153/metrics
 forwarding example; running it sends DNS to its configured upstream.
 
 See [resolver guide](docs/resolver.md), [configuration reference](docs/configuration.md),
-[security boundaries](docs/threat-model.md), and [verification](docs/verification.md).
+[security boundaries](docs/threat-model.md), [verification](docs/verification.md),
+and [performance snapshots](docs/performance.md).
 Track remaining work in [TODO](TODO.md) and [implementation checklist](docs/progress.md).
 The [product plan](DNS_SERVICE_PLAN.md) describes the complete intended product.
 
