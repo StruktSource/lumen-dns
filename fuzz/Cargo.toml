@@ -1,0 +1,30 @@
+[package]
+name = "lumen-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lumen-proto = { path = "../crates/lumen-proto" }
+lumen-config = { path = "../crates/lumen-config" }
+toml = "0.9"
+
+[[bin]]
+name = "dns_wire"
+path = "fuzz_targets/dns_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

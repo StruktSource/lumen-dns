@@ -26,11 +26,17 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        run: rustup toolchain install 1.95.0 --profile minimal
+        run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
       - name: Check
         run: cargo +1.95.0 check --workspace --all-targets --locked
       - name: Test
+        if: runner.os != 'Windows'
         run: cargo +1.95.0 test --workspace --locked
+      - name: Windows development checks
+        if: runner.os == 'Windows'
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: .\scripts\dev.ps1 check
 
   lint:
     name: Format and lint
@@ -45,3 +51,41 @@ jobs:
         run: cargo +1.95.0 fmt --check
       - name: Clippy
         run: cargo +1.95.0 clippy --workspace --all-targets --locked -- -D warnings
+
+  audit:
+    name: Dependency security audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.95.0 --profile minimal
+      - run: cargo +1.95.0 install cargo-audit --version 0.22.1 --locked
+      - run: cargo +1.95.0 audit
+
+  fuzz:
+    name: DNS and config fuzz smoke tests
+    env:
+      ASAN_OPTIONS: quarantine_size_mb=32:thread_local_quarantine_size_kb=64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
+      - run: cargo +nightly metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
+      - name: Seed DNS corpus
+        run: mkdir -p fuzz/corpus/dns_wire fuzz/corpus/config && cp fuzz/seeds/dns_wire/* fuzz/corpus/dns_wire/ && cp fuzz/seeds/config/* fuzz/corpus/config/
+      - run: cargo +nightly fuzz run dns_wire -- -max_total_time=15 -max_len=65535 -rss_limit_mb=512
+      - run: cargo +nightly fuzz run config -- -max_total_time=15 -max_len=65536 -rss_limit_mb=512
+
+  msrv:
+    name: Minimum supported Rust
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.88.0 --profile minimal
+      - run: cargo +1.88.0 check --workspace --all-targets --locked
