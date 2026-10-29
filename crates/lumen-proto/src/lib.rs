@@ -22,7 +22,7 @@ pub struct Query {
 }
 
 impl Query {
-    /// Parses one standard DNS query with bounded compression decoding.
+    /// Parses one standard DNS query with an uncompressed question name.
     ///
     /// # Errors
     ///
@@ -48,6 +48,16 @@ impl Query {
         }
 
         let question_end = parse_question_end(packet)?;
+        // The first question has no earlier DNS names to reference. Never echo
+        // pointers into sections omitted from the response.
+        let mut offset = HEADER_LEN;
+        while packet[offset] != 0 {
+            let length = packet[offset];
+            if length & 0xc0 != 0 {
+                return Err(ParseError::InvalidName);
+            }
+            offset += usize::from(length) + 1;
+        }
         Ok(Self {
             id: u16::from_be_bytes([packet[0], packet[1]]),
             recursion_desired: flags & 0x0100 != 0,
@@ -99,7 +109,9 @@ fn parse_question_end(packet: &[u8]) -> Result<usize, ParseError> {
     if question_end > packet.len() {
         return Err(ParseError::InvalidName);
     }
-    if packet[question_end - 4..question_end] == [0, 0, 0, 0] {
+    if packet[question_end - 4..question_end - 2] == [0, 0]
+        || packet[question_end - 2..question_end] == [0, 0]
+    {
         return Err(ParseError::InvalidQuestion);
     }
     Ok(question_end)
@@ -181,6 +193,16 @@ mod tests {
     fn rejects_query_with_answer_records() {
         let mut query = QUERY;
         query[7] = 1;
+        assert!(Query::parse(&query).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_question_type_or_class() {
+        let mut query = QUERY;
+        query[26] = 0;
+        assert!(Query::parse(&query).is_err());
+        query = QUERY;
+        query[28] = 0;
         assert!(Query::parse(&query).is_err());
     }
 

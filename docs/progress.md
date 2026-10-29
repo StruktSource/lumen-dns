@@ -22,7 +22,8 @@ documented. It does **not** mean production-ready unless stated.
 
 ## Phase 1 — DNS transport and resolver
 
-- [x] Bounded DNS wire parser with bounded name-compression decoding
+- [x] Bounded single-question parser and bounded compression-pointer validation
+- [ ] Full DNS message and compressed-name decoding for resolver responses
 - [x] DNS error-response encoder
 - [x] Unit tests for valid and invalid DNS question handling
 - [x] UDP listener base
