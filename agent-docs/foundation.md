@@ -1,9 +1,9 @@
-# Strukt Lumen Foundation
+# Lumen Foundation
 
 ## Identity
 
-- Product name: **Strukt Lumen**.
-- Short name: **Lumen**.
+- Product name: **Lumen**.
+- Organization: **Strukt**.
 - Purpose: private, self-hosted DNS filtering and validating resolver.
 - Implementation language: Rust, stable channel.
 
@@ -62,22 +62,22 @@ Use Semantic Versioning: `MAJOR.MINOR.PATCH`.
 
 ## License
 
-Use **Apache-2.0 OR MIT** dual license.
+Use **Apache-2.0**.
 
 Why:
 
-- MIT stays simple for users and small self-hosted projects.
-- Apache-2.0 adds clear patent rights and patent termination terms.
-- Dual licensing maximizes adoption while protecting contributors from unclear patent terms.
+- Clear patent rights and patent-termination terms protect contributors and users.
+- Permissive terms suit open-source self-hosting, commercial use, and distribution.
+- One license removes ambiguity for contributors and downstream packagers.
 
-Ship `LICENSE-MIT` and `LICENSE-APACHE` at repository root. New source files state
-`SPDX-License-Identifier: MIT OR Apache-2.0`. Accept contributions under same dual license.
+Ship `LICENSE` at repository root. New source files state
+`SPDX-License-Identifier: Apache-2.0`. Accept contributions under Apache-2.0.
 
 ## Initial repository files
 
 1. `Cargo.toml` workspace manifest.
 2. `rust-toolchain.toml` pinned to current stable Rust.
-3. `LICENSE-MIT` and `LICENSE-APACHE`.
+3. `LICENSE` with Apache-2.0 text.
 4. `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `CODE_OF_CONDUCT.md`.
 5. `docs/architecture.md` and `docs/threat-model.md`.
 6. CI for `fmt`, `clippy`, tests, dependency audit, fuzz smoke test, and multi-architecture build.

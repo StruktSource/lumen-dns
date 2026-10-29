@@ -8,7 +8,7 @@ Build one ultra-light, high-performance, fully open-source DNS service.
 It joins Pi-hole or AdGuard-style filtering with an Unbound-style recursive,
 validating cache. Privacy-first. Fully self-hosted.
 
-Product name: **Strukt Lumen**.
+Product name: **Lumen**. Organization: **Strukt**.
 
 ### Platform and runtime
 
