@@ -13,6 +13,7 @@ Product name: **Lumen**. Organization: **Strukt**.
 ### Platform and runtime
 
 - Rust implementation.
+- Setup lets operator enable only needed modules. Built-in modules come first; plugin model comes later.
 - x86_64 and ARM64 support from first release.
 - IPv4 and IPv6 end-to-end.
 - Docker, Docker Compose, Proxmox LXC, Unraid, bare-metal, and Linux service-manager support.
@@ -46,6 +47,7 @@ Product name: **Lumen**. Organization: **Strukt**.
 - Plain readable config file with safe privacy defaults.
 - Full CLI for config, health, cache, list, device, profile, and service actions.
 - Optional web UI for setup, activity, devices, policies, and diagnostics.
+- First release includes CLI, config, and a blank UI shell. API routes and access stay disabled until API security work is complete.
 - Secure local API by default. Strong auth, authorization, rate limits, and audit records when exposed.
 - Stable API with webhooks and integrations for Home Assistant, scripts, and user tooling.
 - Hot reload for safe config and list changes with no resolver downtime.
@@ -56,6 +58,7 @@ Product name: **Lumen**. Organization: **Strukt**.
 - Grafana dashboard definitions and documented metric names.
 - No external telemetry, tracking, or cloud dependency.
 - Query logging disabled or minimized by default. Retention, redaction, and access configurable.
+- Default dashboards show aggregate numbers only. Optional anonymous or full query logs default to seven days; each profile, device group, detail level, and retention period stays configurable.
 - DNS data stays on user systems unless user configures an upstream resolver.
 
 ### Reliability, security, and distribution
@@ -75,10 +78,11 @@ Product name: **Lumen**. Organization: **Strukt**.
 2. Write architecture, protocol scope, threat model, privacy model, and compatibility rules.
 3. Define config schema, API versioning, error model, and metrics names.
 4. Create CI for formatting, linting, tests, fuzzing, releases, SBOM, and multi-arch containers.
+5. Add empty UI and API extension points without enabling API access.
 
 ### Phase 1 — Secure resolver core
 
-1. Implement UDP and TCP listeners for IPv4 and IPv6.
+1. Implement UDP, TCP, DoH, DoT, and DoQ listeners for IPv4 and IPv6.
 2. Implement recursive resolver, cache, root hints, delegation handling, and DNSSEC validation.
 3. Add upstream-forwarding mode and encrypted upstream support.
 4. Add bounded memory, timeouts, retries, rate limits, and basic query metrics.

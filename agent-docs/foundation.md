@@ -45,6 +45,22 @@ Rules:
 - Binaries remain thin. They parse startup options and call library crates.
 - New crates need a clear owner, tests, documentation, and dependency reason.
 
+## First-release boundaries
+
+- Ship recursive resolution, filtering, DNSSEC validation, UDP, TCP, DoH, DoT, and DoQ.
+- Setup chooses enabled built-in modules. Future plugins use separate, permissioned extension points.
+- Ship CLI, config file, and a blank UI shell.
+- Do not expose API access in first release. Reserve API crate, route namespace, versioning, auth, and audit model now.
+- Resolve recursively or forward upstream only when operator selects that module at setup.
+
+## Data and privacy defaults
+
+- SQLite stores configuration, list metadata, devices, groups, profiles, and future opt-in history.
+- Query logs default off.
+- Dashboards use aggregate counters only by default.
+- Optional anonymous and full history modes default to seven-day retention.
+- Operators choose retention, devices/groups, and logged fields. Privacy choices are not global-only switches.
+
 ## Version policy
 
 Use Semantic Versioning: `MAJOR.MINOR.PATCH`.
