@@ -174,11 +174,9 @@ docker run --rm --network none --read-only --cap-drop ALL \
 
 ## Not established by these checks
 
-Windows and x86_64 native execution, the PowerShell script on a Windows host,
-and hosted GitHub CI/release execution were not run in this session. CI definitions
-cover those workflows; YAML syntax alone does not prove a hosted run. GitHub issue
-lookup was unavailable through the connected account. No remote release was
-published.
+The PowerShell packaging script was not run by the CI workflow, and the release
+workflow was not triggered because no release tag was created. No remote release
+or multi-architecture image was published.
 
 External DNS/DNSSEC conformance suites, extended soak/abuse tests, production
 memory/performance measurements, automatic trust rollover, signed images,
@@ -202,13 +200,20 @@ and passed these checks:
 
 The temporary Compose stack and Kind cluster were removed. The requested local
 multi-architecture build was stopped before completion; Linux AMD64 and other
-native targets remain for hosted CI.
+native targets were left to hosted CI.
+
+## 2026-10-30 hosted platform verification
+
+[CI run 41116220947](https://github.com/StruktSource/lumen-dns/actions/runs/41116220947)
+passed native build, test, and config checks on Linux AMD64/ARM64, macOS
+AMD64/ARM64, Windows AMD64, and experimental Windows ARM64. Native OCI runtime
+checks passed on Linux AMD64/ARM64. Rootless Podman checks passed. The Kind job
+passed Helm lint/render, raw-manifest rollout, and deterministic UDP/TCP DNS
+queries through the ClusterIP Service.
 
 ## CI socket regression fixes
 
 CI reported a Windows QUIC client socket error and a Linux TCP restart bind
 error. The DoQ test now supplies an explicitly bound socket. Unix TCP listeners
 set `SO_REUSEADDR`, and the shutdown regression restarts the actual service.
-After the fix, the full macOS ARM64 checks and all eight Linux ARM64 container
-integration tests passed. Windows and Ubuntu x86_64 hosted CI must still verify
-their respective fixes.
+After the fix, hosted native checks passed on every configured runner.

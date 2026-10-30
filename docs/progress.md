@@ -71,8 +71,9 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [x] Versioned native archive, checksum, SBOM/provenance, and OCI publish definitions
 - [x] Restricted Docker Compose, Kubernetes, Helm, and systemd deployment files
 - [x] Docker, Podman, Kubernetes, bare-metal, Proxmox, Unraid, Pi, macOS, and Windows guides
-- [ ] Multi-architecture image publishing and platform runtime validation
-- [ ] Passing native CI evidence for every configured runner and release artifact
+- [x] Hosted native runtime evidence for every configured runner
+- [x] Hosted OCI, rootless Podman, and Kind UDP/TCP runtime smoke
+- [ ] Tagged multi-architecture image publishing and release-artifact validation
 - [ ] Real Proxmox, Unraid, Raspberry Pi, and dual-stack Kubernetes validation
 - [ ] Backup, restore, upgrade, removal tests
 
