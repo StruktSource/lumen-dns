@@ -70,12 +70,17 @@ jobs:
           persist-credentials: false
       - uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
       - run: helm lint deploy/helm/lumen
-      - run: docker build --tag lumen:ci . && kind load docker-image lumen:ci --name chart-testing
+      - run: docker build --tag lumen:ci .
+      - run: docker pull python:3.14-alpine
+      - run: kind load docker-image lumen:ci python:3.14-alpine --name chart-testing
       - run: kubectl apply -k deploy/kubernetes && kubectl rollout status deployment/lumen --timeout=120s
       - run: kubectl create configmap dns-smoke --from-file=dns-smoke.py=scripts/dns-smoke.py
       - run: kubectl apply -f deploy/kubernetes/smoke-pod.yaml
       - run: kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/dns-smoke --timeout=120s
-      - run: kubectl logs dns-smoke
+      - if: failure()
+        run: kubectl describe pod dns-smoke
+      - if: always()
+        run: kubectl logs dns-smoke
 
   build:
     name: Archive (${{ matrix.platform }})
