@@ -17,9 +17,9 @@ Lumen is pre-release. No platform is marked supported yet.
 | macOS AMD64 | Build-only | native GitHub job configured; result pending |
 | Windows AMD64 | Build-only | native GitHub job configured; result pending |
 | Windows ARM64 | Experimental | native experimental job configured; result pending |
-| OCI AMD64/ARM64 | Experimental | native image jobs and multi-arch release job configured |
+| OCI AMD64/ARM64 | Experimental | ARM64 local runtime passed; AMD64 native CI pending |
 | Podman rootless | Experimental | Linux CI smoke job configured; result pending |
-| Kubernetes/Helm | Experimental | Kind UDP/TCP smoke job configured; result pending |
+| Kubernetes/Helm | Experimental | local Kind raw-manifest and Helm UDP/TCP smoke passed; hosted CI pending |
 | Proxmox LXC | Planned | generic Linux guidance only; no Proxmox host test |
 | Unraid | Planned | OCI guidance only; no Unraid host test |
 | Raspberry Pi ARM64 | Planned | covered by Linux ARM64 build, not hardware-tested |

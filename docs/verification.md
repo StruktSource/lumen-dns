@@ -184,6 +184,26 @@ External DNS/DNSSEC conformance suites, extended soak/abuse tests, production
 memory/performance measurements, automatic trust rollover, signed images,
 reproducible releases, and independent security review remain release gates.
 
+## 2026-10-30 local deployment verification
+
+On an Apple M4 host with OrbStack 29.8.2, the native Linux ARM64 OCI image built
+and passed these checks:
+
+- UID 65532, read-only root filesystem, config validation, startup, and clean `SIGTERM` shutdown.
+- Real UDP and TCP DNS queries through mapped host ports using `scripts/dns-smoke.py`.
+- Docker Compose config, startup on host port 53, UDP/TCP DNS replies, and clean removal.
+- Raw Kubernetes manifests in Kind 0.33.0 with working rollout, Service, ConfigMap,
+  NetworkPolicy, readiness probe, and UDP/TCP smoke pod.
+- Helm chart install in a separate namespace with the same UDP/TCP smoke checks.
+- Both Kubernetes deployments ran as UID 65532, rejected root-filesystem writes,
+  and had service-account token mounting disabled.
+- The local release script, macOS ARM64 archive, required archive contents,
+  SHA-256 verification, and unsafe version-string rejection passed.
+
+The temporary Compose stack and Kind cluster were removed. The requested local
+multi-architecture build was stopped before completion; Linux AMD64 and other
+native targets remain for hosted CI.
+
 ## CI socket regression fixes
 
 CI reported a Windows QUIC client socket error and a Linux TCP restart bind
