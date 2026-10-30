@@ -1,21 +1,67 @@
-# Network deployment example. Review ACLs before use.
+# Lumen release defaults. Safe local recursive DNS with no optional features.
+# Full reference: ../docs/configuration.md
 schema_version = 1
+# Optional local aggregate metrics. Disabled by default.
+# metrics = "127.0.0.1:9153"
 
+# Local DNS listeners. Change both addresses and allow_clients for LAN use.
 [listen]
-udp = ["0.0.0.0:5353", "[::]:5353"]
-tcp = ["0.0.0.0:5353", "[::]:5353"]
-allow_clients = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
+udp = ["127.0.0.1:5353", "[::1]:5353"]
+tcp = ["127.0.0.1:5353", "[::1]:5353"]
+# Encrypted listeners stay off until certificate and private_key are set.
+dot = []
+doh = []
+doq = []
+# Only this host may query Lumen by default.
+allow_clients = ["127.0.0.0/8", "::1/128"]
+# Optional encrypted listener example. See ../docs/resolver.md.
+# dot = ["127.0.0.1:8853", "[::1]:8853"]
+# doh = ["127.0.0.1:8443", "[::1]:8443"]
+# doq = ["127.0.0.1:8853", "[::1]:8853"]
+# certificate = "tls/cert.pem"
+# private_key = "tls/key.pem"
 
+# Built-in iterative recursion with local DNSSEC validation. No provider is used.
 [resolver]
 mode = "recursive"
 dnssec = true
+# Bounded response, delegation, and validation caches.
+cache_entries = 4096
+nameserver_cache_entries = 256
+validation_cache_entries = 4096
+# Cached data never lives longer than these TTL ceilings.
+positive_ttl_secs = 86400
+negative_ttl_secs = 3600
+# Bound iterative query and nameserver recursion.
+recursion_depth = 24
+# Optional overrides: BIND-format root hints and DNSKEY-format trust anchors.
+# root_hints = "root.hints"
+# trust_anchor = "root.key"
 
+# Optional timeout-only fallback. No endpoint is selected or contacted by default.
 [resolver.fallback]
 enabled = false
+# These budgets matter only after fallback is enabled.
+recursive_timeout_ms = 7000
+timeout_ms = 2000
+attempts = 1
+# Add an upstream only when enabling fallback. Encrypted protocols need server_name.
+# [[resolver.fallback.upstreams]]
+# address = "1.1.1.1:853"
+# protocol = "tls"
+# server_name = "cloudflare-dns.com"
+# doh_path = "/dns-query" # HTTPS only; defaults to /dns-query.
 
-[filtering.action]
-kind = "nxdomain"
+# Shared work and network bounds. See ../docs/configuration.md#limits.
+[limits]
+max_in_flight = 128
+max_connections = 64
+max_clients = 4096
+queries_per_second = 100
+# Whole-query deadline, then per-frame and handshake deadline.
+query_timeout_ms = 10000
+io_timeout_ms = 5000
+# Maximum accepted DNS message size.
+max_message_bytes = 4096
 
-[filtering.rules]
-# Reserved name used by deterministic deployment smoke tests.
-block = ["=health.lumen.invalid"]
+# Filtering is empty by default. See filtering.example.toml to opt in.

@@ -6,14 +6,21 @@ schema_version = 1
 
 # Local DNS listeners. Change both addresses and allow_clients for LAN use.
 [listen]
-udp = ["127.0.0.1:5353", "[::1]:5353"]
-tcp = ["127.0.0.1:5353", "[::1]:5353"]
+udp = ["0.0.0.0:5353", "[::]:5353"]
+tcp = ["0.0.0.0:5353", "[::]:5353"]
 # Encrypted listeners stay off until certificate and private_key are set.
 dot = []
 doh = []
 doq = []
 # Only this host may query Lumen by default.
-allow_clients = ["127.0.0.0/8", "::1/128"]
+allow_clients = [
+    "127.0.0.0/8",
+    "::1/128",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "fc00::/7"
+]
 # Optional encrypted listener example. See ../docs/resolver.md.
 # dot = ["127.0.0.1:8853", "[::1]:8853"]
 # doh = ["127.0.0.1:8443", "[::1]:8443"]
