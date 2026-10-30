@@ -108,7 +108,7 @@ jobs:
       - run: helm lint deploy/helm/lumen
       - run: helm template ci deploy/helm/lumen > /dev/null
       - run: docker build --tag lumen:ci .
-      - run: kind load docker-image lumen:ci
+      - run: kind load docker-image lumen:ci --name chart-testing
       - run: kubectl apply -k deploy/kubernetes
       - run: kubectl rollout status deployment/lumen --timeout=120s
       - run: kubectl create configmap dns-smoke --from-file=dns-smoke.py=scripts/dns-smoke.py
