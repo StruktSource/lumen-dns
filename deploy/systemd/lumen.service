@@ -1,0 +1,29 @@
+[Unit]
+Description=Lumen DNS service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lumen
+Group=lumen
+ExecStartPre=/usr/local/bin/lumen --config /etc/lumen/lumen.toml --check
+ExecStart=/usr/local/bin/lumen --config /etc/lumen/lumen.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

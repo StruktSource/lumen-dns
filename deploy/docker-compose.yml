@@ -1,0 +1,16 @@
+services:
+  lumen:
+    image: ghcr.io/struktsource/lumen-dns:0.1.0
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 15s
+    restart: unless-stopped
+    ports:
+      - "53:5353/udp"
+      - "53:5353/tcp"
+    volumes:
+      - ./lumen.toml:/etc/lumen/lumen.toml:ro
+    tmpfs:
+      - /tmp:size=16m,mode=1777

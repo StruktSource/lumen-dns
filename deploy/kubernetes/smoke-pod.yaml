@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dns-smoke
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: smoke
+      image: python:3.14-alpine
+      command: ["/bin/sh", "-c"]
+      args:
+        - >-
+          python /smoke/dns-smoke.py --host lumen --protocol udp &&
+          python /smoke/dns-smoke.py --host lumen --protocol tcp
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: script, mountPath: /smoke, readOnly: true }
+  volumes:
+    - name: script
+      configMap: { name: dns-smoke }

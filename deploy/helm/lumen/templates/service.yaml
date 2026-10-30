@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lumen.fullname" . }}
+  labels:
+    {{- include "lumen.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- if .Values.service.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ .Values.service.ipFamilyPolicy }}
+  {{- end }}
+  {{- with .Values.service.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    {{- include "lumen.labels" . | nindent 4 }}
+  ports:
+    - { name: dns-udp, port: 53, targetPort: dns-udp, protocol: UDP }
+    - { name: dns-tcp, port: 53, targetPort: dns-tcp, protocol: TCP }

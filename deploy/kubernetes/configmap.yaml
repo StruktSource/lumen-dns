@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lumen
+data:
+  lumen.toml: |
+    schema_version = 1
+    [listen]
+    udp = ["0.0.0.0:5353", "[::]:5353"]
+    tcp = ["0.0.0.0:5353", "[::]:5353"]
+    allow_clients = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
+    [resolver]
+    mode = "recursive"
+    dnssec = true
+    [resolver.fallback]
+    enabled = false
+    [filtering.action]
+    kind = "nxdomain"
+    [filtering.rules]
+    block = ["=health.lumen.invalid"]

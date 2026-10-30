@@ -1,0 +1,27 @@
+replicaCount: 1
+image:
+  repository: ghcr.io/struktsource/lumen-dns
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  ipFamilyPolicy: ""
+  ipFamilies: []
+resources:
+  requests: { cpu: 50m, memory: 32Mi }
+  limits: { cpu: "1", memory: 256Mi }
+networkPolicy:
+  enabled: true
+tls:
+  existingSecret: ""
+config: |
+  schema_version = 1
+  [listen]
+  udp = ["0.0.0.0:5353", "[::]:5353"]
+  tcp = ["0.0.0.0:5353", "[::]:5353"]
+  allow_clients = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
+  [resolver]
+  mode = "recursive"
+  dnssec = true
+  [resolver.fallback]
+  enabled = false

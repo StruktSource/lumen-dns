@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lumen.fullname" . }}
+  labels:
+    {{- include "lumen.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "lumen.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lumen.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: lumen
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--config", "/etc/lumen/lumen.toml"]
+          ports:
+            - { name: dns-udp, containerPort: 5353, protocol: UDP }
+            - { name: dns-tcp, containerPort: 5353, protocol: TCP }
+          readinessProbe:
+            tcpSocket: { port: dns-tcp }
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: dns-tcp }
+            initialDelaySeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/lumen, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+            {{- if .Values.tls.existingSecret }}
+            - { name: tls, mountPath: /etc/lumen/tls, readOnly: true }
+            {{- end }}
+      volumes:
+        - name: config
+          configMap: { name: {{ include "lumen.fullname" . }} }
+        - name: tmp
+          emptyDir: { sizeLimit: 16Mi }
+        {{- if .Values.tls.existingSecret }}
+        - name: tls
+          secret: { secretName: {{ .Values.tls.existingSecret }} }
+        {{- end }}
