@@ -2,6 +2,7 @@
 //! An isolated DNS hierarchy. Port mapping exists only in this test runtime.
 #![allow(clippy::too_many_lines)]
 use super::*;
+use hickory_server::resolver::config::ProtocolConfig;
 use hickory_server::{
     net::runtime::{DnsUdpSocket, RuntimeProvider, TokioTime},
     proto::{
@@ -12,6 +13,7 @@ use hickory_server::{
         },
     },
 };
+use lumen_config::Upstream;
 use std::{
     collections::HashMap,
     future::Future,
@@ -64,6 +66,23 @@ impl RuntimeProvider for TestRuntime {
             })
         })
     }
+}
+
+#[test]
+fn custom_doh_path_reaches_engine_config() {
+    let upstream = Upstream {
+        address: "76.76.2.11:443".parse().unwrap(),
+        protocol: UpstreamProtocol::Https,
+        server_name: Some("freedns.controld.com".into()),
+        doh_path: Some("/uncensored".into()),
+    };
+    let server = name_server_config(&upstream);
+    assert_eq!(server.connections[0].port, 443);
+    assert!(matches!(
+        &server.connections[0].protocol,
+        ProtocolConfig::Https { server_name, path }
+            if server_name.as_ref() == "freedns.controld.com" && path.as_ref() == "/uncensored"
+    ));
 }
 #[async_trait]
 impl DnsUdpSocket for TestUdp {

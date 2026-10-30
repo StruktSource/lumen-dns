@@ -9,6 +9,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod providers;
+
 /// Startup configuration; relative paths resolve beside the config file.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -135,6 +137,9 @@ pub struct Upstream {
     pub address: SocketAddr,
     pub protocol: UpstreamProtocol,
     pub server_name: Option<String>,
+    /// Optional `DoH` request path. The default is `/dns-query`.
+    #[serde(default)]
+    pub doh_path: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -372,6 +377,22 @@ impl Config {
             {
                 return Err("encrypted upstream needs server_name".into());
             }
+            match &upstream.doh_path {
+                Some(_) if upstream.protocol != UpstreamProtocol::Https => {
+                    return Err("doh_path is only valid for https upstreams".into());
+                }
+                Some(path)
+                    if path.len() <= 1024
+                        && path.starts_with('/')
+                        && !path.contains(['?', '#'])
+                        && path.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) => {}
+                None => {}
+                Some(_) => {
+                    return Err(
+                        "doh_path must be an absolute ASCII path without query or fragment".into(),
+                    );
+                }
+            }
             if self.upstream_points_to_listener(upstream.address) {
                 return Err("upstream must not point to a Lumen listener".into());
             }
@@ -457,12 +478,24 @@ mod tests {
             address: "1.1.1.1:853".parse().unwrap(),
             protocol: UpstreamProtocol::Tls,
             server_name: None,
+            doh_path: None,
         });
         assert!(config.validate().is_err());
         config.resolver.mode = Mode::Forward;
         assert!(config.validate().is_err());
         config.resolver.upstreams[0].server_name = Some("cloudflare-dns.com".into());
         assert!(config.validate().is_ok());
+        config.resolver.upstreams[0].protocol = UpstreamProtocol::Https;
+        config.resolver.upstreams[0].address.set_port(443);
+        config.resolver.upstreams[0].doh_path = Some("/custom-path".into());
+        assert!(config.validate().is_ok());
+        config.resolver.upstreams[0].doh_path = Some("https://bad.example/dns-query".into());
+        assert!(config.validate().is_err());
+        config.resolver.upstreams[0].doh_path = Some("/dns-query?bad=true".into());
+        assert!(config.validate().is_err());
+        config.resolver.upstreams[0].doh_path = Some("/dns-query".into());
+        config.resolver.upstreams[0].protocol = UpstreamProtocol::Tls;
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -474,6 +507,7 @@ mod tests {
             address: "1.1.1.1:853".parse().unwrap(),
             protocol: UpstreamProtocol::Tls,
             server_name: Some("cloudflare-dns.com".into()),
+            doh_path: None,
         });
         assert!(config.validate().is_ok());
         config.resolver.fallback.recursive_timeout_ms = 9000;

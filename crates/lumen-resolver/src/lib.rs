@@ -202,26 +202,7 @@ fn forward_resolver(
     options: ResolverOpts,
     anchors: Option<Arc<TrustAnchors>>,
 ) -> Result<hickory_server::resolver::Resolver<TokioRuntimeProvider>, String> {
-    let servers = upstreams
-        .iter()
-        .map(|upstream| {
-            let name = Arc::from(upstream.server_name.as_deref().unwrap_or(""));
-            let mut server = match upstream.protocol {
-                UpstreamProtocol::Udp => NameServerConfig::udp_and_tcp(upstream.address.ip()),
-                UpstreamProtocol::Tcp => NameServerConfig::tcp(upstream.address.ip()),
-                UpstreamProtocol::Tls => NameServerConfig::tls(upstream.address.ip(), name),
-                UpstreamProtocol::Https => {
-                    NameServerConfig::https(upstream.address.ip(), name, None)
-                }
-                UpstreamProtocol::Quic => NameServerConfig::quic(upstream.address.ip(), name),
-            };
-            server.trust_negative_responses = false;
-            for connection in &mut server.connections {
-                connection.port = upstream.address.port();
-            }
-            server
-        })
-        .collect();
+    let servers = upstreams.iter().map(name_server_config).collect();
     let mut builder = hickory_server::resolver::Resolver::builder_with_config(
         ResolverConfig::from_parts(None, vec![], servers),
         TokioRuntimeProvider::default(),
@@ -254,6 +235,26 @@ fn forward_resolver(
     builder
         .build()
         .map_err(|_| "cannot build forwarding resolver".into())
+}
+
+fn name_server_config(upstream: &lumen_config::Upstream) -> NameServerConfig {
+    let name = Arc::from(upstream.server_name.as_deref().unwrap_or(""));
+    let mut server = match upstream.protocol {
+        UpstreamProtocol::Udp => NameServerConfig::udp_and_tcp(upstream.address.ip()),
+        UpstreamProtocol::Tcp => NameServerConfig::tcp(upstream.address.ip()),
+        UpstreamProtocol::Tls => NameServerConfig::tls(upstream.address.ip(), name),
+        UpstreamProtocol::Https => NameServerConfig::https(
+            upstream.address.ip(),
+            name,
+            upstream.doh_path.as_deref().map(Arc::from),
+        ),
+        UpstreamProtocol::Quic => NameServerConfig::quic(upstream.address.ip(), name),
+    };
+    server.trust_negative_responses = false;
+    for connection in &mut server.connections {
+        connection.port = upstream.address.port();
+    }
+    server
 }
 
 fn recursive_zone(

@@ -1,0 +1,250 @@
+# Official upstream catalog. Metadata only: no preset is enabled by default.
+# test_status records Lumen reachability tests, not provider claims.
+catalog_version = 1
+
+[[providers]]
+id = "dns4eu-unfiltered"
+name = "DNS4EU Unfiltered"
+operator_country = "CZ"
+jurisdiction = "eu"
+network_scope = "eu_anycast"
+filter_variant = "unfiltered"
+ecs = false
+ipv4 = ["86.54.11.100", "86.54.11.200"]
+ipv6 = ["2a13:1001::86:54:11:100", "2a13:1001::86:54:11:200"]
+official_url = "https://joindns4.eu/for-public"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "unfiltered.joindns4.eu" },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "unfiltered.joindns4.eu", url = "https://unfiltered.joindns4.eu/dns-query" },
+  { protocol = "quic", availability = "not_documented", test_status = "not_tested" },
+]
+
+[[providers]]
+id = "ffmuc-unfiltered"
+name = "Freifunk Munich"
+operator_country = "DE"
+jurisdiction = "eu"
+network_scope = "regional"
+filter_variant = "unfiltered"
+ecs = false
+ipv4 = ["5.1.66.255", "185.150.99.255"]
+ipv6 = ["2001:678:e68:f000::", "2001:678:ed0:f000::"]
+official_url = "https://www.freifunk-muenchen.de/wiki/knb:dohdot"
+privacy_url = "https://ffmuc.net/dns-privacy/"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "dot.ffmuc.net" },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "doh.ffmuc.net", url = "https://doh.ffmuc.net/dns-query" },
+  { protocol = "quic", availability = "supported", test_status = "not_tested", port = 853, server_name = "doq.ffmuc.net" },
+]
+
+[[providers]]
+id = "libredns-unfiltered"
+name = "LibreDNS"
+operator_country = "GR"
+jurisdiction = "eu"
+network_scope = "regional"
+filter_variant = "unfiltered"
+ecs = false
+ipv4 = ["116.202.176.26"]
+ipv6 = ["2a01:4f8:1c0c:8274::1"]
+official_url = "https://libredns.gr/"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "dot.libredns.gr" },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "doh.libredns.gr", url = "https://doh.libredns.gr/dns-query" },
+  { protocol = "quic", availability = "not_documented", test_status = "not_tested" },
+]
+
+[[providers]]
+id = "dns-sb-unfiltered"
+name = "DNS.SB"
+operator_country = "DE"
+jurisdiction = "eu"
+network_scope = "global_anycast"
+filter_variant = "unfiltered"
+ecs = false
+ipv4 = ["185.222.222.222", "45.11.45.11"]
+ipv6 = ["2a09::", "2a11::"]
+official_url = "https://dns.sb/faq/"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "dot.sb" },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "doh.dns.sb", url = "https://doh.dns.sb/dns-query" },
+  { protocol = "quic", availability = "unsupported", test_status = "not_tested" },
+]
+
+[[providers]]
+id = "quad9-unfiltered"
+name = "Quad9 Unfiltered"
+operator_country = "CH"
+jurisdiction = "europe_non_eu"
+network_scope = "global_anycast"
+filter_variant = "unfiltered"
+ecs = false
+ipv4 = ["9.9.9.10", "149.112.112.10"]
+ipv6 = ["2620:fe::10", "2620:fe::fe:10"]
+official_url = "https://docs.quad9.net/services/"
+privacy_url = "https://quad9.net/privacy/policy/"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "dns10.quad9.net" },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "dns10.quad9.net", url = "https://dns10.quad9.net/dns-query" },
+  { protocol = "quic", availability = "not_documented", test_status = "not_tested" },
+]
+
+[[providers]]
+id = "uncensoreddns-anycast"
+name = "UncensoredDNS Anycast"
+operator_country = "DK"
+jurisdiction = "eu"
+network_scope = "global_anycast"
+filter_variant = "uncensored"
+ecs = false
+ipv4 = ["91.239.100.100"]
+ipv6 = ["2001:67c:28a4::"]
+official_url = "https://blog.uncensoreddns.org/"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "anycast.uncensoreddns.org" },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "anycast.uncensoreddns.org", url = "https://anycast.uncensoreddns.org/dns-query" },
+  { protocol = "quic", availability = "not_documented", test_status = "not_tested" },
+]
+
+[[providers]]
+id = "dns-watch"
+name = "DNS.WATCH"
+operator_country = "DE"
+jurisdiction = "eu"
+network_scope = "regional"
+filter_variant = "uncensored"
+ecs = false
+ipv4 = ["84.200.69.80", "84.200.70.40"]
+ipv6 = ["2001:1608:10:25::1c04:b12f", "2001:1608:10:25::9249:d69b"]
+official_url = "https://dns.watch/"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "not_documented", test_status = "not_tested" },
+  { protocol = "https", availability = "not_documented", test_status = "not_tested" },
+  { protocol = "quic", availability = "not_documented", test_status = "not_tested" },
+]
+
+[[providers]]
+id = "cloudflare-unfiltered"
+name = "Cloudflare 1.1.1.1"
+operator_country = "US"
+jurisdiction = "outside_europe"
+network_scope = "global_anycast"
+filter_variant = "unfiltered"
+ecs = false
+ipv4 = ["1.1.1.1", "1.0.0.1"]
+ipv6 = ["2606:4700:4700::1111", "2606:4700:4700::1001"]
+official_url = "https://developers.cloudflare.com/1.1.1.1/ip-addresses/"
+privacy_url = "https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "one.one.one.one" },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "cloudflare-dns.com", url = "https://cloudflare-dns.com/dns-query" },
+  { protocol = "quic", availability = "not_documented", test_status = "not_tested" },
+]
+
+[[providers]]
+id = "google-public-dns"
+name = "Google Public DNS"
+operator_country = "US"
+jurisdiction = "outside_europe"
+network_scope = "global_anycast"
+filter_variant = "unfiltered"
+ecs = true
+ipv4 = ["8.8.8.8", "8.8.4.4"]
+ipv6 = ["2001:4860:4860::8888", "2001:4860:4860::8844"]
+official_url = "https://developers.google.com/speed/public-dns/docs/using"
+privacy_url = "https://developers.google.com/speed/public-dns/privacy"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "dns.google" },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "dns.google", url = "https://dns.google/dns-query" },
+  { protocol = "quic", availability = "not_documented", test_status = "not_tested" },
+]
+
+[[providers]]
+id = "adguard-unfiltered"
+name = "AdGuard Non-filtering"
+operator_country = "CY"
+jurisdiction = "eu"
+network_scope = "global_anycast"
+filter_variant = "unfiltered"
+ecs = false
+ipv4 = ["94.140.14.140", "94.140.14.141"]
+ipv6 = ["2a10:50c0::1:ff", "2a10:50c0::2:ff"]
+official_url = "https://adguard-dns.io/kb/general/dns-providers/"
+privacy_url = "https://adguard-dns.io/en/privacy.html"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "unfiltered.adguard-dns.com" },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "unfiltered.adguard-dns.com", url = "https://unfiltered.adguard-dns.com/dns-query" },
+  { protocol = "quic", availability = "supported", test_status = "not_tested", port = 853, server_name = "unfiltered.adguard-dns.com" },
+]
+
+[[providers]]
+id = "controld-unfiltered"
+name = "Control D Unfiltered"
+operator_country = "CA"
+jurisdiction = "outside_europe"
+network_scope = "global_anycast"
+filter_variant = "unfiltered"
+ecs = false
+ipv4 = ["76.76.2.0", "76.76.10.0"]
+ipv6 = ["2606:1a40::", "2606:1a40:1::"]
+official_url = "https://docs.controld.com/docs/free-dns"
+privacy_url = "https://controld.com/privacy"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "p0.freedns.controld.com", bootstrap_ips = ["76.76.2.11", "76.76.10.11", "2606:1a40::11", "2606:1a40:1::11"] },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "freedns.controld.com", url = "https://freedns.controld.com/p0", bootstrap_ips = ["76.76.2.11", "76.76.10.11", "2606:1a40::11", "2606:1a40:1::11"] },
+  { protocol = "quic", availability = "supported", test_status = "not_tested", port = 853, server_name = "p0.freedns.controld.com", bootstrap_ips = ["76.76.2.11", "76.76.10.11", "2606:1a40::11", "2606:1a40:1::11"] },
+]
+
+[[providers]]
+id = "controld-uncensored"
+name = "Control D Uncensored"
+operator_country = "CA"
+jurisdiction = "outside_europe"
+network_scope = "global_anycast"
+filter_variant = "uncensored"
+ecs = false
+ipv4 = ["76.76.2.5", "76.76.10.5"]
+ipv6 = ["2606:1a40::5", "2606:1a40:1::5"]
+official_url = "https://docs.controld.com/docs/free-dns"
+privacy_url = "https://controld.com/privacy"
+verified_on = "2026-10-30"
+transports = [
+  { protocol = "udp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tcp", availability = "supported", test_status = "not_tested", port = 53 },
+  { protocol = "tls", availability = "supported", test_status = "not_tested", port = 853, server_name = "uncensored.freedns.controld.com", bootstrap_ips = ["76.76.2.11", "76.76.10.11", "2606:1a40::11", "2606:1a40:1::11"] },
+  { protocol = "https", availability = "supported", test_status = "not_tested", port = 443, server_name = "freedns.controld.com", url = "https://freedns.controld.com/uncensored", bootstrap_ips = ["76.76.2.11", "76.76.10.11", "2606:1a40::11", "2606:1a40:1::11"] },
+  { protocol = "quic", availability = "supported", test_status = "not_tested", port = 853, server_name = "uncensored.freedns.controld.com", bootstrap_ips = ["76.76.2.11", "76.76.10.11", "2606:1a40::11", "2606:1a40:1::11"] },
+]

@@ -54,6 +54,7 @@ loopback `metrics` line is uncommented. `config/forward.example.toml` is an
 explicit DoT forwarding example; running it sends DNS to its configured upstream.
 
 See [filtering guide](docs/filtering.md), [resolver guide](docs/resolver.md), [configuration reference](docs/configuration.md),
+[upstream provider presets](docs/upstream-providers.md),
 [security boundaries](docs/threat-model.md), [verification](docs/verification.md),
 and [performance snapshots](docs/performance.md).
 Track remaining work in [TODO](docs/TODO.md) and [implementation checklist](docs/progress.md).

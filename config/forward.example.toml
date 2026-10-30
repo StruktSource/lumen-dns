@@ -18,3 +18,5 @@ upstream_timeout_ms = 2000
 address = "1.1.1.1:853"
 protocol = "tls"
 server_name = "cloudflare-dns.com"
+# Optional. Defaults to "/dns-query". Some official presets use another path.
+# doh_path = "/dns-query"

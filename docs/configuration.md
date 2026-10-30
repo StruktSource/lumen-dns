@@ -117,9 +117,10 @@ Each `[[resolver.upstreams]]` has:
 | `address` | Required explicit IPv4/IPv6 address and port; no bootstrap DNS lookup |
 | `protocol` | `udp`, `tcp`, `tls`, `https`, or `quic` |
 | `server_name` | Required for encrypted protocols; certificate name and SNI |
+| `doh_path` | Optional HTTPS-only absolute path; defaults to `/dns-query` |
 
-`udp` enables TCP fallback at the same address/port. `https` uses HTTP/2 and
-`/dns-query`. Certificate identity and chain verification stay enabled. A
+`udp` enables TCP fallback at the same address/port. `https` uses HTTP/2.
+Certificate identity and chain verification stay enabled. A
 private CA bundle changes trusted roots; it does not bypass name verification.
 
 ## Limits

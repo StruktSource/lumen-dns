@@ -50,6 +50,7 @@ attempts = 1
 # address = "1.1.1.1:853"
 # protocol = "tls"
 # server_name = "cloudflare-dns.com"
+# doh_path = "/dns-query" # HTTPS only; defaults to /dns-query.
 
 # Shared work and network bounds. See ../docs/configuration.md#limits.
 [limits]

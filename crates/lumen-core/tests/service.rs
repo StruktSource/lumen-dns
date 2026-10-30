@@ -59,6 +59,7 @@ fn config(upstream: SocketAddr, bind: SocketAddr) -> Config {
         address: upstream,
         protocol: UpstreamProtocol::Udp,
         server_name: None,
+        doh_path: None,
     }];
     config
 }
