@@ -5,7 +5,7 @@
 Native validation: macOS ARM64. Phase 1 results below are historical and are not
 new Linux/Windows results for Phase 2.
 
-- `./scripts/dev.sh check`: format, Clippy with warnings denied, **40 tests**,
+- `./scripts/dev.sh check`: format, Clippy with warnings denied, **42 tests**,
   and doc tests pass. Socket tests run outside the restricted filesystem/network
   sandbox because its loopback binds return `Operation not permitted`.
 - `cargo +1.88.0 check --workspace --all-targets --locked`: passes.
@@ -53,6 +53,14 @@ recursion-limit and query-budget failures do not invoke it. Config tests cover
 explicit enablement, deadline budgets, TLS identity, and direct listener-loop
 rejection. A Codex Security diff scan reviewed all five changed runtime/config
 files and found no reportable issue. Public fallback reachability was not tested.
+
+Issue #4 makes `config/lumen.toml` the minimal release default and renames the
+active forwarding/filtering samples to `.example.toml`. Tests assert loopback
+listeners/clients, DNSSEC recursion, empty filters/upstreams, disabled fallback,
+disabled metrics, schema-1 compatibility, and successful startup. The default
+and both examples pass `lumen --check`.
+A Codex Security diff scan reviewed the six changed config surfaces and found no
+reportable issue.
 
 ## Phase 1 verification
 
@@ -136,7 +144,7 @@ cargo build --workspace --release --locked
 cargo audit
 cargo audit --file fuzz/Cargo.lock
 cargo run --locked --bin lumen -- --config config/lumen.toml --check
-cargo run --locked --bin lumen -- --config config/forward.toml --check
+cargo run --locked --bin lumen -- --config config/forward.example.toml --check
 ```
 
 Fuzzing needs nightly Rust and `cargo-fuzz` 0.13.2. The fuzz workspace has its own

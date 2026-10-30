@@ -17,7 +17,7 @@ crates/lumen-resolver/ recursive/forward modes, DNSSEC, cache and trust setup
 crates/lumen-filter/ rules, policies, imports, snapshots, schedules and responses
 crates/lumen-core/   client transports, limits, lifecycle and aggregate metrics
 crates/lumen-api/    reserved /v1 boundary; no API listener
-config/             recursive and explicit encrypted-forwarding examples
+config/             safe release default and opt-in feature examples
 web/                blank optional UI shell
 fuzz/               DNS/config/filter fuzz targets; separate Cargo workspace
 scripts/            local checks, builds, packaging

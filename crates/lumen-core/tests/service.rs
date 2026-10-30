@@ -63,6 +63,26 @@ fn config(upstream: SocketAddr, bind: SocketAddr) -> Config {
     config
 }
 
+#[tokio::test]
+async fn release_default_is_private_and_starts() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut config = Config::load(&root.join("config/lumen.toml")).unwrap();
+    assert!(config.metrics.is_none());
+    assert_eq!(config.resolver.mode, Mode::Recursive);
+    assert!(config.resolver.dnssec);
+    assert!(config.resolver.upstreams.is_empty());
+    assert!(!config.resolver.fallback.enabled);
+    assert!(config.filtering.lists.is_empty());
+    assert!(config.filtering.rules.allow.is_empty());
+    assert!(config.filtering.rules.block.is_empty());
+    let bind = address("127.0.0.1");
+    config.listen.udp = vec![bind];
+    config.listen.tcp = vec![bind];
+    let mut server = RunningServer::start(config).await.unwrap();
+    assert_eq!(server.endpoints.len(), 2);
+    server.shutdown().await;
+}
+
 async fn udp(address: SocketAddr, packet: &[u8]) -> Message {
     let socket = UdpSocket::bind(if address.is_ipv4() {
         "127.0.0.1:0"

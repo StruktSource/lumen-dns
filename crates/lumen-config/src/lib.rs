@@ -486,7 +486,11 @@ mod tests {
     #[test]
     fn example_configs_paths_size_limits_and_nested_fields() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for name in ["lumen.toml", "forward.toml", "filtering.toml"] {
+        for name in [
+            "lumen.toml",
+            "forward.example.toml",
+            "filtering.example.toml",
+        ] {
             assert!(Config::load(&root.join("config").join(name)).is_ok());
         }
         assert!(toml::from_str::<Config>("schema_version = 1\n[limits]\nmisspelled = 1").is_err());
@@ -508,5 +512,41 @@ mod tests {
         );
         fs::write(&path, " ".repeat(65537)).unwrap();
         assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn release_default_is_private_and_old_schema_one_still_works() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let config = Config::load(&root.join("config/lumen.toml")).unwrap();
+        assert!(config.metrics.is_none());
+        assert_eq!(config.resolver.mode, Mode::Recursive);
+        assert!(config.resolver.dnssec);
+        assert!(config.resolver.upstreams.is_empty());
+        assert!(!config.resolver.fallback.enabled);
+        assert!(config.resolver.fallback.upstreams.is_empty());
+        assert!(config.listen.udp.iter().all(|item| item.ip().is_loopback()));
+        assert!(config.listen.tcp.iter().all(|item| item.ip().is_loopback()));
+        assert!(config.listen.dot.is_empty());
+        assert!(config.listen.doh.is_empty());
+        assert!(config.listen.doq.is_empty());
+        assert!(
+            config
+                .listen
+                .allow_clients
+                .iter()
+                .all(|network| network.addr().is_loopback())
+        );
+        assert!(config.filtering.rules.allow.is_empty());
+        assert!(config.filtering.rules.block.is_empty());
+        assert!(config.filtering.lists.is_empty());
+        assert!(config.filtering.profiles.is_empty());
+        assert!(config.filtering.devices.is_empty());
+        assert!(!config.filtering.decision_log);
+
+        let old: Config =
+            toml::from_str("schema_version = 1\n[resolver]\nmode = 'recursive'\ndnssec = true")
+                .unwrap();
+        assert!(!old.resolver.fallback.enabled);
+        assert!(old.validate().is_ok());
     }
 }

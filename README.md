@@ -46,12 +46,12 @@ In another terminal:
 ```sh
 dig @127.0.0.1 -p 5353 example.com A
 dig @::1 -p 5353 example.com AAAA +tcp
-curl http://127.0.0.1:9153/metrics
 ```
 
 `lumen --bind 127.0.0.1:5353` starts UDP/TCP with the same safe resolver defaults.
-`lumen --help` lists startup options. `config/forward.toml` is an explicit DoT
-forwarding example; running it sends DNS to its configured upstream.
+`lumen --help` lists startup options. Aggregate metrics are disabled until the
+loopback `metrics` line is uncommented. `config/forward.example.toml` is an
+explicit DoT forwarding example; running it sends DNS to its configured upstream.
 
 See [filtering guide](docs/filtering.md), [resolver guide](docs/resolver.md), [configuration reference](docs/configuration.md),
 [security boundaries](docs/threat-model.md), [verification](docs/verification.md),

@@ -2,12 +2,20 @@
 
 Lumen accepts TOML schema **1** through `lumen --config FILE`. See
 [`config/lumen.toml`](../config/lumen.toml) and
-[`config/forward.toml`](../config/forward.toml).
+[`config/forward.example.toml`](../config/forward.example.toml). Filtering examples
+live in [`config/filtering.example.toml`](../config/filtering.example.toml).
 
 Unknown fields, future schema versions, invalid addresses, and out-of-range
 limits fail startup. No implicit migration occurs. Config files are limited to
 64 KiB and must be UTF-8. Relative file paths resolve beside the config file,
 not the process working directory. Hot reload and schema migrations are later work.
+
+`config/lumen.toml` is the only release default. It enables local recursive DNS
+and required safety bounds, but no metrics, provider, fallback, filter policy,
+external list, history, telemetry, or management API. Files ending in
+`.example.toml` are opt-in examples and are never loaded automatically. Renaming
+the repository examples does not change schema 1: existing user configs keep
+their paths and continue to parse as before.
 
 `lumen --config FILE --check` validates configuration, hints, trust anchors, and
 TLS credentials and all filter sources without opening listeners. HTTPS filter

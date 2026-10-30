@@ -14,7 +14,7 @@ dig @::1 -p 5353 example.com AAAA +tcp
 dig @127.0.0.1 -p 5353 example.com A +dnssec
 ```
 
-Use `config/forward.toml` for explicit encrypted forwarding. The same cache and
+Use `config/forward.example.toml` for explicit encrypted forwarding. The same cache and
 resolver are shared across client transports. Only one mode runs at a time.
 
 ## Optional recursive fallback

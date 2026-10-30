@@ -13,6 +13,7 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [x] Non-root Docker image and local build scripts
 - [x] Blank UI shell and disabled API extension boundary
 - [x] Startup schema 1, validation rules, explicit future-version rejection
+- [x] Minimal release default with opt-in forwarding and filtering examples
 - [x] Aggregate metric naming contract and loopback Prometheus endpoint
 - [x] DNS/config fuzz targets and fuzz smoke CI
 - [x] RustSec dependency audit and audit CI

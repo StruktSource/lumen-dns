@@ -10,12 +10,12 @@ access controls belong to the operator.
 ## Start and inspect
 
 ```sh
-cargo run --locked --bin lumen -- --config config/filtering.toml --check
-cargo run --locked --bin lumenctl -- filter-explain --config config/filtering.toml --client 192.0.2.10 --domain games.example --at 75600
-cargo run --locked --bin lumen -- --config config/filtering.toml
+cargo run --locked --bin lumen -- --config config/filtering.example.toml --check
+cargo run --locked --bin lumenctl -- filter-explain --config config/filtering.example.toml --client 192.0.2.10 --domain games.example --at 75600
+cargo run --locked --bin lumen -- --config config/filtering.example.toml
 ```
 
-The [example](../config/filtering.toml) uses only reserved example domains and
+The [example](../config/filtering.example.toml) uses only reserved example domains and
 inline sources. Its `family` profile selects the `adult` category; `bedtime`
 selects `adult` and `games` during an overnight UTC window. Supply your own
 reviewed category sources for real filtering; no third-party feed is enabled.

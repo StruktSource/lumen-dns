@@ -1,4 +1,4 @@
-# Offline Phase 2 example. All example domains use the reserved .example suffix.
+# EXAMPLE ONLY. All domains are offline names under the reserved .example suffix.
 schema_version = 1
 metrics = "127.0.0.1:9153"
 

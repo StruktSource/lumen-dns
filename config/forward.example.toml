@@ -1,4 +1,4 @@
-# Explicit example: sends DNS queries to this upstream when run.
+# EXAMPLE ONLY. Running this file sends DNS queries to the listed upstream.
 schema_version = 1
 metrics = "127.0.0.1:9153"
 
