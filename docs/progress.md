@@ -1,6 +1,6 @@
 # Lumen implementation checklist
 
-Updated 2026-10-29. Checked means implemented, documented, and covered by the
+Updated 2026-10-30. Checked means implemented, documented, and covered by the
 checks in [verification](verification.md). It does not mean production-ready.
 
 ## Foundation
@@ -38,16 +38,16 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [x] Offline protocol, DNSSEC, cache, delegation, and load-limit tests
 - [x] Bounded 256-query concurrent load regression
 
-## Phase 2 — Filtering
+## Phase 2 — Filtering: implemented
 
-- [ ] Normalized allow/block rules and precedence
-- [ ] Global lists and manual domain rules
-- [ ] Per-device, subnet, group, and profile policies
-- [ ] Online list fetcher and local-file importer
-- [ ] Hosts, domain-list, and Adblock DNS parsers
-- [ ] Atomic list update, validation, rollback
-- [ ] Configurable block responses and explainable decisions
-- [ ] Parental schedules and category profiles
+- [x] Normalized allow/block rules and precedence
+- [x] Global lists and manual domain rules
+- [x] Per-device, subnet, group, and profile policies
+- [x] Online list fetcher and local-file importer
+- [x] Hosts, domain-list, and Adblock DNS parsers
+- [x] Atomic list update, validation, rollback
+- [x] Configurable block responses and explainable decisions
+- [x] Parental schedules and category profiles
 
 ## Phase 3 — Control and visibility
 
@@ -80,10 +80,12 @@ checks in [verification](verification.md). It does not mean production-ready.
 
 ## Next technical slice
 
-1. Define normalized filtering rules, precedence, and decision types.
-2. Apply global allow/block decisions before cache and resolution.
-3. Add per-client policy selection and bounded import parsing.
+1. Add SQLite configuration/device persistence and explicit schema migrations.
+2. Add validated config reload and full CLI control, including Windows controls.
+3. Build authenticated management API before a functional web UI.
 
-Detailed next work: [TODO](../TODO.md). Product scope:
-[roadmap](../DNS_SERVICE_PLAN.md). Current validation limits:
+Filtering usage and bounds: [guide](filtering.md).
+
+Detailed next work: [TODO](TODO.md). Product scope:
+[roadmap](DNS_SERVICE_PLAN.md). Current validation limits:
 [verification](verification.md).

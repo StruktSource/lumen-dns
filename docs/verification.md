@@ -1,4 +1,53 @@
-# Phase 1 verification
+# Verification
+
+## Phase 2 — 2026-10-30
+
+Native validation: macOS ARM64. Phase 1 results below are historical and are not
+new Linux/Windows results for Phase 2.
+
+- `./scripts/dev.sh check`: format, Clippy with warnings denied, **37 tests**,
+  and doc tests pass. Socket tests run outside the restricted filesystem/network
+  sandbox because its loopback binds return `Operation not permitted`.
+- `cargo +1.88.0 check --workspace --all-targets --locked`: passes.
+- `cargo build --workspace --release --locked`: daemon and CLI pass.
+- All three supplied configs pass release `lumen --config ... --check`.
+- `lumenctl filter-explain` returns a category block during the example UTC
+  bedtime window and allows the same name outside it.
+- Release-daemon loopback smoke: SIGUSR1 publishes a changed local list,
+  SIGUSR2 restores the previous list, metrics count both, logs/metrics omit
+  queried names with default settings, and SIGTERM exits cleanly.
+- Native release ZIP builds and passes integrity checking with relocated
+  roadmap/TODO, filter guide, and example config included.
+- Both RustSec audits pass: 253 workspace and 169 fuzz dependencies. The first
+  run found [RUSTSEC-2026-0383](https://rustsec.org/advisories/RUSTSEC-2026-0383);
+  both lockfiles now resolve `webpki-root-certs` 1.0.10.
+- Filter-list AddressSanitizer fuzz smoke: 182056 inputs in 16 seconds with
+  a 15-second time budget and 64 KiB max input; no crash. macOS `atos`
+  symbolization emitted warnings; the fuzz run itself exited successfully.
+- Config AddressSanitizer fuzz smoke: 81200 inputs in 16 seconds, no crash.
+- Local Markdown links and `git diff --check` pass.
+
+Coverage includes normalized exact/suffix/IDNA rules; profile/global/list
+precedence; device/group/subnet/default selection; category and UTC overnight
+schedules; all block actions; large CNAME response budgets; malformed/oversized
+imports; HTTPS certificate verification, status/redirect/compression/streaming
+size checks, and private-address rejection; multi-list failure atomicity,
+concurrent snapshot readers, periodic refresh, and rollback hold. Service tests
+exercise blocking over all five transports on IPv4/IPv6, per-client decisions
+before shared cache hits, failed startup, refresh, and rollback.
+
+A draft bypass involving unusual wire labels was fixed: production decisions
+now use decoded label bytes, preserving suffix boundaries even for escaped dots
+and non-UTF-8 labels. The targeted Attack Path Analysis record is retained by the
+Codex Security plugin; this was not a full independent security audit.
+
+Not established: native Windows/Linux Phase 2 runtime, hosted CI, real third-party
+feed compatibility, extended soak, or production performance. Windows runtime
+refresh/rollback is available through the Rust API, not a daemon CLI channel.
+Rollback snapshots are memory-only, schedules are UTC-only, and filtering checks
+question names rather than upstream CNAME chains. See [filtering](filtering.md).
+
+## Phase 1 verification
 
 Verification date: **2026-10-29**. Native host: macOS ARM64. Container runtime:
 OrbStack, Linux ARM64. These results do not certify other platforms or production
@@ -96,6 +145,8 @@ ASAN_OPTIONS=quarantine_size_mb=32:thread_local_quarantine_size_kb=64 \
   cargo +nightly fuzz run dns_wire -- -max_total_time=15 -max_len=65535 -rss_limit_mb=512
 ASAN_OPTIONS=quarantine_size_mb=32:thread_local_quarantine_size_kb=64 \
   cargo +nightly fuzz run config -- -max_total_time=15 -max_len=65536 -rss_limit_mb=512
+ASAN_OPTIONS=quarantine_size_mb=32:thread_local_quarantine_size_kb=64 \
+  cargo +nightly fuzz run filter_list -- -max_total_time=15 -max_len=65536 -rss_limit_mb=512
 ```
 
 Container smoke commands:

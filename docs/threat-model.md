@@ -43,8 +43,15 @@ useful checks, not a proof of security.
 
 ## Later controls
 
-Filtering imports need bounded parsers, checked HTTPS fetches, validated atomic
-updates, and rollback. Future management requires auth, scoped roles, audit,
+Filtering implements bounded parsers, verified HTTPS with public-IP pinning,
+atomic updates, and one in-memory rollback generation. Rules run before cache
+lookup, including unusual wire labels; synthetic answers clear AD and use TTL
+zero. List source contents remain untrusted. Source paths and policy selection
+are administrator inputs. Schedules rely on the host UTC clock. Query-name
+filtering is not CNAME-chain inspection or a network firewall. Optional decision
+logs disclose names and client IPs only when explicitly enabled.
+
+Future management requires auth, scoped roles, audit,
 rate limits, and explicit remote exposure. Optional query history needs retention,
 redaction, and access controls. These features remain disabled/unimplemented.
 

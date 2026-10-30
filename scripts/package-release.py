@@ -23,7 +23,7 @@ def main():
     with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as package:
         for binary in binaries:
             package.write(binary, binary.name)
-        files = [root / name for name in ('LICENSE', 'README.md', 'TODO.md', 'DNS_SERVICE_PLAN.md', 'SECURITY.md', 'CONTRIBUTING.md', 'CODE_OF_CONDUCT.md')]
+        files = [root / name for name in ('LICENSE', 'README.md', 'SECURITY.md', 'CONTRIBUTING.md', 'CODE_OF_CONDUCT.md')]
         files += sorted((root / 'docs').glob('*.md'))
         files += sorted((root / 'config').glob('*.toml'))
         for path in files:

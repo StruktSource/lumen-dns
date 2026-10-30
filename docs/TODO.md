@@ -1,22 +1,21 @@
 # Lumen TODO
 
-Phase 1 resolver implementation is complete. See the detailed
-[implementation checklist](docs/progress.md) and
-[verification record](docs/verification.md).
+Phases 1 and 2 resolver/filtering implementation are complete. See the detailed
+[implementation checklist](progress.md) and
+[verification record](verification.md).
 
-## Next: Phase 2 filtering
+## Phase 2 filtering: implemented
 
-- [ ] Define normalized domain rules and allow/block precedence.
-- [ ] Add global rules and explainable filter outcomes before DNS cache lookup.
-- [ ] Add client, subnet, device, group, and profile policy selection.
-- [ ] Add bounded list imports for hosts, domains, and Adblock DNS formats.
-- [ ] Add validated atomic list refresh, rollback, and schedules.
+- [x] Define normalized domain rules and allow/block precedence.
+- [x] Add global rules and explainable filter outcomes before DNS cache lookup.
+- [x] Add client, subnet, device, group, and profile policy selection.
+- [x] Add bounded list imports for hosts, domains, and Adblock DNS formats.
+- [x] Add validated atomic list refresh, rollback, and schedules.
 
 ## UI timing and recommended order
 
-1. Finish the first filtering slice: global allow/block rules, precedence, and
-   explainable decisions with regression tests.
-2. Begin UI design/prototyping alongside the remaining Phase 2 work. Use mock
+1. Build Phase 3 persistence, config reload/migrations, and authenticated control.
+2. Begin UI design/prototyping alongside Phase 3 work. Use mock
    data for an overview, list management, and settings; keep the prototype local
    and management API access disabled.
 3. Build the functional UI during Phase 3, once configuration persistence/reload
@@ -36,5 +35,5 @@ first-release commitment remains a blank UI shell; a functional UI is later scop
 - [ ] Signed multi-architecture images, SBOM, and reproducible-release checks.
 - [ ] Deployment guides and backup/restore/upgrade tests.
 
-Keep checkbox detail in `docs/progress.md`; do not mark unrun platform checks or
+Keep checkbox detail in `progress.md`; do not mark unrun platform checks or
 planned features as shipped.

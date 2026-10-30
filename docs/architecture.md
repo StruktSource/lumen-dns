@@ -4,13 +4,15 @@
 UDP / TCP / TLS / HTTPS / QUIC
     -> bounded listener work, connection admission, client CIDR access
     -> shared per-IP rate admission and bounded full DNS decoding
-    -> global resolver admission and whole-query deadline
+    -> global query admission
+    -> client profile and atomic filter snapshot -> synthetic reply if blocked
+    -> whole-resolution deadline
     -> Hickory catalog -> selected recursive or forwarding resolver
                        -> bounded response/delegation/validation caches
                        -> local DNSSEC verification -> bounded DNS encoding
     -> client reply
 
-TOML / CLI -> schema and trust validation -> bind all sockets -> serve
+TOML / CLI -> schema, trust, and filter-source validation -> bind all sockets -> serve
 Counters -> optional loopback /metrics and /healthz
 ```
 
@@ -25,6 +27,8 @@ Shutdown cancels listener and child tasks. No thread is created per query.
 | `lumen-proto` | Wire bounds, full-consumption decode, query validation, safe error responses |
 | `lumen-config` | Startup schema, safe defaults, ACL/limit validation, bounded config reads |
 | `lumen-resolver` | Mode, hints, anchors, verified upstream config, Hickory catalog adapter |
+| `lumen-filter` | Rule normalization, policy selection, bounded imports, snapshots, schedules, synthetic replies |
+| `apps/lumenctl` | Local filter decision diagnosis |
 | `lumen-core` | Transport tasks, shared admission, metrics, service lifecycle |
 | `lumen-api` | Reserved authenticated API boundary; no network routes |
 | `apps/lumen` | Strict startup arguments and OS signals |
@@ -42,7 +46,7 @@ special-use address ranges are denied by Hickory's recommended filters.
 
 ## Planned extension points
 
-Filtering will sit before cache lookup and resolution. Config reload must validate
+Filtering sits before cache lookup and resolution. Config reload must validate
 then replace runtime state atomically. SQLite is planned for configuration and
 opt-in history. The web shell and future scoped API cannot affect parser ownership
 or bypass resolver limits. Future plugins need explicit permissions.

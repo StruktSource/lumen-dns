@@ -10,12 +10,14 @@
 DNSSEC, cache answers, and serve plaintext or encrypted DNS. It can also forward
 queries to a configured upstream.
 
-Lumen is pre-release. Filtering, device policies, and a management UI are still
-planned; wider testing and security review remain before production readiness.
+Lumen also filters DNS with global and per-client rules, imported lists, category
+profiles, and UTC schedules. Lumen is pre-release; wider testing and security
+review remain before production readiness.
 
 | Available | Next |
 | --- | --- |
-| UDP, TCP, DoH, DoT, DoQ on IPv4/IPv6 | Filtering, device policies, blocklist imports |
+| UDP, TCP, DoH, DoT, DoQ on IPv4/IPv6 | Authenticated management API |
+| Filtering, device policies, bounded list imports and atomic refresh/rollback | Functional web UI |
 | Recursive resolution, delegation checks, DNSSEC | Config reload and migrations |
 | Positive, negative, delegation, and validation caches | Full administrative CLI and web UI |
 | Explicit plaintext or encrypted upstream forwarding | Deployment guides, signed images, external review |
@@ -23,7 +25,8 @@ planned; wider testing and security review remain before production readiness.
 
 Defaults: loopback clients only, recursive resolution, DNSSEC on, no query
 history, no telemetry, and no management API. Encrypted listeners require
-operator-supplied certificates and keys. Filtering is not implemented yet.
+operator-supplied certificates and keys. Filtering is opt-in through config;
+no third-party blocklists are enabled by default.
 
 ## Run
 
@@ -48,11 +51,11 @@ curl http://127.0.0.1:9153/metrics
 `lumen --help` lists startup options. `config/forward.toml` is an explicit DoT
 forwarding example; running it sends DNS to its configured upstream.
 
-See [resolver guide](docs/resolver.md), [configuration reference](docs/configuration.md),
+See [filtering guide](docs/filtering.md), [resolver guide](docs/resolver.md), [configuration reference](docs/configuration.md),
 [security boundaries](docs/threat-model.md), [verification](docs/verification.md),
 and [performance snapshots](docs/performance.md).
-Track remaining work in [TODO](TODO.md) and [implementation checklist](docs/progress.md).
-The [product plan](DNS_SERVICE_PLAN.md) describes the complete intended product.
+Track remaining work in [TODO](docs/TODO.md) and [implementation checklist](docs/progress.md).
+The [product plan](docs/DNS_SERVICE_PLAN.md) describes the complete intended product.
 
 ## Build
 

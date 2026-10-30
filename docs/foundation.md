@@ -3,27 +3,28 @@
 ## Identity and scope
 
 Lumen is private, self-hosted DNS software by Strukt. Rust, Apache-2.0, workspace
-version `0.1.0`. Phase 1 implements the resolver core; filtering and management
-remain planned. See [progress](progress.md) for exact shipped scope.
+version `0.1.0`. Phases 1 and 2 implement the resolver core and filtering; management
+remains planned. See [progress](progress.md) for exact shipped scope.
 
 ## Workspace
 
 ```text
 apps/lumen/          daemon startup and signal handling
-apps/lumenctl/       administrative CLI foundation
+apps/lumenctl/       local filter-explain CLI
 crates/lumen-proto/  bounded DNS wire admission and full message decoding
 crates/lumen-config/ schema 1, validation, safe defaults, bounded file reads
 crates/lumen-resolver/ recursive/forward modes, DNSSEC, cache and trust setup
+crates/lumen-filter/ rules, policies, imports, snapshots, schedules and responses
 crates/lumen-core/   client transports, limits, lifecycle and aggregate metrics
 crates/lumen-api/    reserved /v1 boundary; no API listener
 config/             recursive and explicit encrypted-forwarding examples
 web/                blank optional UI shell
-fuzz/               DNS/config fuzz targets; separate Cargo workspace
+fuzz/               DNS/config/filter fuzz targets; separate Cargo workspace
 scripts/            local checks, builds, packaging
 .agent/             concise project continuity notes
 ```
 
-`lumen-filter`, configuration persistence, extended observability, deployment
+Configuration persistence, extended observability, deployment
 examples, and a full CLI are future slices. Protocol parsing never imports UI,
 API, storage, or resolver code. `lumen-core` wires components; resolver business
 rules stay in `lumen-resolver`. Hickory owns DNS algorithms and cryptography;

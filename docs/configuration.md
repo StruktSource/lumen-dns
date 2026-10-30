@@ -10,7 +10,8 @@ limits fail startup. No implicit migration occurs. Config files are limited to
 not the process working directory. Hot reload and schema migrations are later work.
 
 `lumen --config FILE --check` validates configuration, hints, trust anchors, and
-TLS credentials without opening listeners or resolving DNS. Port availability
+TLS credentials and all filter sources without opening listeners. HTTPS filter
+sources perform host DNS lookups and downloads during this check. Port availability
 is checked only when the daemon starts. All enabled sockets must bind before
 traffic is served. Startup fails if any listener cannot bind.
 
@@ -23,6 +24,7 @@ traffic is served. Startup fails if any listener cannot bind.
 | `listen` | Listener and client-access settings |
 | `resolver` | Selected mode, cache, DNSSEC, and upstream settings |
 | `limits` | Shared admission and IO bounds |
+| `filtering` | Optional rules, sources, profiles, devices, groups, subnets, UTC schedules; see [filtering reference](filtering.md) |
 
 Socket addresses include ports; IPv6 uses brackets. Example: `[::1]:5353`.
 

@@ -76,8 +76,8 @@ Phase 1 secure resolver core is implemented. UDP/TCP/DoH/DoT/DoQ, IPv4/IPv6,
 iterative recursion, DNSSEC, bounded caches, verified upstream forwarding,
 resource admission, aggregate metrics, and offline regression tests are present.
 Startup schema and fuzz/audit CI also landed. This is a pre-release, not the
-complete first release. Phase 2 filtering is next. See
-[progress](docs/progress.md), [verification](docs/verification.md), and
+complete first release. Phase 2 filtering is implemented. Phase 3 control and visibility is next. See
+[progress](progress.md), [verification](verification.md), and
 [TODO](TODO.md) for shipped scope and remaining release gates.
 
 ## Roadmap
