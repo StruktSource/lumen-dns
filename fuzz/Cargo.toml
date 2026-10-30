@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+lumen-filter = { path = "../crates/lumen-filter" }
 lumen-proto = { path = "../crates/lumen-proto" }
 lumen-config = { path = "../crates/lumen-config" }
 toml = "0.9"
@@ -28,3 +29,10 @@ doc = false
 bench = false
 
 [workspace]
+
+[[bin]]
+name = "filter_list"
+path = "fuzz_targets/filter_list.rs"
+test = false
+doc = false
+bench = false

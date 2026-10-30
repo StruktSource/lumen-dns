@@ -80,7 +80,7 @@ jobs:
       - run: cargo +1.95.0 audit
 
   fuzz:
-    name: DNS and config fuzz smoke tests
+    name: DNS, config, and filtering fuzz smoke tests
     env:
       ASAN_OPTIONS: quarantine_size_mb=32:thread_local_quarantine_size_kb=64
     runs-on: ubuntu-24.04
@@ -91,10 +91,11 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - run: cargo +nightly metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
-      - name: Seed DNS corpus
-        run: mkdir -p fuzz/corpus/dns_wire fuzz/corpus/config && cp fuzz/seeds/dns_wire/* fuzz/corpus/dns_wire/ && cp fuzz/seeds/config/* fuzz/corpus/config/
+      - name: Seed fuzz corpora
+        run: mkdir -p fuzz/corpus/dns_wire fuzz/corpus/config fuzz/corpus/filter_list && cp fuzz/seeds/dns_wire/* fuzz/corpus/dns_wire/ && cp fuzz/seeds/config/* fuzz/corpus/config/ && cp fuzz/seeds/filter_list/* fuzz/corpus/filter_list/
       - run: cargo +nightly fuzz run dns_wire -- -max_total_time=15 -max_len=65535 -rss_limit_mb=512
       - run: cargo +nightly fuzz run config -- -max_total_time=15 -max_len=65536 -rss_limit_mb=512
+      - run: cargo +nightly fuzz run filter_list -- -max_total_time=15 -max_len=65536 -rss_limit_mb=512
 
   msrv:
     name: Minimum supported Rust
