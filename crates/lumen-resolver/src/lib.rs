@@ -29,17 +29,69 @@ use hickory_server::{
 use lumen_config::{Config, Mode, UpstreamProtocol, read_bounded};
 use lumen_proto::Query;
 use std::{
+    fmt::Write,
     io,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
+use tokio::time::timeout;
 
 pub use hickory_server::net::xfer::Protocol as Transport;
 
 /// One shared resolver and cache set for all enabled client transports.
 pub struct Resolver {
     catalog: Catalog,
+    metrics: Arc<Metrics>,
+}
+
+/// Aggregate fallback counters. No query names or client labels are retained.
+#[derive(Default)]
+pub struct Metrics {
+    attempts: AtomicU64,
+    successes: AtomicU64,
+    failures: AtomicU64,
+    timeout_triggers: AtomicU64,
+}
+
+impl Metrics {
+    /// Stable Prometheus text for the optional recursive fallback path.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut text = String::new();
+        for (name, help, value) in [
+            (
+                "fallback_attempts_total",
+                "Recursive timeout fallback attempts.",
+                &self.attempts,
+            ),
+            (
+                "fallback_successes_total",
+                "Fallback responses, including authenticated negative answers.",
+                &self.successes,
+            ),
+            (
+                "fallback_failures_total",
+                "Fallback attempts without a usable response.",
+                &self.failures,
+            ),
+            (
+                "fallback_trigger_recursion_timeout_total",
+                "Fallback attempts triggered by an identified recursion timeout.",
+                &self.timeout_triggers,
+            ),
+        ] {
+            let _ = writeln!(
+                text,
+                "# HELP lumen_dns_{name} {help}\n# TYPE lumen_dns_{name} counter\nlumen_dns_{name} {}",
+                value.load(Ordering::Relaxed)
+            );
+        }
+        text
+    }
 }
 
 impl Resolver {
@@ -49,6 +101,7 @@ impl Resolver {
     /// Invalid hints, anchors, TLS settings, or resolver configuration fail startup.
     pub fn new(config: &Config) -> Result<Self, String> {
         let settings = &config.resolver;
+        let metrics = Arc::new(Metrics::default());
         let anchors = settings
             .trust_anchor
             .as_ref()
@@ -79,11 +132,17 @@ impl Resolver {
         options.negative_max_ttl = Some(Duration::from_secs(u64::from(settings.negative_ttl_secs)));
         let handler: Arc<dyn ZoneHandler> = match settings.mode {
             Mode::Forward => forward_zone(settings, options, anchors)?,
-            Mode::Recursive => recursive_zone(settings, &options, anchors)?,
+            Mode::Recursive => recursive_zone(settings, &options, anchors, Arc::clone(&metrics))?,
         };
         let mut catalog = Catalog::new();
         catalog.upsert(Name::root().into(), vec![handler]);
-        Ok(Self { catalog })
+        Ok(Self { catalog, metrics })
+    }
+
+    /// Resolver-owned aggregate metrics.
+    #[must_use]
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
     }
 
     /// Resolve a validated query. Caller supplies admission control and deadline.
@@ -130,8 +189,20 @@ fn forward_zone(
     options: ResolverOpts,
     anchors: Option<Arc<TrustAnchors>>,
 ) -> Result<Arc<dyn ZoneHandler>, String> {
-    let servers = settings
-        .upstreams
+    let resolver = forward_resolver(settings, &settings.upstreams, options, anchors)?;
+    Ok(Arc::new(ResolutionZone {
+        origin: Name::root().into(),
+        backend: Backend::Forward(Box::new(resolver)),
+    }))
+}
+
+fn forward_resolver(
+    settings: &lumen_config::Resolver,
+    upstreams: &[lumen_config::Upstream],
+    options: ResolverOpts,
+    anchors: Option<Arc<TrustAnchors>>,
+) -> Result<hickory_server::resolver::Resolver<TokioRuntimeProvider>, String> {
+    let servers = upstreams
         .iter()
         .map(|upstream| {
             let name = Arc::from(upstream.server_name.as_deref().unwrap_or(""));
@@ -180,20 +251,16 @@ fn forward_zone(
     if let Some(anchors) = anchors {
         builder = builder.with_trust_anchor(anchors);
     }
-    Ok(Arc::new(ResolutionZone {
-        origin: Name::root().into(),
-        backend: Backend::Forward(Box::new(
-            builder
-                .build()
-                .map_err(|_| "cannot build forwarding resolver")?,
-        )),
-    }))
+    builder
+        .build()
+        .map_err(|_| "cannot build forwarding resolver".into())
 }
 
 fn recursive_zone(
     settings: &lumen_config::Resolver,
     options: &ResolverOpts,
     anchors: Option<Arc<TrustAnchors>>,
+    metrics: Arc<Metrics>,
 ) -> Result<Arc<dyn ZoneHandler>, String> {
     let roots = match &settings.root_hints {
         Some(path) => {
@@ -217,7 +284,7 @@ fn recursive_zone(
         return Err("root hints need 1..64 A/AAAA records".into());
     }
     let mut dnssec = DnssecConfig::default();
-    dnssec.trust_anchor = anchors;
+    dnssec.trust_anchor.clone_from(&anchors);
     dnssec.nsec3_soft_iteration_limit = Some(100);
     dnssec.nsec3_hard_iteration_limit = Some(500);
     dnssec.validation_cache_size = Some(settings.validation_cache_entries as usize);
@@ -243,9 +310,32 @@ fn recursive_zone(
         TokioRuntimeProvider::default(),
     )
     .map_err(|_| "cannot build recursive resolver")?;
+    let fallback = if settings.fallback.enabled {
+        let mut fallback_options = options.clone();
+        fallback_options.attempts = usize::from(settings.fallback.attempts);
+        fallback_options.timeout = Duration::from_millis(u64::from(settings.fallback.timeout_ms));
+        Some(FallbackBackend {
+            resolver: Box::new(forward_resolver(
+                settings,
+                &settings.fallback.upstreams,
+                fallback_options,
+                anchors,
+            )?),
+            recursive_timeout: Duration::from_millis(u64::from(
+                settings.fallback.recursive_timeout_ms,
+            )),
+            timeout: Duration::from_millis(u64::from(settings.fallback.timeout_ms)),
+            metrics,
+        })
+    } else {
+        None
+    };
     Ok(Arc::new(ResolutionZone {
         origin: Name::root().into(),
-        backend: Backend::Recursive(Box::new(recursor)),
+        backend: Backend::Recursive {
+            recursor: Box::new(recursor),
+            fallback,
+        },
     }))
 }
 
@@ -281,8 +371,17 @@ impl ResponseHandler for Capture {
 }
 
 enum Backend<P: hickory_server::net::runtime::RuntimeProvider> {
-    Recursive(Box<Recursor<P>>),
+    Recursive {
+        recursor: Box<Recursor<P>>,
+        fallback: Option<FallbackBackend<P>>,
+    },
     Forward(Box<hickory_server::resolver::Resolver<P>>),
+}
+struct FallbackBackend<P: hickory_server::net::runtime::RuntimeProvider> {
+    resolver: Box<hickory_server::resolver::Resolver<P>>,
+    recursive_timeout: Duration,
+    timeout: Duration,
+    metrics: Arc<Metrics>,
 }
 struct ResolutionZone<P: hickory_server::net::runtime::RuntimeProvider> {
     origin: LowerName,
@@ -299,7 +398,7 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
     }
     fn can_validate_dnssec(&self) -> bool {
         match &self.backend {
-            Backend::Recursive(recursor) => recursor.is_validating(),
+            Backend::Recursive { recursor, .. } => recursor.is_validating(),
             Backend::Forward(resolver) => resolver.options().validate,
         }
     }
@@ -317,15 +416,65 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
         options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
         let result = match &self.backend {
-            Backend::Recursive(recursor) => recursor
-                .resolve(
-                    DnsQuery::query(name.into(), rtype),
-                    Instant::now(),
-                    options.dnssec_ok,
-                )
-                .await
-                .map(AuthLookup::Response)
-                .map_err(LookupError::from),
+            Backend::Recursive { recursor, fallback } => {
+                let query = DnsQuery::query(name.into(), rtype);
+                match fallback {
+                    Some(fallback) => {
+                        let recursive = timeout(
+                            fallback.recursive_timeout,
+                            recursor.resolve(query.clone(), Instant::now(), options.dnssec_ok),
+                        )
+                        .await;
+                        match recursive {
+                            Ok(Ok(message)) => Ok(AuthLookup::Response(message)),
+                            Ok(Err(error)) if !recursion_timed_out(&error) => {
+                                Err(LookupError::from(error))
+                            }
+                            Ok(Err(_)) | Err(_) => {
+                                fallback.metrics.attempts.fetch_add(1, Ordering::Relaxed);
+                                fallback
+                                    .metrics
+                                    .timeout_triggers
+                                    .fetch_add(1, Ordering::Relaxed);
+                                match timeout(
+                                    fallback.timeout,
+                                    fallback.resolver.lookup(Name::from(name), rtype),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(lookup)) => {
+                                        fallback.metrics.successes.fetch_add(1, Ordering::Relaxed);
+                                        Ok(AuthLookup::from(lookup))
+                                    }
+                                    Ok(Err(error)) => {
+                                        if error.is_no_records_found() {
+                                            fallback
+                                                .metrics
+                                                .successes
+                                                .fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            fallback
+                                                .metrics
+                                                .failures
+                                                .fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(LookupError::from(error))
+                                    }
+                                    Err(_) => {
+                                        fallback.metrics.failures.fetch_add(1, Ordering::Relaxed);
+                                        Err(LookupError::from(NetError::Timeout))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    None => recursor
+                        .resolve(query, Instant::now(), options.dnssec_ok)
+                        .await
+                        .map(AuthLookup::Response)
+                        .map_err(LookupError::from),
+                }
+            }
             Backend::Forward(resolver) => resolver
                 .lookup(Name::from(name), rtype)
                 .await
@@ -363,6 +512,14 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
     ) -> LookupControlFlow<AuthLookup> {
         unsupported()
     }
+}
+
+fn recursion_timed_out(error: &hickory_server::resolver::recursor::RecursorError) -> bool {
+    error.is_timeout()
+        || matches!(
+            error,
+            hickory_server::resolver::recursor::RecursorError::Timeout
+        )
 }
 
 fn unsupported() -> LookupControlFlow<AuthLookup> {

@@ -5,7 +5,7 @@
 Native validation: macOS ARM64. Phase 1 results below are historical and are not
 new Linux/Windows results for Phase 2.
 
-- `./scripts/dev.sh check`: format, Clippy with warnings denied, **37 tests**,
+- `./scripts/dev.sh check`: format, Clippy with warnings denied, **40 tests**,
   and doc tests pass. Socket tests run outside the restricted filesystem/network
   sandbox because its loopback binds return `Operation not permitted`.
 - `cargo +1.88.0 check --workspace --all-targets --locked`: passes.
@@ -46,6 +46,13 @@ feed compatibility, extended soak, or production performance. Windows runtime
 refresh/rollback is available through the Rust API, not a daemon CLI channel.
 Rollback snapshots are memory-only, schedules are UTC-only, and filtering checks
 question names rather than upstream CNAME chains. See [filtering](filtering.md).
+
+Issue #3 adds a local fixture proving that one identified recursive timeout
+invokes the configured fallback once, plus error-provenance tests proving that
+recursion-limit and query-budget failures do not invoke it. Config tests cover
+explicit enablement, deadline budgets, TLS identity, and direct listener-loop
+rejection. A Codex Security diff scan reviewed all five changed runtime/config
+files and found no reportable issue. Public fallback reachability was not tested.
 
 ## Phase 1 verification
 

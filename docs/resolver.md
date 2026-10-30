@@ -17,6 +17,31 @@ dig @127.0.0.1 -p 5353 example.com A +dnssec
 Use `config/forward.toml` for explicit encrypted forwarding. The same cache and
 resolver are shared across client transports. Only one mode runs at a time.
 
+## Optional recursive fallback
+
+Recursive mode stays the default and does not contact a forwarding provider
+unless `[resolver.fallback]` is explicitly enabled with at least one upstream.
+The decision path is:
+
+1. Filtering runs before any resolver work.
+2. Lumen checks the recursive cache and performs iterative resolution.
+3. A recursive answer, NXDOMAIN, NODATA, DNSSEC failure, generic SERVFAIL,
+   policy block, rate refusal, or non-timeout network error ends the decision.
+4. Only an identified recursive timeout starts one bounded fallback lookup.
+5. The fallback result is validated with the same DNSSEC and trust settings.
+
+`recursive_timeout_ms + timeout_ms` must fit within `limits.query_timeout_ms`.
+The fallback future is cancelled when its budget ends, so no background query
+continues after Lumen replies. Fallback endpoints must not match a Lumen
+listener. Take care with other loopback, split-network, NAT, and port-forwarded
+addresses because static validation cannot prove that they do not route back to
+Lumen.
+
+An enabled fallback discloses queries that time out during recursion to the
+chosen operator. Plain recursive DNS normally discloses parts of the lookup to
+root, TLD, and authoritative servers over UDP/TCP. Encrypted fallback protocols
+verify certificate identity and never downgrade to plaintext.
+
 ## Encrypted listeners
 
 Set `listen.certificate` and `listen.private_key`, then replace the empty
@@ -95,6 +120,10 @@ DNS reachability or a DNSSEC guarantee. No management operations are exposed.
 | `lumen_dns_timeouts_total` | counter |
 | `lumen_dns_failures_total` | counter |
 | `lumen_dns_active_queries` | gauge |
+| `lumen_dns_fallback_attempts_total` | counter |
+| `lumen_dns_fallback_successes_total` | counter |
+| `lumen_dns_fallback_failures_total` | counter |
+| `lumen_dns_fallback_trigger_recursion_timeout_total` | counter |
 
 These have no client/domain labels. Query names and history are not stored or
 logged. Full query logs, cache-hit metrics, latency histograms, and Grafana

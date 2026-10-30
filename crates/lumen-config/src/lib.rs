@@ -53,7 +53,7 @@ impl Default for Listeners {
     }
 }
 
-/// Resolver mode. Recursive mode never falls back to a public forwarder.
+/// Resolver mode. Recursive mode only uses a forwarder when fallback is explicit.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
@@ -80,6 +80,7 @@ pub struct Resolver {
     pub recursion_depth: u8,
     pub attempts: u8,
     pub upstream_timeout_ms: u32,
+    pub fallback: Fallback,
 }
 
 impl Default for Resolver {
@@ -99,6 +100,30 @@ impl Default for Resolver {
             recursion_depth: 24,
             attempts: 2,
             upstream_timeout_ms: 2000,
+            fallback: Fallback::default(),
+        }
+    }
+}
+
+/// Optional forwarding path used only after an identified recursive timeout.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Fallback {
+    pub enabled: bool,
+    pub recursive_timeout_ms: u32,
+    pub timeout_ms: u32,
+    pub attempts: u8,
+    pub upstreams: Vec<Upstream>,
+}
+
+impl Default for Fallback {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            recursive_timeout_ms: 7000,
+            timeout_ms: 2000,
+            attempts: 1,
+            upstreams: vec![],
         }
     }
 }
@@ -244,21 +269,91 @@ impl Config {
         if !r.dnssec && r.trust_anchor.is_some() {
             return Err("trust_anchor requires DNSSEC validation".into());
         }
+        self.validate_fallback()?;
         if r.upstream_ca.is_some()
-            && (r.mode != Mode::Forward
-                || !r.upstreams.iter().any(|u| {
+            && !r
+                .upstreams
+                .iter()
+                .chain(r.fallback.upstreams.iter())
+                .any(|u| {
                     matches!(
                         u.protocol,
                         UpstreamProtocol::Tls | UpstreamProtocol::Https | UpstreamProtocol::Quic
                     )
-                }))
+                })
         {
             return Err("upstream_ca requires encrypted forwarding".into());
         }
-        if r.upstreams.len() > 8 {
+        self.validate_upstreams()?;
+        for (name, value, maximum) in [
+            ("cache_entries", r.cache_entries, 65536),
+            ("nameserver_cache_entries", r.nameserver_cache_entries, 4096),
+            (
+                "validation_cache_entries",
+                r.validation_cache_entries,
+                65536,
+            ),
+            ("positive_ttl_secs", r.positive_ttl_secs, 604_800),
+            ("negative_ttl_secs", r.negative_ttl_secs, 86400),
+            ("recursion_depth", u32::from(r.recursion_depth), 64),
+            ("attempts", u32::from(r.attempts), 5),
+            ("upstream_timeout_ms", r.upstream_timeout_ms, 30000),
+            (
+                "fallback.recursive_timeout_ms",
+                r.fallback.recursive_timeout_ms,
+                60000,
+            ),
+            ("fallback.timeout_ms", r.fallback.timeout_ms, 30000),
+            ("fallback.attempts", u32::from(r.fallback.attempts), 5),
+            ("max_in_flight", self.limits.max_in_flight, 4096),
+            ("max_connections", self.limits.max_connections, 1024),
+            ("max_clients", self.limits.max_clients, 65536),
+            ("queries_per_second", self.limits.queries_per_second, 10000),
+            ("query_timeout_ms", self.limits.query_timeout_ms, 60000),
+            ("io_timeout_ms", self.limits.io_timeout_ms, 30000),
+        ] {
+            if value == 0 || value > maximum {
+                return Err(format!("{name} must be in 1..={maximum}"));
+            }
+        }
+        if self.limits.max_message_bytes < 512 {
+            return Err("max_message_bytes must be at least 512".into());
+        }
+        Ok(())
+    }
+
+    fn validate_fallback(&self) -> Result<(), String> {
+        let fallback = &self.resolver.fallback;
+        if fallback.enabled && self.resolver.mode != Mode::Recursive {
+            return Err("fallback is only available in recursive mode".into());
+        }
+        if fallback.enabled && fallback.upstreams.is_empty() {
+            return Err("enabled fallback needs explicit upstreams".into());
+        }
+        if fallback.upstreams.len() > 8 {
+            return Err("at most 8 fallback upstreams are allowed".into());
+        }
+        if fallback.enabled
+            && fallback
+                .recursive_timeout_ms
+                .saturating_add(fallback.timeout_ms)
+                > self.limits.query_timeout_ms
+        {
+            return Err("fallback budgets must fit within query_timeout_ms".into());
+        }
+        Ok(())
+    }
+
+    fn validate_upstreams(&self) -> Result<(), String> {
+        let resolver = &self.resolver;
+        if resolver.upstreams.len() > 8 {
             return Err("at most 8 upstreams are allowed".into());
         }
-        for upstream in &r.upstreams {
+        for upstream in resolver
+            .upstreams
+            .iter()
+            .chain(resolver.fallback.upstreams.iter())
+        {
             if upstream.address.port() == 0
                 || upstream.address.ip().is_unspecified()
                 || upstream.address.ip().is_multicast()
@@ -277,35 +372,28 @@ impl Config {
             {
                 return Err("encrypted upstream needs server_name".into());
             }
-        }
-        for (name, value, maximum) in [
-            ("cache_entries", r.cache_entries, 65536),
-            ("nameserver_cache_entries", r.nameserver_cache_entries, 4096),
-            (
-                "validation_cache_entries",
-                r.validation_cache_entries,
-                65536,
-            ),
-            ("positive_ttl_secs", r.positive_ttl_secs, 604_800),
-            ("negative_ttl_secs", r.negative_ttl_secs, 86400),
-            ("recursion_depth", u32::from(r.recursion_depth), 64),
-            ("attempts", u32::from(r.attempts), 5),
-            ("upstream_timeout_ms", r.upstream_timeout_ms, 30000),
-            ("max_in_flight", self.limits.max_in_flight, 4096),
-            ("max_connections", self.limits.max_connections, 1024),
-            ("max_clients", self.limits.max_clients, 65536),
-            ("queries_per_second", self.limits.queries_per_second, 10000),
-            ("query_timeout_ms", self.limits.query_timeout_ms, 60000),
-            ("io_timeout_ms", self.limits.io_timeout_ms, 30000),
-        ] {
-            if value == 0 || value > maximum {
-                return Err(format!("{name} must be in 1..={maximum}"));
+            if self.upstream_points_to_listener(upstream.address) {
+                return Err("upstream must not point to a Lumen listener".into());
             }
         }
-        if self.limits.max_message_bytes < 512 {
-            return Err("max_message_bytes must be at least 512".into());
-        }
         Ok(())
+    }
+
+    fn upstream_points_to_listener(&self, upstream: SocketAddr) -> bool {
+        [
+            &self.listen.udp,
+            &self.listen.tcp,
+            &self.listen.dot,
+            &self.listen.doh,
+            &self.listen.doq,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|listener| {
+            listener.port() == upstream.port()
+                && (listener.ip() == upstream.ip()
+                    || (listener.ip().is_unspecified() && listener.is_ipv4() == upstream.is_ipv4()))
+        })
     }
 }
 
@@ -375,6 +463,25 @@ mod tests {
         assert!(config.validate().is_err());
         config.resolver.upstreams[0].server_name = Some("cloudflare-dns.com".into());
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn fallback_is_explicit_bounded_and_cannot_loop() {
+        let mut config: Config = toml::from_str("schema_version = 1").unwrap();
+        config.resolver.fallback.enabled = true;
+        assert!(config.validate().is_err());
+        config.resolver.fallback.upstreams.push(Upstream {
+            address: "1.1.1.1:853".parse().unwrap(),
+            protocol: UpstreamProtocol::Tls,
+            server_name: Some("cloudflare-dns.com".into()),
+        });
+        assert!(config.validate().is_ok());
+        config.resolver.fallback.recursive_timeout_ms = 9000;
+        config.resolver.fallback.timeout_ms = 2000;
+        assert!(config.validate().is_err());
+        config.resolver.fallback.recursive_timeout_ms = 7000;
+        config.resolver.fallback.upstreams[0].address = "127.0.0.1:5353".parse().unwrap();
+        assert!(config.validate().is_err());
     }
     #[test]
     fn example_configs_paths_size_limits_and_nested_fields() {

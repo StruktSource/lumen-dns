@@ -609,7 +609,7 @@ async fn serve_metrics(listener: TcpListener, service: Arc<Service>) -> io::Resu
                 let mut input = Vec::new(); let mut byte = [0];
                 while input.len() < 4096 && !input.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).await?; input.push(byte[0]); }
                 let (status, body) = if !input.ends_with(b"\r\n\r\n") { ("431 Request Header Fields Too Large", String::new()) }
-                    else if input.starts_with(b"GET /metrics HTTP/1.") { ("200 OK", service.metrics.render() + &service.filter.metrics.render()) }
+                    else if input.starts_with(b"GET /metrics HTTP/1.") { ("200 OK", service.metrics.render() + &service.resolver.metrics().render() + &service.filter.metrics.render()) }
                     else if input.starts_with(b"GET /healthz HTTP/1.") { ("200 OK", "ok\n".into()) }
                     else { ("404 Not Found", String::new()) };
                 let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());

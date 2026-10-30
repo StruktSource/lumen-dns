@@ -203,10 +203,16 @@ async fn iterative_delegations_cache_and_depth_limit() {
         Name::root().into(),
         vec![Arc::new(ResolutionZone {
             origin: Name::root().into(),
-            backend: Backend::Recursive(Box::new(recursor)),
+            backend: Backend::Recursive {
+                recursor: Box::new(recursor),
+                fallback: None,
+            },
         })],
     );
-    let resolver = Resolver { catalog };
+    let resolver = Resolver {
+        catalog,
+        metrics: Arc::new(Metrics::default()),
+    };
     let mut request = Message::query();
     request.metadata.recursion_desired = true;
     request.add_query(DnsQuery::query(
@@ -311,6 +317,135 @@ async fn iterative_delegations_cache_and_depth_limit() {
         .is_err()
     );
     tasks.abort_all();
+}
+
+#[tokio::test]
+async fn recursion_timeout_invokes_fallback_once() {
+    let recursive_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let fallback_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut mapping = HashMap::new();
+    mapping.insert(
+        "198.41.0.4".parse().unwrap(),
+        recursive_socket.local_addr().unwrap(),
+    );
+    mapping.insert(
+        "203.0.113.53".parse().unwrap(),
+        fallback_socket.local_addr().unwrap(),
+    );
+    let provider = TestRuntime {
+        inner: TokioRuntimeProvider::default(),
+        mapping: Arc::new(mapping),
+    };
+    let mut tasks = JoinSet::new();
+    tasks.spawn(async move {
+        let mut buffer = [0; 4096];
+        loop {
+            let _ = recursive_socket.recv_from(&mut buffer).await.unwrap();
+        }
+    });
+    tasks.spawn(async move {
+        let mut buffer = [0; 4096];
+        loop {
+            let (size, peer) = fallback_socket.recv_from(&mut buffer).await.unwrap();
+            let request = Message::from_vec(&buffer[..size]).unwrap();
+            let mut response = Message::response(request.metadata.id, request.metadata.op_code);
+            response.metadata.recursion_available = true;
+            response.queries = request.queries;
+            let name = response.queries[0].name().clone();
+            response.add_answer(record(&name.to_ascii(), RData::A(A::new(203, 0, 113, 77))));
+            fallback_socket
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        }
+    });
+    let recursor = Recursor::new(
+        &["198.41.0.4".parse().unwrap()],
+        DnssecPolicy::ValidationDisabled,
+        None,
+        RecursorOptions {
+            deny_server: vec![],
+            ..RecursorOptions::default()
+        },
+        provider.clone(),
+    )
+    .unwrap();
+    let server = NameServerConfig::udp_and_tcp("203.0.113.53".parse().unwrap());
+    let mut options = ResolverOpts::default();
+    options.validate = false;
+    options.attempts = 1;
+    options.timeout = Duration::from_millis(250);
+    options.use_hosts_file = ResolveHosts::Never;
+    let forward = hickory_server::resolver::Resolver::builder_with_config(
+        ResolverConfig::from_parts(None, vec![], vec![server]),
+        provider,
+    )
+    .with_options(options)
+    .build()
+    .unwrap();
+    let metrics = Arc::new(Metrics::default());
+    let mut catalog = Catalog::new();
+    catalog.upsert(
+        Name::root().into(),
+        vec![Arc::new(ResolutionZone {
+            origin: Name::root().into(),
+            backend: Backend::Recursive {
+                recursor: Box::new(recursor),
+                fallback: Some(FallbackBackend {
+                    resolver: Box::new(forward),
+                    recursive_timeout: Duration::from_millis(30),
+                    timeout: Duration::from_millis(250),
+                    metrics: Arc::clone(&metrics),
+                }),
+            },
+        })],
+    );
+    let resolver = Resolver {
+        catalog,
+        metrics: Arc::clone(&metrics),
+    };
+    let mut request = Message::query();
+    request.metadata.recursion_desired = true;
+    request.add_query(DnsQuery::query(
+        Name::from_ascii("fallback.example.").unwrap(),
+        RecordType::A,
+    ));
+    let query = Query::parse(&request.to_vec().unwrap()).unwrap();
+    let bytes = timeout(
+        Duration::from_secs(1),
+        resolver.answer(
+            &query,
+            "127.0.0.1:12345".parse().unwrap(),
+            Transport::Udp,
+            4096,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let response = Message::from_vec(&bytes).unwrap();
+    assert!(
+        response
+            .answers
+            .iter()
+            .any(|answer| answer.data == RData::A(A::new(203, 0, 113, 77)))
+    );
+    assert_eq!(metrics.attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(metrics.successes.load(Ordering::Relaxed), 1);
+    assert_eq!(metrics.failures.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.timeout_triggers.load(Ordering::Relaxed), 1);
+    tasks.abort_all();
+}
+
+#[test]
+fn only_timeout_errors_are_fallback_eligible() {
+    use hickory_server::resolver::recursor::RecursorError;
+    assert!(recursion_timed_out(&RecursorError::Timeout));
+    assert!(recursion_timed_out(&RecursorError::Net(NetError::Timeout)));
+    assert!(!recursion_timed_out(
+        &RecursorError::RecursionLimitExceeded { count: 1 }
+    ));
+    assert!(!recursion_timed_out(&RecursorError::QueryBudgetExceeded));
 }
 
 #[tokio::test]

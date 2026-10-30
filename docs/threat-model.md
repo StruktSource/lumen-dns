@@ -12,7 +12,8 @@
 | QUIC resource exhaustion | Connection admission, transport windows, bounded streams, deadlines, no unidirectional streams or early data |
 | Cache poisoning and bad delegations | Hickory source/query matching, random query state, case randomization, bailiwick checks and DNSSEC |
 | Recursive access to local services | Hickory recommended authority-address filters retained; no automatic private-range exception for custom hints |
-| Bad upstream / certificate impostor | Local DNSSEC; explicit upstream IP and TLS name; verified CA chain; no insecure fallback |
+| Bad upstream / certificate impostor | Local DNSSEC; explicit upstream IP and TLS name; verified CA chain; timeout-only opt-in fallback; no insecure downgrade |
+| Forwarding loop | Reject exact listener endpoints; bound recursive/fallback deadlines; document NAT and split-network limits |
 | DNSSEC computational load | Recursive depth, bounded validation cache, NSEC3 limits, outer query deadline |
 | Query floods / many client IPs | Global query slots, per-IP one-second rate windows, bounded client table, bounded UDP workers |
 | Listener silently fails | Daemon observes background task errors; startup binds all sockets before serving |

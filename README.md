@@ -9,6 +9,8 @@
 **The DNS resolver works today.** Lumen can resolve queries recursively, validate
 DNSSEC, cache answers, and serve plaintext or encrypted DNS. It can also forward
 queries to a configured upstream.
+Recursive mode can also use an explicitly configured timeout-only fallback. It
+is disabled by default and never activates for DNSSEC failure or DNS answers.
 
 Lumen also filters DNS with global and per-client rules, imported lists, category
 profiles, and UTC schedules. Lumen is pre-release; wider testing and security
@@ -26,7 +28,7 @@ review remain before production readiness.
 Defaults: loopback clients only, recursive resolution, DNSSEC on, no query
 history, no telemetry, and no management API. Encrypted listeners require
 operator-supplied certificates and keys. Filtering is opt-in through config;
-no third-party blocklists are enabled by default.
+no third-party blocklists or external DNS providers are enabled by default.
 
 ## Run
 

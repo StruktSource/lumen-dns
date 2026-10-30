@@ -29,6 +29,18 @@ recursion_depth = 24
 # root_hints = "root.hints"
 # trust_anchor = "root.key"
 
+# Optional timeout-only fallback. Disabled means self-recursion never contacts it.
+[resolver.fallback]
+enabled = false
+recursive_timeout_ms = 7000
+timeout_ms = 2000
+attempts = 1
+# Add an upstream only when enabling fallback. Encrypted protocols need server_name.
+# [[resolver.fallback.upstreams]]
+# address = "1.1.1.1:853"
+# protocol = "tls"
+# server_name = "cloudflare-dns.com"
+
 [limits]
 max_in_flight = 128
 max_connections = 64

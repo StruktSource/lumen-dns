@@ -70,12 +70,32 @@ and restart after rotation. Lumen does not create or download certificates.
 | `recursion_depth` | `24` | 1–64; recursive query and nameserver recursion |
 | `attempts` | `2` | 1–5; forwarding attempts |
 | `upstream_timeout_ms` | `2000` | 1–30000; per-attempt forwarding timeout |
+| `fallback` | Disabled | Optional timeout-only forwarding after recursive mode times out |
 
 Recursive transport retries/timeouts use Hickory's bounded internal policy. The
 outer query deadline applies to both modes. Recursive mode filters private,
 loopback, link-local, and other special-use authority addresses using Hickory's
 recommended server filters. Custom root hints do not disable that boundary.
 Recursive mode never silently switches to a public forwarding resolver.
+
+`[resolver.fallback]` fields:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Must be set explicitly; recursive mode only |
+| `recursive_timeout_ms` | `7000` | 1–60000; recursive budget before fallback eligibility |
+| `timeout_ms` | `2000` | 1–30000; whole fallback lookup budget |
+| `attempts` | `1` | 1–5, bounded inside `timeout_ms` |
+| `upstreams` | `[]` | 1–8 explicit endpoints required when enabled |
+
+Fallback upstreams use the same fields and transport rules as forward-mode
+upstreams. `recursive_timeout_ms + timeout_ms` must not exceed the whole query
+deadline. Lumen rejects a fallback endpoint matching any configured listener.
+Other loopback, NAT, split-network, or forwarded addresses can still create a
+loop if they route back to Lumen; verify the network path before enabling them.
+The fallback runs only for resolver-layer recursion timeouts. NXDOMAIN, NODATA,
+DNSSEC bogus responses, generic SERVFAIL, filtering, admission refusal, and
+other network failures do not trigger it.
 
 Cache capacities count entries, not process RSS bytes. Record sizes, separate
 caches, in-flight work, library eviction maintenance, and TLS/QUIC buffers also
