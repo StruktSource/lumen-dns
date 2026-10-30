@@ -1,0 +1,66 @@
+# Offline Phase 2 example. All example domains use the reserved .example suffix.
+schema_version = 1
+metrics = "127.0.0.1:9153"
+
+[listen]
+udp = ["127.0.0.1:5353", "[::1]:5353"]
+tcp = ["127.0.0.1:5353", "[::1]:5353"]
+allow_clients = ["127.0.0.0/8", "::1/128"]
+
+[filtering]
+default_profile = "family"
+decision_log = false
+
+[filtering.action]
+kind = "nxdomain"
+
+[filtering.rules]
+allow = ["safe.ads.example"]
+block = ["manual.example", "=exact.example"]
+
+[[filtering.lists]]
+id = "ads"
+format = "adblock"
+text = "||ads.example^\n@@||needed.ads.example^"
+refresh_secs = 0
+
+[[filtering.lists]]
+id = "adult"
+format = "domains"
+text = "adult.example"
+category = "adult"
+refresh_secs = 0
+
+[[filtering.lists]]
+id = "games"
+format = "hosts"
+text = "0.0.0.0 games.example"
+category = "games"
+refresh_secs = 0
+
+[[filtering.profiles]]
+id = "family"
+categories = ["adult"]
+
+[[filtering.profiles]]
+id = "bedtime"
+categories = ["adult", "games"]
+[filtering.profiles.rules]
+block = ["social.example"]
+[[filtering.profiles.schedules]]
+days = [1, 2, 3, 4, 5, 6, 7]
+start_minute = 1260 # 21:00 UTC
+end_minute = 420   # 07:00 UTC next day
+
+[[filtering.groups]]
+id = "children"
+profile = "bedtime"
+
+[[filtering.devices]]
+id = "example-device"
+addresses = ["192.0.2.10", "2001:db8::10"]
+group = "children"
+
+[[filtering.subnets]]
+network = "192.0.2.0/24"
+profile = "family"

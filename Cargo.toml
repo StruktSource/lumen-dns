@@ -4,6 +4,7 @@ members = [
   "apps/lumenctl",
   "crates/lumen-api",
   "crates/lumen-config",
+  "crates/lumen-filter",
   "crates/lumen-core",
   "crates/lumen-proto",
   "crates/lumen-resolver",

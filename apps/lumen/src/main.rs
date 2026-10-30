@@ -5,7 +5,7 @@ use lumen_config::Config;
 use lumen_core::RunningServer;
 use std::{io, net::SocketAddr, path::PathBuf};
 
-const HELP: &str = "Lumen — private DNS, in your control.\n\nUsage: lumen --config FILE [--check]\n       lumen --bind ADDRESS\n       lumen --version\n\n--config FILE   Load schema-versioned TOML configuration.\n--bind ADDRESS  Run UDP/TCP recursive DNS (loopback clients by default).\n--check         Validate config, root hints, trust anchors, and TLS keys, then exit.\n--help          Show help.\n--version       Show version.\n\nEncrypted listeners require explicit config and certificate/key files.";
+const HELP: &str = "Lumen — private DNS, in your control.\n\nUsage: lumen --config FILE [--check]\n       lumen --bind ADDRESS\n       lumen --version\n\n--config FILE   Load schema-versioned TOML configuration.\n--bind ADDRESS  Run UDP/TCP recursive DNS (loopback clients by default).\n--check         Validate config, filter sources, root hints, trust anchors, and TLS keys, then exit.\n--help          Show help.\n--version       Show version.\n\nEncrypted listeners require explicit config and certificate/key files.";
 
 enum Command {
     Help,
@@ -80,11 +80,11 @@ async fn main() -> io::Result<()> {
                 config.listen.tcp = vec![bind];
             }
             if check {
-                RunningServer::check(&config)?;
+                RunningServer::check(&config).await?;
                 println!("Lumen configuration valid");
                 return Ok(());
             }
-            let mut server = RunningServer::start(config)?;
+            let mut server = RunningServer::start(config).await?;
             for (protocol, address) in &server.endpoints {
                 println!("Lumen {protocol:?} listening on {address}");
             }

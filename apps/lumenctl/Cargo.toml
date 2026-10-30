@@ -7,7 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-lumen-core = { path = "../../crates/lumen-core" }
+lumen-config = { path = "../../crates/lumen-config" }
+lumen-filter = { path = "../../crates/lumen-filter" }
+tokio.workspace = true
 
 [lints]
 workspace = true

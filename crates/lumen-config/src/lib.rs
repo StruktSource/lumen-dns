@@ -17,6 +17,7 @@ pub struct Config {
     pub listen: Listeners,
     pub resolver: Resolver,
     pub limits: Limits,
+    pub filtering: lumen_filter::config::Config,
     pub metrics: Option<SocketAddr>,
 }
 
@@ -173,6 +174,13 @@ impl Config {
                 *item = base.join(&*item);
             }
         }
+        for list in &mut config.filtering.lists {
+            if let Some(path) = &mut list.path
+                && path.is_relative()
+            {
+                *path = base.join(&*path);
+            }
+        }
         config.validate()?;
         Ok(config)
     }
@@ -218,6 +226,7 @@ impl Config {
         {
             return Err("metrics must bind a nonzero loopback port".into());
         }
+        self.filtering.validate()?;
         self.validate_resolver()
     }
 
@@ -370,7 +379,7 @@ mod tests {
     #[test]
     fn example_configs_paths_size_limits_and_nested_fields() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for name in ["lumen.toml", "forward.toml"] {
+        for name in ["lumen.toml", "forward.toml", "filtering.toml"] {
             assert!(Config::load(&root.join("config").join(name)).is_ok());
         }
         assert!(toml::from_str::<Config>("schema_version = 1\n[limits]\nmisspelled = 1").is_err());
@@ -384,6 +393,11 @@ mod tests {
         assert_eq!(
             Config::load(&path).unwrap().resolver.root_hints,
             Some(directory.path().join("root.hints"))
+        );
+        fs::write(&path, "schema_version = 1\n[[filtering.lists]]\nid = 'local'\nformat = 'domains'\npath = 'block.txt'").unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().filtering.lists[0].path,
+            Some(directory.path().join("block.txt"))
         );
         fs::write(&path, " ".repeat(65537)).unwrap();
         assert!(Config::load(&path).is_err());

@@ -1,0 +1,25 @@
+[package]
+name = "lumen-filter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lumen-proto = { path = "../lumen-proto" }
+serde.workspace = true
+ipnet.workspace = true
+tokio.workspace = true
+rustls.workspace = true
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+tempfile = "3"
+toml = "0.9"
+rcgen = "0.14"
+tokio-rustls.workspace = true
+
+[lints]
+workspace = true

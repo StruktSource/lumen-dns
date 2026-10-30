@@ -135,6 +135,7 @@ impl ClientRates {
 struct Service {
     config: Arc<Config>,
     resolver: Resolver,
+    filter: Arc<lumen_filter::Filter>,
     queries: Arc<Semaphore>,
     connections: Arc<Semaphore>,
     clients: Mutex<ClientRates>,
@@ -185,6 +186,31 @@ impl Service {
             self.metrics.refused.fetch_add(1, Ordering::Relaxed);
             return Some(self.record_response(query.response(Rcode::Refused)));
         };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let decision = self.filter.decide_dns(
+            query.message.queries[0].name(),
+            peer.ip().to_canonical(),
+            now,
+        );
+        if self.config.filtering.decision_log {
+            let name = query.message.queries[0].name().to_ascii();
+            eprintln!(
+                "filter client={} domain={name:?} {decision}",
+                peer.ip().to_canonical()
+            );
+        }
+        if let Some(action) = &decision.action {
+            let maximum = usize::from(self.config.limits.max_message_bytes);
+            let maximum = if protocol == Transport::Udp {
+                maximum.min(usize::from(query.message.max_payload().max(512)))
+            } else {
+                maximum
+            };
+            return Some(self.record_response(lumen_filter::response(&query, action, maximum)));
+        }
         self.metrics.active.fetch_add(1, Ordering::Relaxed);
         let _active = ActiveQuery(&self.metrics.active);
         let result = timeout(

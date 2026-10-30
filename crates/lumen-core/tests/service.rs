@@ -233,7 +233,9 @@ async fn udp_tcp_ipv4_ipv6_and_tcp_fallback() {
     let fixture = fixture().await;
     for ip in ["127.0.0.1", "[::1]"] {
         let bind = address(ip);
-        let mut server = RunningServer::start(config(fixture.address, bind)).unwrap();
+        let mut server = RunningServer::start(config(fixture.address, bind))
+            .await
+            .unwrap();
         for kind in [RecordType::A, RecordType::AAAA] {
             let packet = query("ok.example.", kind);
             let reply = udp(bind, &packet).await;
@@ -259,7 +261,9 @@ async fn udp_tcp_ipv4_ipv6_and_tcp_fallback() {
 async fn positive_negative_nodata_cache_and_expiry() {
     let fixture = fixture().await;
     let bind = address("127.0.0.1");
-    let mut server = RunningServer::start(config(fixture.address, bind)).unwrap();
+    let mut server = RunningServer::start(config(fixture.address, bind))
+        .await
+        .unwrap();
     for (name, code) in [
         ("ok.example.", ResponseCode::NoError),
         ("missing.example.", ResponseCode::NXDomain),
@@ -369,7 +373,8 @@ async fn encrypted_listeners_ipv4_ipv6_and_doh_contract() {
         cfg.listen.doq = vec![doq];
         cfg.listen.certificate = Some(directory.path().join("cert.pem"));
         cfg.listen.private_key = Some(directory.path().join("key.pem"));
-        let mut server = RunningServer::start(cfg).unwrap();
+        cfg.filtering.rules.block = vec!["blocked.example".into()];
+        let mut server = RunningServer::start(cfg).await.unwrap();
         let packet = query("ok.example.", RecordType::A);
         let stream = TcpStream::connect(dot).await.unwrap();
         let mut stream = TlsConnector::from(Arc::new(client_tls(cert.clone(), b"dot")))
@@ -377,6 +382,24 @@ async fn encrypted_listeners_ipv4_ipv6_and_doh_contract() {
             .await
             .unwrap();
         assert!(!framed(&mut stream, &packet).await.answers.is_empty());
+        let blocked = query("blocked.example.", RecordType::A);
+        assert_eq!(
+            framed(&mut stream, &blocked).await.metadata.response_code,
+            ResponseCode::NXDomain
+        );
+        let (_, denied) = doh(
+            doh_addr,
+            client_tls(cert.clone(), b"h2"),
+            &blocked,
+            "POST",
+            "/dns-query",
+            "application/dns-message",
+        )
+        .await;
+        assert_eq!(
+            Message::from_vec(&denied).unwrap().metadata.response_code,
+            ResponseCode::NXDomain
+        );
         let (status, body) = doh(
             doh_addr,
             client_tls(cert.clone(), b"h2"),
@@ -460,6 +483,26 @@ async fn encrypted_listeners_ipv4_ipv6_and_doh_contract() {
             .unwrap()
             .unwrap();
         assert!(!Message::from_vec(&data[2..]).unwrap().answers.is_empty());
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        let mut blocked = blocked;
+        blocked[..2].fill(0);
+        send.write_all(&u16::try_from(blocked.len()).unwrap().to_be_bytes())
+            .await
+            .unwrap();
+        send.write_all(&blocked).await.unwrap();
+        send.finish().unwrap();
+        let denied = timeout(Duration::from_secs(3), recv.read_to_end(65537))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Message::from_vec(&denied[2..])
+                .unwrap()
+                .metadata
+                .response_code,
+            ResponseCode::NXDomain
+        );
+        assert_eq!(server.filter.metrics.blocked.load(Ordering::Relaxed), 3);
         connection.close(0_u32.into(), b"done");
         endpoint.close(0_u32.into(), b"done");
         server.shutdown().await;
@@ -474,7 +517,7 @@ async fn malformed_udp_truncation_metrics_and_deadlines() {
     cfg.limits.query_timeout_ms = 100;
     let metrics = address("127.0.0.1");
     cfg.metrics = Some(metrics);
-    let mut server = RunningServer::start(cfg).unwrap();
+    let mut server = RunningServer::start(cfg).await.unwrap();
     let mut malformed = query("ok.example.", RecordType::A);
     malformed.push(42);
     assert_eq!(
@@ -517,7 +560,7 @@ async fn connection_rate_concurrency_limits_and_shutdown() {
     cfg.limits.query_timeout_ms = 250;
     cfg.limits.io_timeout_ms = 100;
     cfg.limits.queries_per_second = 3;
-    let mut server = RunningServer::start(cfg).unwrap();
+    let mut server = RunningServer::start(cfg).await.unwrap();
     let first = TcpStream::connect(bind).await.unwrap();
     sleep(Duration::from_millis(15)).await;
     let mut second = TcpStream::connect(bind).await.unwrap();
@@ -556,7 +599,9 @@ async fn connection_rate_concurrency_limits_and_shutdown() {
             .is_err()
     );
     server.shutdown().await;
-    let mut restarted = RunningServer::start(config(fixture.address, bind)).unwrap();
+    let mut restarted = RunningServer::start(config(fixture.address, bind))
+        .await
+        .unwrap();
     restarted.shutdown().await;
 }
 
@@ -620,7 +665,7 @@ async fn dnssec_valid_bogus_wrong_anchor_and_signed_denial() {
     let mut cfg = config(upstream, bind);
     cfg.resolver.dnssec = true;
     cfg.resolver.trust_anchor = Some(anchor.clone());
-    let mut server = RunningServer::start(cfg.clone()).unwrap();
+    let mut server = RunningServer::start(cfg.clone()).await.unwrap();
     let mut packet = Message::from_vec(&query("valid.example.", RecordType::A)).unwrap();
     let mut edns = Edns::new();
     edns.set_dnssec_ok(true).set_max_payload(1232);
@@ -648,7 +693,7 @@ async fn dnssec_valid_bogus_wrong_anchor_and_signed_denial() {
     let key = EcdsaSigningKey::from_pkcs8(&der, Algorithm::ECDSAP256SHA256).unwrap();
     let wrong = DNSKEY::new(true, true, false, key.to_public_key().unwrap());
     std::fs::write(&anchor, format!(". 60 IN DNSKEY {wrong}\n")).unwrap();
-    let mut server = RunningServer::start(cfg).unwrap();
+    let mut server = RunningServer::start(cfg).await.unwrap();
     assert_eq!(
         udp(bind, &query("valid.example.", RecordType::A))
             .await
@@ -675,7 +720,7 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
     upstream_cfg.listen.doq = vec![quic];
     upstream_cfg.listen.certificate = Some(directory.path().join("cert.pem"));
     upstream_cfg.listen.private_key = Some(directory.path().join("key.pem"));
-    let mut upstream = RunningServer::start(upstream_cfg).unwrap();
+    let mut upstream = RunningServer::start(upstream_cfg).await.unwrap();
     for (protocol, address) in [
         (UpstreamProtocol::Tls, tls),
         (UpstreamProtocol::Https, https),
@@ -686,7 +731,7 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
         cfg.resolver.upstreams[0].protocol = protocol;
         cfg.resolver.upstreams[0].server_name = Some("localhost".into());
         cfg.resolver.upstream_ca = Some(directory.path().join("cert.pem"));
-        let mut server = RunningServer::start(cfg.clone()).unwrap();
+        let mut server = RunningServer::start(cfg.clone()).await.unwrap();
         assert_eq!(
             udp(bind, &query("ok.example.", RecordType::A))
                 .await
@@ -698,7 +743,7 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
         server.shutdown().await;
         cfg.resolver.upstreams[0].server_name = Some("wrong.example".into());
         cfg.limits.query_timeout_ms = 150;
-        let mut server = RunningServer::start(cfg).unwrap();
+        let mut server = RunningServer::start(cfg).await.unwrap();
         assert_eq!(
             udp(bind, &query("ok.example.", RecordType::A))
                 .await
@@ -718,11 +763,11 @@ async fn startup_is_atomic_and_load_stays_bounded() {
     let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut invalid = config(fixture.address, bind);
     invalid.listen.tcp.push(held.local_addr().unwrap());
-    assert!(RunningServer::start(invalid).is_err());
+    assert!(RunningServer::start(invalid).await.is_err());
     let mut cfg = config(fixture.address, bind);
     cfg.limits.queries_per_second = 1000;
     cfg.limits.max_in_flight = 16;
-    let mut server = RunningServer::start(cfg).unwrap();
+    let mut server = RunningServer::start(cfg).await.unwrap();
     for batch in 0..32 {
         let mut tasks = JoinSet::new();
         for index in 0..8 {
@@ -744,4 +789,95 @@ async fn startup_is_atomic_and_load_stays_bounded() {
     }
     assert_eq!(server.metrics.queries.load(Ordering::Relaxed), 256);
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn filtering_precedes_shared_cache_updates_and_rollback() {
+    use lumen_filter::{
+        config::{Device, List, Profile, Rules},
+        rules::Format,
+    };
+    let fixture = fixture().await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("list.txt");
+    std::fs::write(&path, "other.example").unwrap();
+    let v4 = address("127.0.0.1");
+    let v6 = address("[::1]");
+    let mut cfg = config(fixture.address, v4);
+    cfg.listen.udp.push(v6);
+    cfg.listen.tcp.push(v6);
+    cfg.filtering.lists = vec![List {
+        id: "local".into(),
+        format: Format::Domains,
+        path: Some(path.clone()),
+        text: None,
+        url: None,
+        category: None,
+        refresh_secs: 0,
+    }];
+    cfg.filtering.profiles = vec![Profile {
+        id: "v6".into(),
+        rules: Rules {
+            block: vec!["ok.example".into()],
+            ..Rules::default()
+        },
+        ..Profile::default()
+    }];
+    cfg.filtering.devices = vec![Device {
+        id: "v6-client".into(),
+        addresses: vec!["::1".parse().unwrap()],
+        profile: Some("v6".into()),
+        group: None,
+    }];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    let packet = query("ok.example.", RecordType::A);
+    assert!(!udp(v4, &packet).await.answers.is_empty());
+    let count = fixture.queries.load(Ordering::Relaxed);
+    assert_eq!(
+        udp(v6, &packet).await.metadata.response_code,
+        ResponseCode::NXDomain
+    );
+    let mut tcp = TcpStream::connect(v6).await.unwrap();
+    assert_eq!(
+        framed(&mut tcp, &packet).await.metadata.response_code,
+        ResponseCode::NXDomain
+    );
+    assert_eq!(fixture.queries.load(Ordering::Relaxed), count);
+    std::fs::write(&path, "ok.example").unwrap();
+    server.filter.refresh().await.unwrap();
+    let blocked = udp(v4, &packet).await;
+    assert_eq!(blocked.metadata.response_code, ResponseCode::NXDomain);
+    assert!(!blocked.metadata.authentic_data);
+    assert_eq!(fixture.queries.load(Ordering::Relaxed), count);
+    std::fs::write(&path, "https://bad.example").unwrap();
+    assert!(server.filter.refresh().await.is_err());
+    assert_eq!(
+        udp(v4, &packet).await.metadata.response_code,
+        ResponseCode::NXDomain
+    );
+    server.filter.rollback().await.unwrap();
+    assert!(!udp(v4, &packet).await.answers.is_empty());
+    assert_eq!(fixture.queries.load(Ordering::Relaxed), count);
+    assert!(!server.filter.refresh_due().await.unwrap());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn bad_filter_source_fails_before_listeners_open() {
+    let fixture = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(fixture.address, bind);
+    cfg.filtering.lists.push(lumen_filter::config::List {
+        id: "broken".into(),
+        format: lumen_filter::rules::Format::Domains,
+        text: Some("bad/url".into()),
+        path: None,
+        url: None,
+        category: None,
+        refresh_secs: 0,
+    });
+    assert!(RunningServer::start(cfg).await.is_err());
+    let _tcp = TcpListener::bind(bind).await.unwrap();
+    let _udp = UdpSocket::bind(bind).await.unwrap();
+    assert_eq!(fixture.queries.load(Ordering::Relaxed), 0);
 }

@@ -27,6 +27,7 @@ pub struct RunningServer {
     tasks: JoinSet<io::Result<()>>,
     pub endpoints: Vec<(Transport, SocketAddr)>,
     pub metrics: Arc<Metrics>,
+    pub filter: Arc<lumen_filter::Filter>,
 }
 
 impl RunningServer {
@@ -34,7 +35,8 @@ impl RunningServer {
     ///
     /// # Errors
     /// Fails startup if any enabled transport cannot be configured or bound.
-    pub fn start(config: Config) -> io::Result<Self> {
+    #[allow(clippy::too_many_lines)] // Bind all resources before starting workers.
+    pub async fn start(config: Config) -> io::Result<Self> {
         tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         config.validate().map_err(io::Error::other)?;
         let resolver = lumen_resolver::Resolver::new(&config).map_err(io::Error::other)?;
@@ -46,12 +48,24 @@ impl RunningServer {
         } else {
             Some(credentials(&config)?)
         };
+        let filter = Arc::new(
+            lumen_filter::Filter::load(config.filtering.clone())
+                .await
+                .map_err(io::Error::other)?,
+        );
+        #[cfg(unix)]
+        let mut refresh_signal =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())?;
+        #[cfg(unix)]
+        let mut rollback_signal =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2())?;
         let metrics = Arc::new(Metrics::default());
         let service = Arc::new(Service {
             queries: Arc::new(Semaphore::new(config.limits.max_in_flight as usize)),
             connections: Arc::new(Semaphore::new(config.limits.max_connections as usize)),
             clients: std::sync::Mutex::default(),
             resolver,
+            filter: Arc::clone(&filter),
             config: Arc::new(config),
             metrics: Arc::clone(&metrics),
         });
@@ -110,6 +124,32 @@ impl RunningServer {
         for endpoint in quic {
             tasks.spawn(serve_quic(endpoint, Arc::clone(&service)));
         }
+        #[cfg(unix)]
+        {
+            let control = Arc::clone(&filter);
+            tasks.spawn(async move {
+                loop {
+                    let result = tokio::select! {
+                        _ = refresh_signal.recv() => control.refresh().await,
+                        _ = rollback_signal.recv() => control.rollback().await,
+                    };
+                    if result.is_err() {
+                        eprintln!("filter control failed; keeping live rules");
+                    } else {
+                        eprintln!("filter control applied");
+                    }
+                }
+            });
+        }
+        let refreshing = Arc::clone(&filter);
+        tasks.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                if refreshing.refresh_due().await.is_err() {
+                    eprintln!("filter refresh failed; keeping previous rules");
+                }
+            }
+        });
         if let Some(listener) = metrics_listener {
             tasks.spawn(serve_metrics(listener, service));
         }
@@ -117,6 +157,7 @@ impl RunningServer {
             tasks,
             endpoints,
             metrics,
+            filter,
         })
     }
 
@@ -124,9 +165,12 @@ impl RunningServer {
     ///
     /// # Errors
     /// Same configuration and credential failures as startup.
-    pub fn check(config: &Config) -> io::Result<()> {
+    pub async fn check(config: &Config) -> io::Result<()> {
         config.validate().map_err(io::Error::other)?;
         let _ = lumen_resolver::Resolver::new(config).map_err(io::Error::other)?;
+        let _ = lumen_filter::Filter::load(config.filtering.clone())
+            .await
+            .map_err(io::Error::other)?;
         if !config.listen.dot.is_empty()
             || !config.listen.doh.is_empty()
             || !config.listen.doq.is_empty()
@@ -565,7 +609,7 @@ async fn serve_metrics(listener: TcpListener, service: Arc<Service>) -> io::Resu
                 let mut input = Vec::new(); let mut byte = [0];
                 while input.len() < 4096 && !input.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).await?; input.push(byte[0]); }
                 let (status, body) = if !input.ends_with(b"\r\n\r\n") { ("431 Request Header Fields Too Large", String::new()) }
-                    else if input.starts_with(b"GET /metrics HTTP/1.") { ("200 OK", service.metrics.render()) }
+                    else if input.starts_with(b"GET /metrics HTTP/1.") { ("200 OK", service.metrics.render() + &service.filter.metrics.render()) }
                     else if input.starts_with(b"GET /healthz HTTP/1.") { ("200 OK", "ok\n".into()) }
                     else { ("404 Not Found", String::new()) };
                 let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
