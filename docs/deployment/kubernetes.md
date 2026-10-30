@@ -14,7 +14,9 @@ helm upgrade --install lumen deploy/helm/lumen --namespace lumen --create-namesp
 
 Edit the config ACL for the real pod and client networks. The default NetworkPolicy
 accepts DNS only from the same namespace and permits resolver egress on DNS and
-encrypted-DNS ports. Review it for the cluster CNI. Encrypted listeners can mount
+encrypted-DNS ports. It lists both Service port 53 and pod target port 5353 so
+CNIs that enforce before or after Service translation keep the same behavior.
+Review it for the cluster CNI. Encrypted listeners can mount
 an existing TLS Secret through `tls.existingSecret`; the config must name files
 under `/etc/lumen/tls`.
 
