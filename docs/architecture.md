@@ -20,6 +20,15 @@ All DNS transports share one resolver/cache set and one global query budget.
 A listener failure reaches the daemon; individual client IO failures are isolated.
 Shutdown cancels listener and child tasks. No thread is created per query.
 
+## Platform boundary
+
+The workspace above is the only DNS implementation. Native binaries, OCI images,
+Docker Compose, Podman, Kubernetes, Proxmox LXC, and Unraid all run `apps/lumen`
+with the same crates and TOML schema. Platform files may choose paths, service
+users, port mapping, probes, and shutdown integration. They must not fork resolver,
+DNSSEC, cache, filtering, or transport behavior. Conditional compilation is
+limited to OS signal handling and does not change DNS results.
+
 ## Crate ownership
 
 | Crate | Owns |
@@ -52,4 +61,6 @@ opt-in history. The web shell and future scoped API cannot affect parser ownersh
 or bypass resolver limits. Future plugins need explicit permissions.
 
 See [configuration](configuration.md), [resolver behavior](resolver.md), and
-[threat model](threat-model.md) for operational contracts.
+[threat model](threat-model.md) for operational contracts. The
+[compatibility matrix](deployment/compatibility.md) keeps runtime evidence apart
+from build-only or planned support.

@@ -66,9 +66,14 @@ checks in [verification](verification.md). It does not mean production-ready.
 ## Phase 4 — Deployment
 
 - [x] Local Docker/OrbStack build base
+- [x] One shared Rust DNS core and schema across native and container targets
+- [x] Native AMD64/ARM64 Linux, macOS, and Windows CI job definitions
+- [x] Versioned native archive, checksum, SBOM/provenance, and OCI publish definitions
+- [x] Restricted Docker Compose, Kubernetes, Helm, and systemd deployment files
+- [x] Docker, Podman, Kubernetes, bare-metal, Proxmox, Unraid, Pi, macOS, and Windows guides
 - [ ] Multi-architecture image publishing and platform runtime validation
-- [ ] Network-wide and local-only Compose examples
-- [ ] Proxmox LXC, Unraid, systemd, bare-metal guides
+- [ ] Passing native CI evidence for every configured runner and release artifact
+- [ ] Real Proxmox, Unraid, Raspberry Pi, and dual-stack Kubernetes validation
 - [ ] Backup, restore, upgrade, removal tests
 
 ## Phase 5 — Advanced DNS and availability

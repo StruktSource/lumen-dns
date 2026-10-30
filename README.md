@@ -57,6 +57,8 @@ See [filtering guide](docs/filtering.md), [resolver guide](docs/resolver.md), [c
 [upstream provider presets](docs/upstream-providers.md),
 [security boundaries](docs/threat-model.md), [verification](docs/verification.md),
 and [performance snapshots](docs/performance.md).
+See the [platform compatibility matrix](docs/deployment/compatibility.md) and
+[deployment guides](docs/deployment/) before any network-wide install.
 Track remaining work in [TODO](docs/TODO.md) and [implementation checklist](docs/progress.md).
 The [product plan](docs/DNS_SERVICE_PLAN.md) describes the complete intended product.
 

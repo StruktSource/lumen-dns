@@ -2,24 +2,8 @@ name: CI
 
 on:
   pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - '**/*.mdx'
-      - '**/*.rst'
-      - 'docs/**'
-      - '.agent/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/PULL_REQUEST_TEMPLATE/**'
   push:
     branches: [main]
-    paths-ignore:
-      - '**/*.md'
-      - '**/*.mdx'
-      - '**/*.rst'
-      - 'docs/**'
-      - '.agent/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/PULL_REQUEST_TEMPLATE/**'
   workflow_dispatch:
 
 permissions:
@@ -29,79 +13,143 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  RUST_VERSION: 1.95.0
+
 jobs:
-  check:
-    name: Check (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  native:
+    name: Native (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-2025]
+        include:
+          - { name: linux-amd64, runner: ubuntu-24.04 }
+          - { name: linux-arm64, runner: ubuntu-24.04-arm }
+          - { name: macos-arm64, runner: macos-15 }
+          - { name: macos-amd64, runner: macos-15-intel }
+          - { name: windows-amd64, runner: windows-2025 }
+          - { name: windows-arm64-experimental, runner: windows-11-arm }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - name: Install Rust
-        run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
-      - name: Check
-        run: cargo +1.95.0 check --workspace --all-targets --locked
-      - name: Test
-        if: runner.os != 'Windows'
-        run: cargo +1.95.0 test --workspace --locked
-      - name: Windows development checks
-        if: runner.os == 'Windows'
-        env:
-          RUSTUP_TOOLCHAIN: 1.95.0
-        run: .\scripts\dev.ps1 check
+        run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal
+      - name: Check all targets
+        run: cargo +${{ env.RUST_VERSION }} check --workspace --all-targets --locked
+      - name: Test DNS core and integrations
+        run: cargo +${{ env.RUST_VERSION }} test --workspace --locked
+      - name: Validate release and example configs
+        run: |
+          cargo +${{ env.RUST_VERSION }} run --locked --bin lumen -- --config config/lumen.toml --check
+          cargo +${{ env.RUST_VERSION }} run --locked --bin lumen -- --config config/forward.example.toml --check
+          cargo +${{ env.RUST_VERSION }} run --locked --bin lumen -- --config config/filtering.example.toml --check
 
   lint:
     name: Format and lint
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - name: Install Rust tools
-        run: rustup toolchain install 1.95.0 --profile minimal --component clippy,rustfmt
-      - name: Format
-        run: cargo +1.95.0 fmt --check
-      - name: Clippy
-        run: cargo +1.95.0 clippy --workspace --all-targets --locked -- -D warnings
+      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component clippy,rustfmt
+      - run: cargo +${{ env.RUST_VERSION }} fmt --check
+      - run: cargo +${{ env.RUST_VERSION }} clippy --workspace --all-targets --locked -- -D warnings
+
+  container:
+    name: OCI runtime (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64, runner: ubuntu-24.04 }
+          - { name: linux-arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - run: docker build --tag lumen:ci .
+      - name: Validate non-root read-only operation
+        run: |
+          test "$(docker run --rm --entrypoint id lumen:ci -u)" = 65532
+          docker run --rm --read-only --tmpfs /tmp lumen:ci --config /etc/lumen/lumen.toml --check
+      - name: Validate startup and graceful shutdown
+        run: |
+          docker run --detach --name lumen-ci --read-only --tmpfs /tmp lumen:ci
+          sleep 3
+          docker inspect --format '{{.State.Running}}' lumen-ci | grep true
+          docker stop --time 10 lumen-ci
+          test "$(docker inspect --format '{{.State.ExitCode}}' lumen-ci)" = 0
+          docker logs lumen-ci
+          docker rm lumen-ci
+
+  podman:
+    name: Podman rootless smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install --yes podman
+      - run: podman build --tag lumen:podman .
+      - run: podman run --rm --read-only --tmpfs /tmp lumen:podman --config /etc/lumen/lumen.toml --check
+      - run: test "$(podman run --rm --entrypoint id lumen:podman -u)" = 65532
+
+  kubernetes:
+    name: Kubernetes and Helm smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
+      - run: helm lint deploy/helm/lumen
+      - run: helm template ci deploy/helm/lumen > /dev/null
+      - run: docker build --tag lumen:ci .
+      - run: kind load docker-image lumen:ci
+      - run: kubectl apply -k deploy/kubernetes
+      - run: kubectl rollout status deployment/lumen --timeout=120s
+      - run: kubectl create configmap dns-smoke --from-file=dns-smoke.py=scripts/dns-smoke.py
+      - run: kubectl apply -f deploy/kubernetes/smoke-pod.yaml
+      - run: kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/dns-smoke --timeout=120s
+      - run: kubectl logs dns-smoke
 
   audit:
     name: Dependency security audit
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - run: rustup toolchain install 1.95.0 --profile minimal
-      - run: cargo +1.95.0 install cargo-audit --version 0.22.1 --locked
-      - run: cargo +1.95.0 audit
+      - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal
+      - run: cargo +${{ env.RUST_VERSION }} install cargo-audit --version 0.22.1 --locked
+      - run: cargo +${{ env.RUST_VERSION }} audit
+      - run: cargo +${{ env.RUST_VERSION }} audit --file fuzz/Cargo.lock
 
   fuzz:
-    name: DNS, config, and filtering fuzz smoke tests
+    name: Bounded fuzz smoke
     env:
       ASAN_OPTIONS: quarantine_size_mb=32:thread_local_quarantine_size_kb=64
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo +nightly install cargo-fuzz --version 0.13.2 --locked
       - run: cargo +nightly metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 > /dev/null
-      - name: Seed fuzz corpora
-        run: mkdir -p fuzz/corpus/dns_wire fuzz/corpus/config fuzz/corpus/filter_list && cp fuzz/seeds/dns_wire/* fuzz/corpus/dns_wire/ && cp fuzz/seeds/config/* fuzz/corpus/config/ && cp fuzz/seeds/filter_list/* fuzz/corpus/filter_list/
+      - run: mkdir -p fuzz/corpus/dns_wire fuzz/corpus/config fuzz/corpus/filter_list && cp fuzz/seeds/dns_wire/* fuzz/corpus/dns_wire/ && cp fuzz/seeds/config/* fuzz/corpus/config/ && cp fuzz/seeds/filter_list/* fuzz/corpus/filter_list/
       - run: cargo +nightly fuzz run dns_wire -- -max_total_time=15 -max_len=65535 -rss_limit_mb=512
       - run: cargo +nightly fuzz run config -- -max_total_time=15 -max_len=65536 -rss_limit_mb=512
       - run: cargo +nightly fuzz run filter_list -- -max_total_time=15 -max_len=65536 -rss_limit_mb=512
 
   msrv:
-    name: Minimum supported Rust
+    name: Minimum supported Rust 1.88
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - run: rustup toolchain install 1.88.0 --profile minimal

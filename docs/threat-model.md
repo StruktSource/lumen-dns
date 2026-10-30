@@ -20,6 +20,10 @@
 | Query privacy | No query history, domain/client metric labels, or external telemetry; startup logs show only listener addresses |
 | Management exposure | No management API routes; metrics/liveness bind only loopback |
 | Container impact | Non-root UID 65532, no runtime key generation/download, minimal Debian runtime |
+| CI/release compromise | Read-only PR permissions, no persisted checkout credentials, locked Rust dependencies, release publish only on version tags after required gates |
+| Artifact substitution | Per-archive SHA-256, GitHub artifact provenance, OCI provenance and SBOM; image signing remains pending |
+| Orchestrator breakout | Non-root UID, read-only root, dropped capabilities, no privilege escalation, seccomp, resource limits |
+| Open resolver deployment | Loopback release default; network examples use private client CIDRs and internal-only Kubernetes Service/NetworkPolicy |
 
 Caches have configurable entry/TTL bounds, not a contractual RSS byte ceiling.
 Transient cache maintenance and protocol libraries use extra memory. Rate-limit
@@ -41,6 +45,13 @@ outside Lumen's boundary. Hickory's recursive implementation remains upstream
 experimental; external review, broader conformance, and extended soak testing
 remain stable-release gates. Fuzz smoke tests and a clean dependency audit are
 useful checks, not a proof of security.
+
+GitHub Actions and third-party actions are part of the release trust boundary.
+Workflow actions are pinned to reviewed commit IDs; updates still need review.
+Artifact provenance records a build; it does not make a compromised build safe.
+Kubernetes probe and Kind smoke tests do not prove CNI source-IP preservation,
+public-recursion safety, or real platform isolation. OCI image signing and
+reproducible-build comparison remain release hardening work.
 
 ## Later controls
 

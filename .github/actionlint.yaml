@@ -1,0 +1,5 @@
+paths:
+  ".github/workflows/*.{yml,yaml}":
+    ignore:
+      # GitHub lists these hosted labels; actionlint 1.7.7 predates them.
+      - 'label "(macos-15-intel|windows-11-arm)" is unknown'

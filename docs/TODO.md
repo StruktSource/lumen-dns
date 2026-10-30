@@ -32,8 +32,10 @@ first-release commitment remains a blank UI shell; a functional UI is later scop
 - [ ] Independent security review and production memory/performance measurements.
 - [ ] Trust-anchor rollover automation and certificate lifecycle tooling.
 - [ ] Config reload/migrations, complete CLI, authenticated API, and optional UI.
-- [ ] Signed multi-architecture images, SBOM, and reproducible-release checks.
-- [ ] Deployment guides and backup/restore/upgrade tests.
+- [ ] Record passing native multi-OS/architecture and multi-arch OCI release runs.
+- [ ] Add keyless image signing and reproducible-build comparison; SBOM/provenance is configured.
+- [ ] Run real Proxmox, Unraid, Raspberry Pi, Podman ARM64, and dual-stack Kubernetes tests.
+- [ ] Add backup/restore/upgrade/removal tests when persistent state exists.
 
 Keep checkbox detail in `progress.md`; do not mark unrun platform checks or
 planned features as shipped.
