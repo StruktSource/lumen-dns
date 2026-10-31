@@ -13,7 +13,7 @@ const scheduleText = s => `${s.days.length === 7 ? 'Every day' : s.days.map(d =>
 function listModal(item) {
   const D = L.D().filtering, isNew = !item; const l = item ? L.clone(item) : { id: '', format: 'domains', url: '', path: '', text: '', category: '', refresh_secs: 86400 }; const err = h('div', { class: 'err' });
   const kind = { v: l.url ? 'url' : l.path ? 'path' : l.text ? 'text' : 'url' }; const srcBox = h('div', {});
-  const drawSrc = () => srcBox.replaceChildren(kind.v === 'url' ? L.f.field('Source URL', L.f.text(l, 'url', { mono: true, placeholder: 'https://lists.example/list.txt' }), 'HTTPS on port 443 with a valid public certificate. No credentials, redirects or private addresses. Max 8 MiB.')
+  const drawSrc = () => srcBox.replaceChildren(kind.v === 'url' ? L.f.field('Source URL', L.f.text(l, 'url', { mono: true, placeholder: 'https://lists.example/list.txt' }), 'HTTPS on port 443 with a valid public certificate. No credentials, redirects or private addresses. Up to 64 MiB. For Hagezi use the raw adblock address, e.g. https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt')
     : kind.v === 'path' ? L.f.field('File path', L.f.text(l, 'path', { mono: true, placeholder: 'lists/mine.txt' }), 'Relative to the configuration file. Replace the file atomically when you update it.')
     : L.f.field('Rules', h('textarea', { class: 'input mono-in', rows: 5, spellcheck: false, value: l.text, oninput: e => { l.text = e.target.value; } }), 'One rule per line, in the format chosen above.'));
   drawSrc();
@@ -33,7 +33,7 @@ const sourceText = l => l.url ? l.url.replace('https://', '') : l.path ? l.path 
 function listsTab() {
   const D = L.D().filtering, live = L.S.status.filter.lists; const total = live.reduce((a, x) => a + x.rules, 0) + D.rules.allow.length + D.rules.block.length;
   return h('div', { class: 'stack' },
-    h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h3', {}, 'Imported lists'), h('div', { class: 'row' }, h('span', { class: 'mono muted' }, `${F.n(total)} of 250,000 rules · ${D.lists.length} of 64 lists`), h('button', { class: 'btn primary sm', onclick: () => listModal(null) }, L.ic('plus'), 'Add list'))),
+    h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h3', {}, 'Imported lists'), h('div', { class: 'row' }, h('span', { class: 'mono muted' }, `${F.n(total)} of 4,000,000 rules · ${D.lists.length} of 64 lists`), h('button', { class: 'btn primary sm', onclick: () => listModal(null) }, L.ic('plus'), 'Add list'))),
       D.lists.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['List', 'Format', 'Category', 'Refresh', 'Rules', 'Status', ''].map(x => h('th', {}, x)))), h('tbody', {}, D.lists.map(l => { const rt = live.find(x => x.id === l.id);
         return h('tr', {}, h('td', {}, h('strong', {}, l.id), h('div', { class: 'hint mono' }, sourceText(l))), h('td', { class: 'mono-c' }, l.format), h('td', {}, l.category ? h('span', { class: 'chip' }, l.category) : h('span', { class: 'muted' }, 'none')), h('td', {}, refreshLabel(l.refresh_secs)),
           h('td', { class: 'mono-c' }, rt ? F.n(rt.rules) : '—', rt && rt.unsupported ? h('div', { class: 'hint' }, rt.unsupported + ' unsupported') : null, rt && rt.duplicates ? h('div', { class: 'hint' }, rt.duplicates + ' duplicates') : null),

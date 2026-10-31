@@ -28,7 +28,10 @@ lumenctl config show --state /var/lib/lumen/state.db
 Apply stages a candidate and queues a reload. The daemon parses it with its
 original base directory, loads filter sources, checks resolver/TLS state, then
 restarts listeners. It promotes the revision only after every socket binds.
-Failure restores the previous runtime and discards the candidate. Reload closes
+Failure restores the previous runtime and discards the candidate. Filter lists are
+downloaded and validated *before* the swap, while DNS keeps answering, and the new
+server reuses that loaded filter, so DNS is unavailable only for the listener swap
+(about a second) even with multi-megabyte lists. Reload closes
 active connections, briefly releases listener sockets, and resets in-memory DNS
 caches. It does not provide zero-downtime listener replacement.
 

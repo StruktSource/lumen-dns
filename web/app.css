@@ -115,7 +115,6 @@ pre.code{padding:14px;overflow:auto;max-height:52vh;line-height:1.55;border:1px 
 .kpi{padding:16px 18px;display:grid;gap:6px;background:var(--surface);border:1px solid var(--rule);position:relative;overflow:hidden}
 .kpi .mono{color:var(--text-2)}.kpi strong{font-size:clamp(30px,3vw,42px);letter-spacing:-.07em;line-height:1;font-weight:600}.kpi strong small{font-size:.42em;letter-spacing:0;margin-left:3px;color:var(--text-2);font-weight:500}
 .kpi .sub{font-size:12px;color:var(--text-2)}.kpi svg.spark{position:absolute;right:14px;top:14px;width:34%;height:34px;opacity:.9}
-.kpi.hot{background:var(--ink);color:#f8f8f5;border-color:var(--ink)}.kpi.hot .mono,.kpi.hot .sub{color:#a7a79e}.kpi.hot strong{color:var(--acid)}
 .chart{position:relative}.chart svg{display:block;width:100%;height:auto}.chart .tt{position:absolute;pointer-events:none;background:var(--ink);color:#fff;padding:8px 10px;font:12px var(--mono);border:1px solid var(--acid);transform:translate(-50%,-110%);white-space:nowrap;display:none;z-index:3}
 .legend{display:flex;gap:16px;font:11px var(--mono);text-transform:uppercase;color:var(--text-2)}.legend i{display:inline-block;width:10px;height:10px;margin-right:6px;vertical-align:-1px}
 .bars{display:grid;gap:10px}.bar-row{display:grid;grid-template-columns:minmax(88px,.55fr) 1.6fr minmax(60px,.4fr);gap:12px;align-items:center;font-size:13px}

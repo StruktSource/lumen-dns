@@ -179,7 +179,7 @@ L.f = {
     const draw = () => { chips.replaceChildren(...arr.map((v, i) => h('span', { class: 'chip' }, v, opt.disabled ? null : h('button', { type: 'button', 'aria-label': 'Remove ' + v, onclick: () => { arr.splice(i, 1); draw(); L.touch(); opt.onChange && opt.onChange(); } }, L.ic('x', 12))))); chips.hidden = !arr.length; };
     const add = raw => { for (const v of raw.split(/[\s,]+/).filter(Boolean)) { if (opt.validate && !opt.validate(v)) { msg.textContent = `“${v}” is not valid${opt.what ? ' ' + opt.what : ''}.`; return false; } if (arr.includes(v)) continue; if (opt.max && arr.length >= opt.max) { msg.textContent = `At most ${opt.max} entries.`; return false; } arr.push(v); } msg.textContent = ''; draw(); L.touch(); opt.onChange && opt.onChange(); return true; };
     const inp = h('input', { placeholder: opt.placeholder || 'Add and press Enter', spellcheck: false, disabled: opt.disabled, onkeydown: e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); if (add(inp.value)) inp.value = ''; } else if (e.key === 'Backspace' && !inp.value && arr.length) { arr.pop(); draw(); L.touch(); } }, onblur: () => { if (inp.value && add(inp.value)) inp.value = ''; } });
-    draw(); box.append(chips, opt.disabled ? null : inp); return h('div', {}, box, msg);
+    draw(); box.append(chips); if (!opt.disabled) box.append(inp); return h('div', {}, box, msg);
   }
 };
 

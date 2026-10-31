@@ -146,7 +146,10 @@ impl Config {
                 .map(|p| p.rules.allow.len() + p.rules.block.len())
                 .sum::<usize>();
         if manual_count > crate::rules::MAX_RULES {
-            return Err("all filtering rules together exceed 250000".into());
+            return Err(format!(
+                "all filtering rules together exceed {}",
+                crate::rules::MAX_RULES
+            ));
         }
         let lists = ids(self.lists.iter().map(|l| l.id.as_str()))?;
         let profiles = ids(self.profiles.iter().map(|p| p.id.as_str()))?;

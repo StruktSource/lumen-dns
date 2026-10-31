@@ -49,8 +49,34 @@ pub(crate) fn public_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Large lists over slow links need minutes, and a long transfer can drop mid-way.
+/// Each attempt has its own deadline; only transient transport errors are retried.
 pub(crate) async fn download(source: &str) -> Result<Vec<u8>, String> {
-    tokio::time::timeout(Duration::from_secs(30), async {
+    let mut last = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
+        }
+        match download_once(source).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(error)
+                if matches!(
+                    error.as_str(),
+                    "list body read failed"
+                        | "list HTTPS request failed"
+                        | "list download deadline exceeded"
+                ) =>
+            {
+                last = error;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(format!("{last} after 3 attempts"))
+}
+
+async fn download_once(source: &str) -> Result<Vec<u8>, String> {
+    tokio::time::timeout(Duration::from_secs(90), async {
         let url = validate_url(source)?;
         let host = url
             .host_str()
@@ -84,7 +110,7 @@ pub(crate) async fn download(source: &str) -> Result<Vec<u8>, String> {
             .no_proxy()
             .https_only(true)
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(25))
+            .timeout(Duration::from_secs(80))
             .resolve_to_addrs(host, &addresses)
             .build()
             .map_err(|_| "list client setup failed")?;
@@ -102,13 +128,16 @@ pub(crate) async fn read_response(client: &Client, url: Url) -> Result<Vec<u8>, 
         .await
         .map_err(|_| "list HTTPS request failed")?;
     if response.status() != reqwest::StatusCode::OK {
-        return Err("list requires HTTP 200; redirects rejected".into());
+        return Err(format!(
+            "list address answered HTTP {} instead of 200 (check the URL; redirects are not followed)",
+            response.status().as_u16()
+        ));
     }
     if response
         .content_length()
         .is_some_and(|length| length > MAX_LIST_BYTES as u64)
     {
-        return Err("list response exceeds 8 MiB".into());
+        return Err("list response exceeds the 64 MiB size limit".into());
     }
     if response
         .headers()
@@ -124,7 +153,7 @@ pub(crate) async fn read_response(client: &Client, url: Url) -> Result<Vec<u8>, 
         .map_err(|_| "list body read failed")?
     {
         if bytes.len().saturating_add(chunk.len()) > MAX_LIST_BYTES {
-            return Err("list body exceeds 8 MiB".into());
+            return Err("list body exceeds the 64 MiB size limit".into());
         }
         bytes.extend_from_slice(&chunk);
     }
