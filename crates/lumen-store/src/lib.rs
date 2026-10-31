@@ -2,6 +2,7 @@
 //! Versioned local `SQLite` state for configuration, devices, accounts, and daemon control.
 
 pub mod password;
+pub mod totp;
 
 use lumen_filter::config::Device;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -11,7 +12,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
+
+/// Two-step verification (TOTP secret, replay guard, hashed recovery codes).
+const MIGRATION_5: &str = "ALTER TABLE users ADD COLUMN totp_secret TEXT;
+ALTER TABLE users ADD COLUMN totp_pending TEXT;
+ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN recovery TEXT NOT NULL DEFAULT '';
+PRAGMA user_version = 5;";
 
 /// Console accounts, sessions and applied-config history.
 const MIGRATION_4: &str = "CREATE TABLE users (
@@ -99,6 +108,7 @@ pub struct User {
     pub must_change: bool,
     pub created_at: u64,
     pub last_login: Option<u64>,
+    pub totp_enabled: bool,
 }
 
 /// A validated, unexpired browser session.
@@ -259,6 +269,11 @@ impl Store {
         if version < 4 {
             transaction
                 .execute_batch(MIGRATION_4)
+                .map_err(database_error)?;
+        }
+        if version < 5 {
+            transaction
+                .execute_batch(MIGRATION_5)
                 .map_err(database_error)?;
         }
         transaction.commit().map_err(database_error)
@@ -793,10 +808,10 @@ impl Store {
     pub fn user_with_record(&self, name: &str) -> Result<Option<(User, String)>, String> {
         self.connection
             .query_row(
-                "SELECT id, name, role, must_change, created_at, last_login, password
+                "SELECT id, name, role, must_change, created_at, last_login, totp_enabled, password
                  FROM users WHERE name = ?1",
                 [name],
-                |row| Ok((read_user(row)?, row.get::<_, String>(6)?)),
+                |row| Ok((read_user(row)?, row.get::<_, String>(7)?)),
             )
             .optional()
             .map_err(database_error)
@@ -878,6 +893,157 @@ impl Store {
         Ok(changed != 0)
     }
 
+    /// Begin enrolment: remember a secret that is not active until a code proves it.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn set_totp_pending(&self, name: &str, secret: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "UPDATE users SET totp_pending = ?1 WHERE name = ?2",
+                params![secret, name],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// The secret awaiting confirmation, if any.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn totp_pending(&self, name: &str) -> Result<Option<String>, String> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT totp_pending FROM users WHERE name = ?1",
+                [name],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            .flatten())
+    }
+
+    /// Turn two-step verification on with the confirmed secret and hashed recovery codes.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn enable_totp(
+        &self,
+        name: &str,
+        step: u64,
+        recovery_hashes: &[String],
+    ) -> Result<(), String> {
+        self.connection
+            .execute(
+                "UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_enabled = 1,
+                 totp_last_step = ?1, recovery = ?2 WHERE name = ?3 AND totp_pending IS NOT NULL",
+                params![step, recovery_hashes.join("\n"), name],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Turn two-step verification off and forget its secrets.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn disable_totp(&self, name: &str) -> Result<bool, String> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_enabled = 0,
+                 totp_last_step = 0, recovery = '' WHERE name = ?1",
+                [name],
+            )
+            .map_err(database_error)?;
+        Ok(changed != 0)
+    }
+
+    /// The active secret and the last accepted time step.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn totp_secret(&self, name: &str) -> Result<Option<(String, u64)>, String> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT totp_secret, totp_last_step FROM users WHERE name = ?1 AND totp_enabled = 1",
+                [name],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, u64>(1)?)),
+            )
+            .optional()
+            .map_err(database_error)?
+            .and_then(|(secret, step)| secret.map(|s| (s, step))))
+    }
+
+    /// Accept a time step once. A code cannot be used twice.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn claim_totp_step(&self, name: &str, step: u64) -> Result<bool, String> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE users SET totp_last_step = ?1 WHERE name = ?2 AND totp_last_step < ?1",
+                params![step, name],
+            )
+            .map_err(database_error)?;
+        Ok(changed != 0)
+    }
+
+    /// Spend one recovery code (by its hash). Returns whether it matched.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn use_recovery_code(&mut self, name: &str, hash: &str) -> Result<bool, String> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let stored: Option<String> = transaction
+            .query_row(
+                "SELECT recovery FROM users WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)?;
+        let Some(stored) = stored else {
+            return Ok(false);
+        };
+        let mut codes: Vec<&str> = stored.lines().filter(|l| !l.is_empty()).collect();
+        let Some(position) = codes.iter().position(|code| *code == hash) else {
+            return Ok(false);
+        };
+        codes.remove(position);
+        transaction
+            .execute(
+                "UPDATE users SET recovery = ?1 WHERE name = ?2",
+                params![codes.join("\n"), name],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(true)
+    }
+
+    /// How many recovery codes remain.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn recovery_remaining(&self, name: &str) -> Result<usize, String> {
+        let stored: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT recovery FROM users WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)?;
+        Ok(stored.map_or(0, |text| text.lines().filter(|l| !l.is_empty()).count()))
+    }
+
     /// Remember a successful sign-in.
     ///
     /// # Errors
@@ -936,15 +1102,15 @@ impl Store {
             .connection
             .query_row(
                 "SELECT u.id, u.name, u.role, u.must_change, u.created_at, u.last_login,
-                        s.csrf, s.created_at, s.last_seen
+                        u.totp_enabled, s.csrf, s.created_at, s.last_seen
                  FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?1",
                 [token_hash],
                 |row| {
                     Ok((
                         read_user(row)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, u64>(7)?,
+                        row.get::<_, String>(7)?,
                         row.get::<_, u64>(8)?,
+                        row.get::<_, u64>(9)?,
                     ))
                 },
             )
@@ -1029,7 +1195,8 @@ impl Store {
     }
 }
 
-const USER_COLUMNS: &str = "SELECT id, name, role, must_change, created_at, last_login FROM users";
+const USER_COLUMNS: &str =
+    "SELECT id, name, role, must_change, created_at, last_login, totp_enabled FROM users";
 
 fn read_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
     let role: String = row.get(2)?;
@@ -1040,6 +1207,7 @@ fn read_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
         must_change: row.get::<_, i64>(3)? != 0,
         created_at: row.get(4)?,
         last_login: row.get(5)?,
+        totp_enabled: row.get::<_, i64>(6)? != 0,
     })
 }
 
@@ -1085,6 +1253,7 @@ fn insert_user(
         must_change,
         created_at: created,
         last_login: None,
+        totp_enabled: false,
     })
 }
 

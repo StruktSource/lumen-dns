@@ -55,6 +55,18 @@ printf '%s' "$PASSWORD" | lumenctl user add --state state.db --name admin --role
   (`Secure` on HTTPS). Only a hash of the token is stored. Sessions end after
   30 minutes idle (admin-adjustable, 5 to 1440) or 12 hours total, on sign-out, and
   on any password change or reset for that account.
+- **Two-step verification (TOTP)** is optional per account, under *My account*. It works
+  with any authenticator app (RFC 6238: SHA-1, 6 digits, 30 s; Google Authenticator,
+  Authy, 1Password, Aegis, and others). Turning it on asks for the password, shows a
+  setup key (and an `otpauth://` link for phones), and needs one valid code before it
+  activates. It then shows **ten single-use recovery codes**, once. Signing in asks for
+  the code after the password; a code works only once, so a captured code cannot be
+  replayed, and one step of clock drift is allowed. Turning it off needs the password
+  and a code or recovery code. The secret is stored in the state database (mode 0600)
+  because the server must compute codes; recovery codes are stored only as hashes.
+  An administrator can remove it for someone who lost their phone and codes
+  (*Users & access*), or run `lumenctl user reset-2fa --state FILE --name NAME`. Both
+  end that account's sessions. There is no QR code: use the setup key or the link.
 - Five wrong passwords lock a username for 30 seconds, then longer. Per-address limits
   are looser because many people can share one address.
 - Every change-making request must carry the session's CSRF token and, if the browser

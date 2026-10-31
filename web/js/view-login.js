@@ -11,11 +11,27 @@ L.views.unavailable = message => h('div', { class: 'login' }, art('STRUKT / LUME
     h('p', { class: 'hint', style: 'margin:0' }, 'The console needs Lumen to run in managed mode: ', h('code', {}, 'lumen --config FILE --state FILE'), '.'), h('button', { class: 'btn primary', onclick: () => location.reload() }, 'Try again')));
 
 /* ---------- sign in ---------- */
+let pending = null; // { challenge } once the password was accepted and a code is owed
+function codeStep() {
+  const f = { code: '' }; let recovery = false; const err = h('div', { class: 'err', role: 'alert' }); const btn = h('button', { class: 'btn primary', type: 'submit', style: 'padding:13px' }, 'Verify');
+  const input = h('input', { class: 'input mono-in', id: 'code', autocomplete: 'one-time-code', inputmode: 'numeric', spellcheck: false, maxlength: 12, placeholder: '123456', oninput: e => { f.code = e.target.value; } });
+  const label = h('label', { for: 'code' }, 'Authenticator code'); const hint = h('div', { class: 'hint' }, 'Open your authenticator app and enter the 6-digit code for Lumen.');
+  const toggle = h('button', { type: 'button', class: 'linkish', onclick: () => { recovery = !recovery; label.textContent = recovery ? 'Recovery code' : 'Authenticator code'; hint.textContent = recovery ? 'Enter one of the recovery codes you saved. Each works once.' : 'Open your authenticator app and enter the 6-digit code for Lumen.'; input.placeholder = recovery ? 'xxxxx-xxxxx' : '123456'; input.inputMode = recovery ? 'text' : 'numeric'; toggle.textContent = recovery ? 'Use my authenticator app' : 'Use a recovery code instead'; input.value = ''; f.code = ''; input.focus(); } }, 'Use a recovery code instead');
+  const submit = async e => {
+    e.preventDefault(); err.textContent = ''; btn.disabled = true;
+    try { const r = await L.api('POST', '/api/login/2fa', { challenge: pending.challenge, code: f.code }); pending = null; L.signedIn(r); }
+    catch (x) { err.textContent = x.message; btn.disabled = false; if (/expired|Too many wrong/.test(x.message)) { pending = null; setTimeout(() => L.$('#root').replaceChildren(L.views.login()), 1200); } else { input.select(); } }
+  };
+  return h('div', { class: 'login' }, art('STRUKT / LUMEN', 'One more step.', 'Prove it’s you.'),
+    h('form', { class: 'login-form', onsubmit: submit }, h('h2', {}, 'Two-step verification'), h('div', { class: 'field' }, label, input, hint), err, btn,
+      h('div', { class: 'row' }, toggle, h('span', { class: 'sp' }), h('button', { type: 'button', class: 'linkish', onclick: () => { pending = null; L.$('#root').replaceChildren(L.views.login()); } }, 'Back to sign in'))));
+}
 function signIn() {
+  if (pending) return codeStep();
   const f = { name: '', pw: '' }; const err = h('div', { class: 'err', role: 'alert' }); const btn = h('button', { class: 'btn primary', type: 'submit', style: 'padding:13px' }, 'Sign in');
   const submit = async e => {
     e.preventDefault(); err.textContent = ''; btn.disabled = true;
-    try { L.signedIn(await L.api('POST', '/api/login', { username: f.name.trim(), password: f.pw })); }
+    try { const r = await L.api('POST', '/api/login', { username: f.name.trim(), password: f.pw }); if (r.needs_2fa) { pending = { challenge: r.challenge }; L.$('#root').replaceChildren(L.views.login()); return; } L.signedIn(r); }
     catch (x) { err.textContent = x.message; btn.disabled = false; L.$('#p')?.select(); }
   };
   return h('div', { class: 'login' }, art('STRUKT / LUMEN', 'Welcome back.', 'Your DNS, your rules.'),
@@ -56,5 +72,5 @@ function setup() {
 }
 const draw = () => L.$('#root').replaceChildren(L.views.login());
 
-L.views.login = () => { const v = L.meta.setup_needed ? setup() : signIn(); setTimeout(() => (L.$('#u') || L.$('form input'))?.focus({ preventScroll: true }), 50); return v; };
+L.views.login = () => { const v = L.meta.setup_needed ? setup() : signIn(); setTimeout(() => { if (document.activeElement === document.body || !document.activeElement) (L.$('#code') || L.$('#u') || L.$('form input'))?.focus({ preventScroll: true }); }, 50); return v; };
 })();

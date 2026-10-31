@@ -23,6 +23,7 @@ const HELP: &str = "Usage:
   lumenctl user list --state FILE
   lumenctl user add --state FILE --name NAME [--role admin|user] --password stdin|generate
   lumenctl user reset-password --state FILE --name NAME --password stdin|generate
+  lumenctl user reset-2fa --state FILE --name NAME
 
 Console accounts: `--password stdin` reads one line from standard input, e.g.
   printf '%s' \"$PASSWORD\" | lumenctl user add --state state.db --name admin --role admin --password stdin
@@ -72,6 +73,10 @@ enum Command {
         name: String,
         role: Role,
         generate: bool,
+    },
+    User2faReset {
+        state: PathBuf,
+        name: String,
     },
     UserReset {
         state: PathBuf,
@@ -198,6 +203,13 @@ fn user_command(args: &[String]) -> Result<Option<Command>, String> {
                 name: required(&values, "--name")?.to_owned(),
                 role: Role::parse(optional(&values, "--role").unwrap_or("user"))?,
                 generate: generate(&values)?,
+            }))
+        }
+        [action, rest @ ..] if action == "reset-2fa" => {
+            let values = options(rest, &["--state", "--name"], &[])?;
+            Ok(Some(Command::User2faReset {
+                state: PathBuf::from(required(&values, "--state")?),
+                name: required(&values, "--name")?.to_owned(),
             }))
         }
         [action, rest @ ..] if action == "reset-password" => {
@@ -407,6 +419,19 @@ async fn main() -> io::Result<()> {
             if generate {
                 println!("Temporary password: {secret}");
             }
+        }
+        Command::User2faReset { state, name } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            let user = store
+                .user_with_record(&name)
+                .map_err(io::Error::other)?
+                .ok_or_else(|| io::Error::other("unknown user"))?
+                .0;
+            store.disable_totp(&name).map_err(io::Error::other)?;
+            store
+                .delete_user_sessions(user.id, None)
+                .map_err(io::Error::other)?;
+            println!("Two-step verification removed for {name}; their sessions ended");
         }
         Command::UserReset {
             state,

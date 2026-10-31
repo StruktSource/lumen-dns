@@ -13,7 +13,7 @@ use hyper::{
 };
 use lumen_config::{Config, providers::Catalog};
 use lumen_filter::config::Device;
-use lumen_store::{Command, Role, Session, Store, password};
+use lumen_store::{Command, Role, Session, Store, password, totp};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
@@ -94,7 +94,18 @@ pub struct Console {
     throttle: Mutex<Throttle>,
     series: Mutex<VecDeque<Point>>,
     last: Mutex<Option<(Instant, Counters)>>,
+    challenges: Mutex<HashMap<String, Challenge>>,
 }
+
+/// A password was accepted; the second step is still owed.
+struct Challenge {
+    name: String,
+    peer: IpAddr,
+    at: Instant,
+    tries: u32,
+}
+
+const CHALLENGE_SECS: u64 = 300;
 
 /// One API request with owned data, so it can move to a blocking thread.
 pub(crate) struct Request {
@@ -169,6 +180,7 @@ impl Console {
             throttle: Mutex::default(),
             series: Mutex::default(),
             last: Mutex::default(),
+            challenges: Mutex::default(),
         }
     }
 
@@ -243,6 +255,7 @@ impl Console {
             ("GET", ["state"]) => return self.public_state(&store, request),
             ("POST", ["setup"]) => return self.setup(&mut store, request),
             ("POST", ["login"]) => return self.login(&mut store, request),
+            ("POST", ["login", "2fa"]) => return self.login_second_step(&mut store, request),
             _ => {}
         }
         let Some((token_hash, session)) = self.session(&store, request) else {
@@ -269,6 +282,9 @@ impl Console {
             ("GET", ["me"]) => return reply(StatusCode::OK, &me_json(&session)),
             ("POST", ["logout"]) => return self.logout(&mut store, &ctx),
             ("POST", ["me", "password"]) => return self.change_own_password(&mut store, &ctx),
+            ("POST", ["me", "2fa", "setup"]) => return self.totp_setup(&mut store, &ctx),
+            ("POST", ["me", "2fa", "enable"]) => return self.totp_enable(&mut store, &ctx),
+            ("POST", ["me", "2fa", "disable"]) => return self.totp_disable(&mut store, &ctx),
             ("GET", ["status"]) => return self.status(&store),
             ("GET", ["series"]) => return self.series_json(),
             ("GET", ["devices"]) => return devices_json(&store),
@@ -284,6 +300,7 @@ impl Console {
             ("POST", ["users"]) => self.add_user(&mut store, &ctx),
             ("PATCH", ["users", name]) => self.set_role(&mut store, &ctx, name),
             ("POST", ["users", name, "password"]) => self.reset_password(&mut store, &ctx, name),
+            ("POST", ["users", name, "2fa", "reset"]) => self.totp_reset(&mut store, &ctx, name),
             ("DELETE", ["users", name]) => self.remove_user(&mut store, &ctx, name),
             ("PUT", ["devices"]) => self.put_device(&mut store, &ctx),
             ("DELETE", ["devices", id]) => self.delete_device(&mut store, &ctx, id),
@@ -576,6 +593,30 @@ impl Console {
             );
             return error(StatusCode::UNAUTHORIZED, "Incorrect username or password.");
         };
+        if user.totp_enabled {
+            // Password accepted; the code is still owed. The lock keys stay armed.
+            let Ok(token) = password::random_hex(16) else {
+                return unavailable();
+            };
+            let mut challenges = self.challenges.lock().expect("challenges");
+            challenges.retain(|_, c| c.at.elapsed().as_secs() < CHALLENGE_SECS);
+            if challenges.len() >= 256 {
+                challenges.clear();
+            }
+            challenges.insert(
+                token.clone(),
+                Challenge {
+                    name: user.name.clone(),
+                    peer: request.peer.ip(),
+                    at: Instant::now(),
+                    tries: 0,
+                },
+            );
+            return reply(
+                StatusCode::OK,
+                &json!({ "needs_2fa": true, "challenge": token }),
+            );
+        }
         self.throttle.lock().expect("throttle").clear(&keys);
         let _ = store.record_login(user.id);
         Self::audit(
@@ -588,6 +629,207 @@ impl Console {
             &request.peer,
         );
         self.signed_in_reply(store, &user, request)
+    }
+
+    /// Check a 6-digit code (once per time step) or a single-use recovery code.
+    fn code_ok(store: &mut Store, name: &str, code: &str) -> Result<Option<&'static str>, ()> {
+        let code = code.trim();
+        if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) {
+            let Ok(Some((secret, _))) = store.totp_secret(name) else {
+                return Ok(None);
+            };
+            return match totp::verify(&secret, code, now()) {
+                Some(step) if store.claim_totp_step(name, step).map_err(|_| ())? => {
+                    Ok(Some("authenticator code"))
+                }
+                _ => Ok(None),
+            };
+        }
+        let hash = password::sha256_hex(&totp::clean_recovery(code));
+        Ok(store
+            .use_recovery_code(name, &hash)
+            .map_err(|_| ())?
+            .then_some("recovery code"))
+    }
+
+    fn login_second_step(&self, store: &mut Store, request: &Request) -> Reply {
+        if !json_content(&request.headers) {
+            return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "use application/json");
+        }
+        let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+            return bad("invalid JSON");
+        };
+        let token = text(&body, "challenge").unwrap_or("").to_owned();
+        let code = text(&body, "code").unwrap_or("").to_owned();
+        let name = {
+            let mut challenges = self.challenges.lock().expect("challenges");
+            match challenges.get_mut(&token) {
+                Some(c)
+                    if c.at.elapsed().as_secs() < CHALLENGE_SECS && c.peer == request.peer.ip() =>
+                {
+                    c.tries += 1;
+                    if c.tries > 5 {
+                        challenges.remove(&token);
+                        return error(
+                            StatusCode::UNAUTHORIZED,
+                            "Too many wrong codes. Sign in again.",
+                        );
+                    }
+                    c.name.clone()
+                }
+                _ => {
+                    challenges.remove(&token);
+                    return error(
+                        StatusCode::UNAUTHORIZED,
+                        "That sign-in expired. Enter your password again.",
+                    );
+                }
+            }
+        };
+        let keys = vec![format!("u:{name}"), format!("i:{}", request.peer.ip())];
+        if let Some(wait) = self.throttle.lock().expect("throttle").locked(&keys) {
+            return error(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("Too many attempts. Try again in {wait} s."),
+            );
+        }
+        let Ok(method) = Self::code_ok(store, &name, &code) else {
+            return unavailable();
+        };
+        let Some(method) = method else {
+            self.throttle.lock().expect("throttle").fail(&keys);
+            Self::audit(
+                store,
+                &name,
+                "-",
+                "session.start",
+                "wrong 2fa code",
+                false,
+                &request.peer,
+            );
+            return error(StatusCode::UNAUTHORIZED, "That code is not correct.");
+        };
+        self.challenges.lock().expect("challenges").remove(&token);
+        self.throttle.lock().expect("throttle").clear(&keys);
+        let Some((user, _)) = store.user_with_record(&name).ok().flatten() else {
+            return error(StatusCode::UNAUTHORIZED, "Sign in again.");
+        };
+        let _ = store.record_login(user.id);
+        Self::audit(
+            store,
+            &user.name,
+            user.role.as_str(),
+            "session.start",
+            method,
+            true,
+            &request.peer,
+        );
+        self.signed_in_reply(store, &user, request)
+    }
+
+    fn totp_setup(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
+        let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
+            return bad("invalid JSON");
+        };
+        let name = &ctx.session.user.name;
+        if ctx.session.user.totp_enabled {
+            return error(StatusCode::CONFLICT, "Two-step verification is already on.");
+        }
+        let key = vec![format!("p:{name}")];
+        if let Some(wait) = self.throttle.lock().expect("throttle").locked(&key) {
+            return error(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("Too many attempts. Try again in {wait} s."),
+            );
+        }
+        let record = store.user_with_record(name).ok().flatten().map(|(_, r)| r);
+        if !record
+            .as_deref()
+            .is_some_and(|r| password::verify(text(&body, "password").unwrap_or(""), r))
+        {
+            self.throttle.lock().expect("throttle").fail(&key);
+            return error(StatusCode::FORBIDDEN, "Your password is not correct.");
+        }
+        let Ok(secret) = totp::generate_secret() else {
+            return unavailable();
+        };
+        if store.set_totp_pending(name, &secret).is_err() {
+            return unavailable();
+        }
+        reply(
+            StatusCode::OK,
+            &json!({ "secret": secret, "uri": totp::uri(&secret, name, "Lumen") }),
+        )
+    }
+
+    fn totp_enable(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
+        let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
+            return bad("invalid JSON");
+        };
+        let name = &ctx.session.user.name;
+        let Ok(Some(secret)) = store.totp_pending(name) else {
+            return bad("Start setup first.");
+        };
+        let Some(step) = totp::verify(&secret, text(&body, "code").unwrap_or(""), now()) else {
+            return bad(
+                "That code is not correct. Check that your phone's clock is right, then try the next code.",
+            );
+        };
+        let Ok(codes) = totp::recovery_codes() else {
+            return unavailable();
+        };
+        let hashes: Vec<String> = codes.iter().map(|c| password::sha256_hex(c)).collect();
+        if store.enable_totp(name, step, &hashes).is_err() {
+            return unavailable();
+        }
+        Self::actor(store, ctx, "user.2fa-enable", name);
+        reply(StatusCode::OK, &json!({ "recovery_codes": codes }))
+    }
+
+    fn totp_disable(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
+        let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
+            return bad("invalid JSON");
+        };
+        let name = &ctx.session.user.name;
+        let key = vec![format!("p:{name}")];
+        if let Some(wait) = self.throttle.lock().expect("throttle").locked(&key) {
+            return error(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("Too many attempts. Try again in {wait} s."),
+            );
+        }
+        let record = store.user_with_record(name).ok().flatten().map(|(_, r)| r);
+        let password_ok = record
+            .as_deref()
+            .is_some_and(|r| password::verify(text(&body, "password").unwrap_or(""), r));
+        let code_ok = password_ok
+            && matches!(
+                Self::code_ok(store, name, text(&body, "code").unwrap_or("")),
+                Ok(Some(_))
+            );
+        if !code_ok {
+            self.throttle.lock().expect("throttle").fail(&key);
+            return error(
+                StatusCode::FORBIDDEN,
+                "Your password or code is not correct.",
+            );
+        }
+        if store.disable_totp(name).is_err() {
+            return unavailable();
+        }
+        Self::actor(store, ctx, "user.2fa-disable", name);
+        reply(StatusCode::OK, &json!({ "ok": true }))
+    }
+
+    fn totp_reset(&self, store: &mut Store, ctx: &Ctx<'_>, name: &str) -> Reply {
+        let Some((user, _)) = store.user_with_record(name).ok().flatten() else {
+            return error(StatusCode::NOT_FOUND, "unknown user");
+        };
+        if store.disable_totp(name).is_err() || store.delete_user_sessions(user.id, None).is_err() {
+            return unavailable();
+        }
+        Self::actor(store, ctx, "user.2fa-reset", name);
+        reply(StatusCode::OK, &json!({ "ok": true }))
     }
 
     fn signed_in_reply(&self, store: &Store, user: &lumen_store::User, request: &Request) -> Reply {
@@ -1101,6 +1343,7 @@ fn user_json(user: &lumen_store::User) -> Value {
     json!({
         "name": user.name, "role": user.role.as_str(), "must_change": user.must_change,
         "created_at": user.created_at, "last_login": user.last_login,
+        "totp_enabled": user.totp_enabled,
     })
 }
 
@@ -2232,5 +2475,239 @@ mod tests {
             call(&f, Method::GET, "/api/nope", session, "", "127.0.0.1").status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[test]
+    fn two_step_sign_in_enrolment_replay_recovery_and_reset() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let post = |path: &str, payload: Value| {
+            body(call(
+                &f,
+                Method::POST,
+                path,
+                session,
+                &payload.to_string(),
+                "127.0.0.1",
+            ))
+        };
+        // Wrong password cannot start enrolment; right password returns a secret and URI.
+        assert_eq!(
+            post("/api/me/2fa/setup", json!({"password": "nope nope nope"})).0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, setup) = post(
+            "/api/me/2fa/setup",
+            json!({"password": "correct horse battery"}),
+        );
+        assert_eq!(status, StatusCode::OK);
+        let secret = setup["secret"].as_str().unwrap().to_owned();
+        assert!(
+            setup["uri"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("secret={secret}"))
+        );
+        // Enabling needs a valid current code.
+        assert_eq!(
+            post("/api/me/2fa/enable", json!({"code": "000000"})).0,
+            StatusCode::BAD_REQUEST
+        );
+        let code =
+            |offset: u64| totp::code_for_step(&secret, totp::step_at(now()) + offset).unwrap();
+        let (status, enabled) = post("/api/me/2fa/enable", json!({"code": code(0)}));
+        assert_eq!(status, StatusCode::OK, "{enabled}");
+        let recovery: Vec<String> = enabled["recovery_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(recovery.len(), 10);
+        assert_eq!(
+            post(
+                "/api/me/2fa/setup",
+                json!({"password": "correct horse battery"})
+            )
+            .0,
+            StatusCode::CONFLICT
+        );
+        // Password alone no longer signs in: a challenge is returned and no cookie is set.
+        let reply = call(
+            &f,
+            Method::POST,
+            "/api/login",
+            None,
+            &json!({"username": "admin", "password": "correct horse battery"}).to_string(),
+            "127.0.0.1",
+        );
+        assert!(reply.headers().get(SET_COOKIE).is_none());
+        let (_, step_one) = body(reply);
+        assert_eq!(step_one["needs_2fa"], true);
+        let challenge = step_one["challenge"].as_str().unwrap().to_owned();
+        let second = |challenge: &str, code: &str, from: &str| {
+            call(
+                &f,
+                Method::POST,
+                "/api/login/2fa",
+                None,
+                &json!({"challenge": challenge, "code": code}).to_string(),
+                from,
+            )
+        };
+        // The code used during enrolment cannot be replayed, a wrong one is refused,
+        // and a challenge cannot be used from another address.
+        assert_eq!(
+            second(&challenge, &code(0), "127.0.0.1").status(),
+            StatusCode::UNAUTHORIZED,
+            "enrolment code is spent"
+        );
+        assert_eq!(
+            second(&challenge, "123456", "127.0.0.1").status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            second(&challenge, &code(1), "10.9.9.9").status(),
+            StatusCode::UNAUTHORIZED,
+            "wrong address"
+        );
+        let (_, again) = body(call(
+            &f,
+            Method::POST,
+            "/api/login",
+            None,
+            &json!({"username": "admin", "password": "correct horse battery"}).to_string(),
+            "127.0.0.1",
+        ));
+        let challenge = again["challenge"].as_str().unwrap().to_owned();
+        let ok = second(&challenge, &code(1), "127.0.0.1");
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert!(ok.headers().get(SET_COOKIE).is_some());
+        assert_eq!(
+            second(&challenge, &code(1), "127.0.0.1").status(),
+            StatusCode::UNAUTHORIZED,
+            "challenge is single use"
+        );
+        // A recovery code works exactly once.
+        let (_, third) = body(call(
+            &f,
+            Method::POST,
+            "/api/login",
+            None,
+            &json!({"username": "admin", "password": "correct horse battery"}).to_string(),
+            "127.0.0.1",
+        ));
+        let challenge = third["challenge"].as_str().unwrap().to_owned();
+        assert_eq!(
+            second(&challenge, &recovery[0].to_uppercase(), "127.0.0.1").status(),
+            StatusCode::OK
+        );
+        let (_, fourth) = body(call(
+            &f,
+            Method::POST,
+            "/api/login",
+            None,
+            &json!({"username": "admin", "password": "correct horse battery"}).to_string(),
+            "127.0.0.1",
+        ));
+        assert_eq!(
+            second(
+                fourth["challenge"].as_str().unwrap(),
+                &recovery[0],
+                "127.0.0.1"
+            )
+            .status(),
+            StatusCode::UNAUTHORIZED,
+            "recovery code is spent"
+        );
+        // Disabling needs password and a code.
+        assert_eq!(
+            post(
+                "/api/me/2fa/disable",
+                json!({"password": "correct horse battery", "code": "111111"})
+            )
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            post(
+                "/api/me/2fa/disable",
+                json!({"password": "correct horse battery", "code": recovery[1]})
+            )
+            .0,
+            StatusCode::OK
+        );
+        let (_, plain) = body(call(
+            &f,
+            Method::POST,
+            "/api/login",
+            None,
+            &json!({"username": "admin", "password": "correct horse battery"}).to_string(),
+            "127.0.0.1",
+        ));
+        assert!(plain.get("needs_2fa").is_none() && plain["user"]["totp_enabled"] == false);
+        // An administrator can clear a lost device.
+        let (token, user_csrf) = sign_in(&f, "anna", "anna passphrase 123");
+        let store = Store::open(&f.state).unwrap();
+        store.set_totp_pending("anna", &secret).unwrap();
+        store.enable_totp("anna", 1, &[]).unwrap();
+        assert!(
+            store
+                .user_with_record("anna")
+                .unwrap()
+                .unwrap()
+                .0
+                .totp_enabled
+        );
+        assert_eq!(
+            call(
+                &f,
+                Method::POST,
+                "/api/users/anna/2fa/reset",
+                session,
+                "{}",
+                "127.0.0.1"
+            )
+            .status(),
+            StatusCode::OK
+        );
+        assert!(
+            !store
+                .user_with_record("anna")
+                .unwrap()
+                .unwrap()
+                .0
+                .totp_enabled
+        );
+        assert_eq!(
+            call(
+                &f,
+                Method::GET,
+                "/api/me",
+                Some((&token, &user_csrf)),
+                "",
+                "127.0.0.1"
+            )
+            .status(),
+            StatusCode::UNAUTHORIZED,
+            "reset ends their sessions"
+        );
+        // Audit never contains codes or secrets.
+        let (_, audit) = body(call(
+            &f,
+            Method::GET,
+            "/api/audit?limit=100",
+            session,
+            "",
+            "127.0.0.1",
+        ));
+        let text = audit.to_string();
+        assert!(
+            text.contains("user.2fa-enable")
+                && text.contains("user.2fa-disable")
+                && text.contains("user.2fa-reset")
+        );
+        assert!(!text.contains(&secret) && !text.contains(&recovery[0]));
     }
 }

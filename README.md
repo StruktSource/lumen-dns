@@ -46,7 +46,7 @@ Your DNS service sits at the front door of almost every network connection. Lume
 | **Per-client policy** | Device, subnet, group, profile, category, and UTC-scheduled rules, with explainable rule decisions. |
 | **Local operations** | Validated TOML configuration; optional SQLite state, migrations, staged reload and rollback; `lumenctl` commands. |
 | **Observability** | Opt-in aggregate Prometheus metrics, a liveness endpoint, Grafana assets, authenticated management API, audit events, and signed webhooks. |
-| **Web console** | Built in. First-run account setup, sign-in with admin and user roles, live overview, filtering and profiles, devices, full DNS settings with review-before-apply, users, audit log, and opt-in in-memory recent queries. See [Web console](docs/web-hosting.md). |
+| **Web console** | Built in. First-run account setup, sign-in with admin and user roles and optional two-step verification (TOTP), live overview, filtering and profiles, devices, full DNS settings with review-before-apply, users, audit log, and opt-in in-memory recent queries. See [Web console](docs/web-hosting.md). |
 
 Implementation details: [architecture](docs/architecture.md) · [resolver](docs/resolver.md) · [filtering](docs/filtering.md) · [management API](docs/management-api.md).
 
