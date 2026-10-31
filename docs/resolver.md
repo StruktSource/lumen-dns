@@ -59,16 +59,18 @@ without relaxing DNSSEC validation, TTLs, or filtering:
 - **Startup priming (`[resolver.warm]`).** Fetches root and top-level-zone
   delegations and DNSKEY/DS data once, in the background, after every listener is
   bound. See [configuration](configuration.md#resolver).
-- **Expiry refresh (`[resolver.prefetch]`, off by default).** Names looked up at
-  least `min_hits` times in one cache lifetime are re-resolved right after they
+- **Expiry refresh (`[resolver.prefetch]`, off by default).** Names with at least
+  `min_hits` cache hits after their initial fill are re-resolved right after they
   expire, within a concurrency and per-minute budget.
 
 - **Hedged recursion (`hedge_ms`, off by default).** A lookup still unanswered after
   the delay starts one second recursion; the first usable answer wins.
   `lumen_dns_recursive_hedged_total` counts them. Measurements were inconclusive.
 
-Filtering runs before any of this, so a blocked name is never resolved, primed, or
-refreshed, and a refreshed answer is still filtered when served.
+Filtering runs before client recursion, so a blocked request never selects a name
+for refresh and a refreshed answer is still filtered when served. Every successful
+filter refresh or rollback clears all pending refresh candidates, preventing a
+name newly blocked by changed policy from being refreshed under the old policy.
 
 Evaluated and not shipped: serve-stale (RFC 8767) and delegation-cache persistence.
 Hickory drops expired entries and keeps its caches private, so both would need a
@@ -166,6 +168,7 @@ DNS reachability or a DNSSEC guarantee. No management operations are exposed.
 | `lumen_dns_fallback_failures_total` | counter |
 | `lumen_dns_fallback_trigger_recursion_timeout_total` | counter |
 | `lumen_dns_recursive_lookup_duration_seconds` | histogram |
+| `lumen_dns_recursive_background_duration_seconds` | histogram |
 | `lumen_dns_recursive_coalesced_total` | counter |
 | `lumen_dns_recursive_hedged_total` | counter |
 | `lumen_dns_warm_queries_total` | counter |
@@ -174,8 +177,10 @@ DNS reachability or a DNSSEC guarantee. No management operations are exposed.
 | `lumen_dns_prefetch_failures_total` | counter |
 | `lumen_dns_prefetch_skipped_total` | counter |
 
-The recursive lookup histogram has 11 fixed buckets (1 ms to 5 s) and includes
-cache hits, so the sub-millisecond bucket approximates the cache hit ratio.
+The client and background recursive lookup histograms have 11 fixed buckets
+(1 ms to 5 s). The client histogram includes cache hits, so its sub-millisecond
+bucket approximates the client cache hit ratio without startup priming or expiry
+refresh traffic.
 These have no client/domain labels. Query names and history are not stored or
 logged. Transport totals and query latency use fixed-cardinality series. Full
 query logs remain disabled. A ready Grafana dashboard is under

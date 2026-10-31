@@ -42,8 +42,13 @@ first-release commitment remains a blank UI shell; a functional UI is later scop
 
 - [x] Reproducible A/B benchmark with trial-level statistics (`scripts/recursion_bench.py`).
 - [x] Shared in-flight recursion, startup priming, opt-in expiry refresh and hedging, latency metrics.
-- [ ] Demonstrate a statistically significant cold single-query gain; the first run (12 trials) was not significant. More trials, a controlled local hierarchy, or a lower per-attempt timeout would be needed.
-- [ ] Measure expiry refresh; it has unit tests but no benchmark.
+- [ ] Demonstrate a statistically significant public-network cold single-query
+  gain; the first run (12 trials) was not significant. A deterministic local
+  hierarchy regression now proves startup priming reduces authority round trips
+  and latency for a cold name under fixed per-hop delay.
+- [ ] Measure expiry refresh; it has unit tests but no benchmark. Filter changes
+  now discard pending refresh candidates, and client/background latency metrics
+  are separate.
 
 ## Release gates and later work
 

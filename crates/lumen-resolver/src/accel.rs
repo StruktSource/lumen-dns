@@ -137,7 +137,7 @@ impl Accel {
             self.touch(&key);
         }
         let result = self.coalesced(recursor, &key).await;
-        self.metrics.observe(started.elapsed());
+        self.metrics.observe(started.elapsed(), background);
         result
     }
 
@@ -327,6 +327,10 @@ impl Accel {
         for task in lock(&self.tasks).drain(..) {
             task.abort();
         }
+    }
+
+    pub(crate) fn clear_prefetch(&self) {
+        lock(&self.hot).entries.clear();
     }
 
     async fn warm<P: RuntimeProvider>(

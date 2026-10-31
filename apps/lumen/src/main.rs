@@ -187,10 +187,10 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                 let Some((_id, command)) = store.next_command().map_err(io::Error::other)? else { continue };
                 match command {
                     ControlCommand::FilterRefresh => {
-                        record_control(&store, server.filter.refresh().await, "filter refreshed")?;
+                        record_control(&store, server.refresh_filter().await, "filter refreshed")?;
                     }
                     ControlCommand::FilterRollback => {
-                        record_control(&store, server.filter.rollback().await, "filter rolled back")?;
+                        record_control(&store, server.rollback_filter().await, "filter rolled back")?;
                     }
                     ControlCommand::Reload | ControlCommand::ConfigReload(_) => {
                         let staged_revision = match command {
