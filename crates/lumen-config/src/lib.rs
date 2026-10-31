@@ -21,6 +21,103 @@ pub struct Config {
     pub limits: Limits,
     pub filtering: lumen_filter::config::Config,
     pub metrics: Option<SocketAddr>,
+    pub management: Management,
+    pub web: Web,
+}
+
+/// Embedded static UI listeners. Empty address lists disable hosting.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Web {
+    pub http: Vec<SocketAddr>,
+    pub https: Vec<SocketAddr>,
+    pub certificate: Option<PathBuf>,
+    pub private_key: Option<PathBuf>,
+    pub max_connections: u16,
+}
+
+impl Default for Web {
+    fn default() -> Self {
+        Self {
+            http: Vec::new(),
+            https: Vec::new(),
+            certificate: None,
+            private_key: None,
+            max_connections: 64,
+        }
+    }
+}
+
+/// Opt-in local management API. Bearer-token hashes stay in operator config.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Management {
+    pub listen: Option<SocketAddr>,
+    pub tokens: Vec<ApiToken>,
+    pub requests_per_minute: u16,
+    pub webhooks: Vec<Webhook>,
+}
+
+/// Signed outbound audit-event webhook.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Webhook {
+    pub id: String,
+    pub url: String,
+    pub secret_file: PathBuf,
+}
+
+/// One named API principal with a fixed role and SHA-256 token hash.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiToken {
+    pub name: String,
+    pub role: ApiRole,
+    pub sha256: String,
+}
+
+/// Management scopes. Higher roles include lower-role actions.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiRole {
+    Viewer,
+    Operator,
+    Admin,
+}
+
+impl ApiRole {
+    #[must_use]
+    pub const fn permits(self, needed: Self) -> bool {
+        self.rank() >= needed.rank()
+    }
+
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Viewer => 0,
+            Self::Operator => 1,
+            Self::Admin => 2,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Viewer => "viewer",
+            Self::Operator => "operator",
+            Self::Admin => "admin",
+        }
+    }
+}
+
+impl Default for Management {
+    fn default() -> Self {
+        Self {
+            listen: None,
+            tokens: Vec::new(),
+            requests_per_minute: 60,
+            webhooks: Vec::new(),
+        }
+    }
 }
 
 /// Independently enabled listener addresses. Empty arrays disable a transport.
@@ -74,6 +171,9 @@ pub struct Resolver {
     pub trust_anchor: Option<PathBuf>,
     pub upstream_ca: Option<PathBuf>,
     pub upstreams: Vec<Upstream>,
+    pub providers: Vec<ProviderSelection>,
+    #[serde(skip)]
+    pub automatic_transport: bool,
     pub cache_entries: u32,
     pub nameserver_cache_entries: u32,
     pub validation_cache_entries: u32,
@@ -94,6 +194,8 @@ impl Default for Resolver {
             trust_anchor: None,
             upstream_ca: None,
             upstreams: vec![],
+            providers: vec![],
+            automatic_transport: false,
             cache_entries: 4096,
             nameserver_cache_entries: 256,
             validation_cache_entries: 4096,
@@ -142,6 +244,56 @@ pub struct Upstream {
     pub doh_path: Option<String>,
 }
 
+/// One bundled provider selection expanded into explicit runtime upstreams.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSelection {
+    pub id: String,
+    pub protocol: ProviderProtocol,
+    #[serde(default)]
+    pub address_family: providers::AddressFamily,
+    pub encryption: Option<EncryptionPolicy>,
+    pub transport_priority: Option<Vec<EncryptedProtocol>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderProtocol {
+    Udp,
+    Tcp,
+    Tls,
+    Https,
+    Quic,
+    Auto,
+}
+
+impl ProviderProtocol {
+    fn explicit(self) -> Option<UpstreamProtocol> {
+        match self {
+            Self::Udp => Some(UpstreamProtocol::Udp),
+            Self::Tcp => Some(UpstreamProtocol::Tcp),
+            Self::Tls => Some(UpstreamProtocol::Tls),
+            Self::Https => Some(UpstreamProtocol::Https),
+            Self::Quic => Some(UpstreamProtocol::Quic),
+            Self::Auto => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EncryptionPolicy {
+    Required,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EncryptedProtocol {
+    Quic,
+    Https,
+    Tls,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamProtocol {
@@ -186,16 +338,31 @@ impl Config {
     /// Returns a safe startup error for unreadable or invalid configuration.
     pub fn load(path: &Path) -> Result<Self, String> {
         let source = read_bounded(path, 65536)?;
-        let mut config: Self =
-            toml::from_str(std::str::from_utf8(&source).map_err(|_| "config must be UTF-8")?)
-                .map_err(|error| format!("invalid config at {:?}", error.span()))?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::parse(
+            std::str::from_utf8(&source).map_err(|_| "config must be UTF-8")?,
+            base,
+        )
+    }
+
+    /// Parse stored TOML using an explicit base for relative paths.
+    ///
+    /// # Errors
+    /// Returns a safe parse or validation error for malformed configuration.
+    pub fn parse(source: &str, base: &Path) -> Result<Self, String> {
+        if source.len() > 65536 {
+            return Err("config source exceeds 65536 bytes".into());
+        }
+        let mut config: Self = toml::from_str(source)
+            .map_err(|error| format!("invalid config at {:?}", error.span()))?;
         for item in [
             &mut config.listen.certificate,
             &mut config.listen.private_key,
             &mut config.resolver.root_hints,
             &mut config.resolver.trust_anchor,
             &mut config.resolver.upstream_ca,
+            &mut config.web.certificate,
+            &mut config.web.private_key,
         ]
         .into_iter()
         .flatten()
@@ -211,8 +378,74 @@ impl Config {
                 *path = base.join(&*path);
             }
         }
+        for webhook in &mut config.management.webhooks {
+            if webhook.secret_file.is_relative() {
+                webhook.secret_file = base.join(&webhook.secret_file);
+            }
+        }
+        config.expand_provider_selections()?;
         config.validate()?;
         Ok(config)
+    }
+
+    fn expand_provider_selections(&mut self) -> Result<(), String> {
+        if self.resolver.providers.is_empty() {
+            return Ok(());
+        }
+        if self.resolver.mode != Mode::Forward {
+            return Err("provider presets are only available in forward mode".into());
+        }
+        if !self.resolver.upstreams.is_empty() {
+            return Err("provider presets cannot be mixed with custom upstreams".into());
+        }
+        let catalog = providers::Catalog::bundled()?;
+        let automatic = self
+            .resolver
+            .providers
+            .iter()
+            .filter(|selection| selection.protocol == ProviderProtocol::Auto)
+            .count();
+        if automatic != 0 && automatic != self.resolver.providers.len() {
+            return Err("automatic and explicit provider transports cannot be mixed".into());
+        }
+        let mut upstreams = Vec::new();
+        for selection in &self.resolver.providers {
+            if selection.protocol == ProviderProtocol::Auto {
+                if selection.encryption.unwrap_or(EncryptionPolicy::Required)
+                    != EncryptionPolicy::Required
+                {
+                    return Err("automatic provider transport requires encryption".into());
+                }
+                upstreams.extend(catalog.select_encrypted(
+                    &selection.id,
+                    selection.address_family,
+                    selection.transport_priority.as_deref(),
+                )?);
+            } else {
+                if selection.encryption.is_some() || selection.transport_priority.is_some() {
+                    return Err(
+                        "encryption and transport_priority are only valid with protocol auto"
+                            .into(),
+                    );
+                }
+                upstreams.extend(
+                    catalog.select(
+                        &selection.id,
+                        selection
+                            .protocol
+                            .explicit()
+                            .ok_or("missing explicit protocol")?,
+                        selection.address_family,
+                    )?,
+                );
+            }
+        }
+        if upstreams.len() > 8 {
+            return Err("provider presets resolve to more than 8 upstreams".into());
+        }
+        self.resolver.upstreams = upstreams;
+        self.resolver.automatic_transport = automatic != 0;
+        Ok(())
     }
 
     /// Validate schema, transport combinations, ACLs, and bounded resource settings.
@@ -256,8 +489,98 @@ impl Config {
         {
             return Err("metrics must bind a nonzero loopback port".into());
         }
+        self.validate_management()?;
+        self.validate_web()?;
         self.filtering.validate()?;
         self.validate_resolver()
+    }
+
+    fn validate_management(&self) -> Result<(), String> {
+        let api = &self.management;
+        if api.listen.is_none() {
+            if !api.tokens.is_empty() || !api.webhooks.is_empty() {
+                return Err("management tokens and webhooks require an enabled listener".into());
+            }
+            return Ok(());
+        }
+        let address = api.listen.expect("checked listener");
+        if !address.ip().is_loopback() || address.port() == 0 {
+            return Err("management API must bind a nonzero loopback port".into());
+        }
+        if api.tokens.is_empty() || api.tokens.len() > 16 {
+            return Err("management API needs 1..16 tokens".into());
+        }
+        if !(1..=600).contains(&api.requests_per_minute) {
+            return Err("management requests_per_minute must be in 1..=600".into());
+        }
+        if api.webhooks.len() > 8 {
+            return Err("at most 8 management webhooks are allowed".into());
+        }
+        let mut names = std::collections::HashSet::new();
+        for token in &api.tokens {
+            if !valid_api_name(&token.name)
+                || !names.insert(&token.name)
+                || token.sha256.len() != 64
+                || !token.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("management tokens need unique names and 64-hex SHA-256 hashes".into());
+            }
+        }
+        let mut webhooks = std::collections::HashSet::new();
+        for webhook in &api.webhooks {
+            if !valid_api_name(&webhook.id)
+                || !webhooks.insert(&webhook.id)
+                || webhook.url.len() > 2048
+                || !webhook.url.starts_with("https://")
+                || webhook.url.contains(['#', '@'])
+            {
+                return Err("management webhooks need unique IDs and HTTPS URLs without credentials or fragments".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_web(&self) -> Result<(), String> {
+        let web = &self.web;
+        let addresses = web.http.iter().chain(&web.https).collect::<Vec<_>>();
+        if addresses.len() > 8 {
+            return Err("at most 8 web listeners are allowed".into());
+        }
+        if !(1..=1024).contains(&web.max_connections) {
+            return Err("web max_connections must be in 1..=1024".into());
+        }
+        for (index, address) in addresses.iter().enumerate() {
+            if address.port() == 0
+                || addresses[..index]
+                    .iter()
+                    .any(|other| socket_conflicts(address, other))
+            {
+                return Err("web listener ports must be nonzero and unique".into());
+            }
+        }
+        if web.https.is_empty() {
+            if web.certificate.is_some() || web.private_key.is_some() {
+                return Err("web certificate and private_key require HTTPS listeners".into());
+            }
+        } else if web.certificate.is_none() || web.private_key.is_none() {
+            return Err("web HTTPS requires certificate and private_key".into());
+        }
+        let occupied = self
+            .listen
+            .tcp
+            .iter()
+            .chain(&self.listen.dot)
+            .chain(&self.listen.doh)
+            .chain(self.metrics.iter())
+            .chain(self.management.listen.iter());
+        if addresses.iter().any(|address| {
+            occupied
+                .clone()
+                .any(|other| socket_conflicts(address, other))
+        }) {
+            return Err("web listener conflicts with another TCP listener".into());
+        }
+        Ok(())
     }
 
     fn validate_resolver(&self) -> Result<(), String> {
@@ -267,6 +590,9 @@ impl Config {
         }
         if r.mode == Mode::Recursive && !r.upstreams.is_empty() {
             return Err("recursive mode rejects unused upstreams".into());
+        }
+        if r.mode == Mode::Recursive && !r.providers.is_empty() {
+            return Err("recursive mode rejects provider presets".into());
         }
         if r.mode == Mode::Forward && r.root_hints.is_some() {
             return Err("root_hints is only used in recursive mode".into());
@@ -418,6 +744,20 @@ impl Config {
     }
 }
 
+fn valid_api_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+}
+
+fn socket_conflicts(left: &SocketAddr, right: &SocketAddr) -> bool {
+    left.port() == right.port()
+        && left.is_ipv4() == right.is_ipv4()
+        && (left.ip() == right.ip() || left.ip().is_unspecified() || right.ip().is_unspecified())
+}
+
 /// Read an operator file without allocating beyond the declared bound.
 ///
 /// # Errors
@@ -553,6 +893,18 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let config = Config::load(&root.join("config/lumen.toml")).unwrap();
         assert!(config.metrics.is_none());
+        assert!(config.management.listen.is_none());
+        assert!(config.management.tokens.is_empty());
+        assert!(config.management.webhooks.is_empty());
+        assert!(!config.web.http.is_empty());
+        assert!(
+            config
+                .web
+                .http
+                .iter()
+                .all(|address| address.ip().is_loopback())
+        );
+        assert!(config.web.https.is_empty());
         assert_eq!(config.resolver.mode, Mode::Recursive);
         assert!(config.resolver.dnssec);
         assert!(config.resolver.upstreams.is_empty());
@@ -582,5 +934,109 @@ mod tests {
                 .unwrap();
         assert!(!old.resolver.fallback.enabled);
         assert!(old.validate().is_ok());
+    }
+
+    #[test]
+    fn provider_presets_expand_during_load_and_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'cloudflare-unfiltered'\nprotocol = 'tls'\naddress_family = 'ipv4'\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.resolver.providers.len(), 1);
+        assert!(!config.resolver.upstreams.is_empty());
+        assert!(config.resolver.upstreams.iter().all(|upstream| {
+            upstream.address.is_ipv4()
+                && upstream.address.port() == 853
+                && upstream.protocol == UpstreamProtocol::Tls
+                && upstream.server_name.as_deref() == Some("one.one.one.one")
+        }));
+
+        fs::write(
+            &path,
+            "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'missing'\nprotocol = 'tls'\n",
+        )
+        .unwrap();
+        assert!(Config::load(&path).is_err());
+
+        fs::write(
+            &path,
+            "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'quad9-unfiltered'\nprotocol = 'auto'\nencryption = 'required'\naddress_family = 'ipv4'\ntransport_priority = ['tls', 'https']\n",
+        )
+        .unwrap();
+        let automatic = Config::load(&path).unwrap();
+        assert!(automatic.resolver.automatic_transport);
+        assert_eq!(automatic.resolver.upstreams.len(), 4);
+        assert!(
+            automatic.resolver.upstreams[..2]
+                .iter()
+                .all(|upstream| upstream.protocol == UpstreamProtocol::Tls)
+        );
+        assert!(
+            automatic.resolver.upstreams[2..]
+                .iter()
+                .all(|upstream| upstream.protocol == UpstreamProtocol::Https)
+        );
+
+        fs::write(
+            &path,
+            "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'quad9-unfiltered'\nprotocol = 'auto'\ntransport_priority = ['tls', 'tls']\n",
+        )
+        .unwrap();
+        assert!(Config::load(&path).is_err());
+
+        fs::write(
+            &path,
+            "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'cloudflare-unfiltered'\nprotocol = 'tls'\n[[resolver.upstreams]]\naddress = '1.1.1.1:853'\nprotocol = 'tls'\nserver_name = 'cloudflare-dns.com'\n",
+        )
+        .unwrap();
+        assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn management_api_is_explicit_local_and_bounded() {
+        let base = Path::new("/operator");
+        let source = "schema_version = 1\n[management]\nlisten = '127.0.0.1:9080'\nrequests_per_minute = 60\n[[management.tokens]]\nname = 'admin'\nrole = 'admin'\nsha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n[[management.webhooks]]\nid = 'home'\nurl = 'https://home.example/hook'\nsecret_file = 'webhook.key'\n";
+        let config = Config::parse(source, base).unwrap();
+        assert_eq!(config.management.tokens.len(), 1);
+        assert_eq!(
+            config.management.webhooks[0].secret_file,
+            base.join("webhook.key")
+        );
+
+        assert!(Config::parse(&source.replace("127.0.0.1", "0.0.0.0"), base).is_err());
+        assert!(
+            Config::parse(&source.replace("[[management.tokens]]", "# no token"), base).is_err()
+        );
+        assert!(Config::parse(&source.replace("https://", "http://"), base).is_err());
+    }
+
+    #[test]
+    fn web_listeners_are_bounded_and_do_not_overlap() {
+        let config = Config::parse(
+            "schema_version = 1\n[web]\nhttp = ['127.0.0.1:8080']\nmax_connections = 32\n",
+            Path::new("/operator"),
+        )
+        .unwrap();
+        assert_eq!(config.web.max_connections, 32);
+        assert!(config.web.certificate.is_none());
+
+        assert!(
+            Config::parse(
+                "schema_version = 1\n[web]\nhttp = ['127.0.0.1:5353']\n",
+                Path::new("/operator"),
+            )
+            .is_err()
+        );
+        assert!(
+            Config::parse(
+                "schema_version = 1\n[web]\nhttps = ['127.0.0.1:8443']\n",
+                Path::new("/operator"),
+            )
+            .is_err()
+        );
     }
 }

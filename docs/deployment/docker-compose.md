@@ -9,8 +9,10 @@ docker compose up -d
 docker compose logs -f lumen
 ```
 
-The compose file maps host UDP/TCP 53 to container port 5353. It drops all Linux
-capabilities, sets a read-only root filesystem, and runs as UID 65532. Stop with
+The compose file maps host UDP/TCP 53 to container port 5353 and publishes the
+blank UI as host-loopback `127.0.0.1:8080`. It drops all Linux capabilities,
+sets a read-only root filesystem, and runs as UID 65532. Any reverse proxy may
+use the private HTTP upstream for HTTPS or HTTP/3. Stop with
 `docker compose down`. Upgrade by changing the pinned tag, pulling, validating
 the config with `docker compose run --rm lumen --check`, and recreating.
 

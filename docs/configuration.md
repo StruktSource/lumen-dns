@@ -6,9 +6,10 @@ Lumen accepts TOML schema **1** through `lumen --config FILE`. See
 live in [`config/filtering.example.toml`](../config/filtering.example.toml).
 
 Unknown fields, future schema versions, invalid addresses, and out-of-range
-limits fail startup. No implicit migration occurs. Config files are limited to
+limits fail startup. Config files are limited to
 64 KiB and must be UTF-8. Relative file paths resolve beside the config file,
-not the process working directory. Hot reload and schema migrations are later work.
+not the process working directory. `--state FILE` enables explicit SQLite schema
+migrations, persistent config/device state, and local cross-platform control.
 
 `config/lumen.toml` is the only release default. It enables local recursive DNS
 and required safety bounds, but no metrics, provider, fallback, filter policy,
@@ -23,12 +24,28 @@ sources perform host DNS lookups and downloads during this check. Port availabil
 is checked only when the daemon starts. All enabled sockets must bind before
 traffic is served. Startup fails if any listener cannot bind.
 
+Managed mode starts with `lumen --config FILE --state FILE`. The first start
+stores config revision 1 and seeds devices from TOML once. Later device changes
+come from SQLite. `lumenctl config apply` validates and stages a revision; the
+daemon accepts it only after runtime checks and socket binding succeed. Failure
+restores the prior server and discards the candidate. Reload restarts listeners,
+so active connections close and there is a brief bind gap. DNS caches reset.
+See [state and control](state-and-control.md).
+
 ## Top level
 
 | Field | Default / meaning |
 | --- | --- |
 | `schema_version` | Required; must be `1` |
 | `metrics` | Disabled; optional nonzero loopback socket address for HTTP `/metrics` and `/healthz` |
+| `management.listen` | Disabled; optional nonzero loopback address, managed mode only |
+| `management.requests_per_minute` | `60`; per-token bound, 1–600 |
+| `management.tokens` | 1–16 named SHA-256 token hashes with viewer/operator/admin role when API enabled |
+| `management.webhooks` | Up to 8 signed HTTPS audit webhooks with secret files |
+| `web.http` | Loopback `127.0.0.1:8080` and `[::1]:8080` in release config; empty disables HTTP |
+| `web.https` | Empty; direct TLS 1.3 with HTTP/2 and HTTP/1.1 when configured |
+| `web.certificate`, `web.private_key` | Required together when `web.https` is enabled |
+| `web.max_connections` | `64`; shared web connection bound, 1–1024 |
 | `listen` | Listener and client-access settings |
 | `resolver` | Selected mode, cache, DNSSEC, and upstream settings |
 | `limits` | Shared admission and IO bounds |
@@ -69,7 +86,8 @@ and restart after rotation. Lumen does not create or download certificates.
 | `root_hints` | Bundled InterNIC hints | Optional BIND-format file; recursive mode only; 64 KiB; 1–64 IP records; directives disabled |
 | `trust_anchor` | Hickory bundled root DNSKEYs | Optional DNSKEY-format file; 64 KiB; at least one key; DNSSEC must be enabled |
 | `upstream_ca` | Public WebPKI roots | Optional PEM CA bundle, 1 MiB; replaces public roots for encrypted forwarding |
-| `upstreams` | `[]` | 1–8 required in forward mode; rejected in recursive mode |
+| `upstreams` | `[]` | 1–8 custom endpoints in forward mode; rejected in recursive mode |
+| `providers` | `[]` | Bundled provider selections; cannot be mixed with custom upstreams |
 | `cache_entries` | `4096` | 1–65536 response entries |
 | `nameserver_cache_entries` | `256` | 1–4096; recursive delegation cache |
 | `validation_cache_entries` | `4096` | 1–65536; recursive DNSSEC validation cache |
@@ -122,6 +140,22 @@ Each `[[resolver.upstreams]]` has:
 `udp` enables TCP fallback at the same address/port. `https` uses HTTP/2.
 Certificate identity and chain verification stay enabled. A
 private CA bundle changes trusted roots; it does not bypass name verification.
+
+Each `[[resolver.providers]]` has:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Required stable ID from the bundled provider catalog |
+| `protocol` | Explicit `udp`, `tcp`, `tls`, `https`, or `quic`; or encrypted-only `auto` |
+| `address_family` | `any`, `ipv4`, or `ipv6`; defaults to `any` |
+| `encryption` | Auto mode only; defaults to and only accepts `required` |
+| `transport_priority` | Auto mode only; unique ordered subset of `quic`, `https`, `tls` |
+
+Auto mode defaults to QUIC, HTTPS, then TLS and skips transports that the preset
+does not support. It preserves this order and fails over only for connection,
+transport, or timeout errors. DNS answers, SERVFAIL, and local DNSSEC failures do
+not trigger another transport. All normal attempt and deadline bounds still
+apply. Automatic and explicit preset transports cannot be mixed.
 
 ## Limits
 

@@ -1,8 +1,33 @@
-# Lumen release defaults. Safe local recursive DNS with no optional features.
+# Lumen release defaults. Safe local recursive DNS with blank loopback UI hosting.
 # Full reference: ../docs/configuration.md
 schema_version = 1
 # Optional local aggregate metrics. Disabled by default.
 # metrics = "127.0.0.1:9153"
+
+# Optional authenticated management API. Requires `lumen --state FILE`.
+# Keep loopback-only. Store only a SHA-256 hash of a random 32+ byte token.
+# [management]
+# listen = "127.0.0.1:9080"
+# requests_per_minute = 60
+# [[management.tokens]]
+# name = "local-admin"
+# role = "admin"
+# sha256 = "replace-with-64-lowercase-hex-characters"
+# [[management.webhooks]]
+# id = "home-assistant"
+# url = "https://home.example/api/webhook/lumen"
+# secret_file = "secrets/home-assistant-webhook.key"
+
+# Embedded blank UI shell. HTTP stays loopback-only by default.
+[web]
+http = ["127.0.0.1:8080", "[::1]:8080"]
+https = []
+max_connections = 64
+# Direct HTTPS supports HTTP/1.1 and HTTP/2 with TLS 1.3.
+# https = ["127.0.0.1:8443", "[::1]:8443"]
+# certificate = "tls/web-cert.pem"
+# private_key = "tls/web-key.pem"
+# For HTTP/3, keep HTTP loopback/private and use any HTTP/3 reverse proxy.
 
 # Local DNS listeners. Change both addresses and allow_clients for LAN use.
 [listen]

@@ -14,14 +14,18 @@ helm upgrade --install lumen deploy/helm/lumen --namespace lumen --create-namesp
 
 Edit the config ACL for the real pod and client networks. The default NetworkPolicy
 accepts DNS only from the same namespace and permits resolver egress on DNS and
-encrypted-DNS ports. Review it for the cluster CNI. Encrypted listeners can mount
+encrypted-DNS ports. It lists both Service port 53 and pod target port 5353 so
+CNIs that enforce before or after Service translation keep the same behavior.
+Review it for the cluster CNI. Encrypted listeners can mount
 an existing TLS Secret through `tls.existingSecret`; the config must name files
 under `/etc/lumen/tls`.
 
 The TCP probes prove that the listener accepts connections. The Kind CI smoke
 test separately sends deterministic UDP and TCP DNS queries for the locally
 blocked `health.lumen.invalid` name. Neither test proves public recursion. The
-current service has no disk state, so no PVC is required.
+shipped manifests do not enable managed state, so no PVC is required. To enable
+it, use one replica, mount a UID 65532-writable PVC, and pass `--state`; SQLite
+must not be shared by multiple pods. HA state replication remains future work.
 
 Kubernetes SNAT, Services, and proxies can hide the original client IP. Per-device
 policy is valid only when packet source IP preservation has been proved for the

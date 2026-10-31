@@ -76,7 +76,7 @@ fn custom_doh_path_reaches_engine_config() {
         server_name: Some("freedns.controld.com".into()),
         doh_path: Some("/uncensored".into()),
     };
-    let server = name_server_config(&upstream);
+    let server = name_server_config(&upstream, false);
     assert_eq!(server.connections[0].port, 443);
     assert!(matches!(
         &server.connections[0].protocol,

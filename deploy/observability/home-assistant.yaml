@@ -1,0 +1,19 @@
+# Copy into a Home Assistant package. Put lumen_viewer_token in secrets.yaml.
+rest:
+  - resource: http://127.0.0.1:9080/v1/status
+    headers:
+      Authorization: !secret lumen_viewer_token
+    scan_interval: 30
+    sensor:
+      - name: Lumen status
+        value_template: "{{ value_json.status }}"
+        json_attributes:
+          - last_error
+
+rest_command:
+  lumen_filter_refresh:
+    url: http://127.0.0.1:9080/v1/filter/refresh
+    method: POST
+    headers:
+      Authorization: !secret lumen_operator_token
+    content_type: application/json

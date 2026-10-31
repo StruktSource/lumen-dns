@@ -11,6 +11,7 @@ lumen-filter = { path = "../lumen-filter" }
 lumen-config = { path = "../lumen-config" }
 lumen-proto = { path = "../lumen-proto" }
 lumen-resolver = { path = "../lumen-resolver" }
+lumen-web = { path = "../lumen-web" }
 tokio.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true

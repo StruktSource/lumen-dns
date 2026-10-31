@@ -1,9 +1,40 @@
 # Upstream provider presets
 
 Lumen ships an offline provider catalog at
-`config/providers/resolvers.toml`. It is metadata only. No preset is selected by
-default, and the release config stays in recursive mode. Custom upstream entries
-remain supported through `[[resolver.upstreams]]`.
+`config/providers/resolvers.toml`. No preset is selected by default, and the
+release config stays in recursive mode. Forward mode can select a preset by its
+stable ID:
+
+```toml
+[resolver]
+mode = "forward"
+dnssec = true
+
+[[resolver.providers]]
+id = "cloudflare-unfiltered"
+protocol = "auto"
+encryption = "required"
+address_family = "ipv4"
+transport_priority = ["quic", "https", "tls"]
+```
+
+`address_family` accepts `any`, `ipv4`, or `ipv6`. Multiple selections are
+allowed when they expand to at most eight endpoints. Protocols are accepted only
+when marked supported by the catalog. Presets cannot be mixed with custom
+`[[resolver.upstreams]]` entries. Custom upstreams remain supported.
+
+`protocol = "auto"` builds an encrypted-only list from the transports that the
+catalog marks supported. Its default order is QUIC, HTTPS, then TLS. Set
+`transport_priority` to change or limit that order. `encryption` defaults to
+`required`; no plaintext policy exists. Automatic and explicit preset transports
+cannot be mixed in one config.
+
+The resolver keeps the chosen order and tries the next encrypted endpoint only
+after a connection, transport, or timeout failure. A DNS answer, including
+NXDOMAIN or SERVFAIL, ends the attempt. DNSSEC failure also ends resolution after
+local validation. `attempts`, `upstream_timeout_ms`, and the whole query deadline
+remain in force. TLS chain and hostname checks stay enabled. Selection uses the
+offline catalog and does not probe public services during startup.
 
 The catalog was checked against operator documentation on 2026-10-30. A catalog
 entry is not a live-service, privacy, or availability guarantee. Operators can
@@ -34,10 +65,11 @@ separate from anycast network scope.
 ## Selection rules
 
 `lumen_config::providers::Catalog::bundled()` validates the versioned catalog.
-Call `select(stable_id, protocol, address_family)` to produce the same explicit
-`Upstream` records used by the resolver. Expert tools can instead build custom
-`Upstream` records. Selection fails for unknown profiles, unavailable protocols,
-or missing address families.
+Call `select(stable_id, protocol, address_family)` for one explicit transport or
+`select_encrypted(stable_id, address_family, priority)` for the ordered automatic
+set. Both produce the same verified `Upstream` records used by the resolver.
+Expert tools can instead build custom records. Selection fails for unknown
+profiles, unavailable protocols, invalid priorities, or missing address families.
 
 Only a transport marked `supported` can be selected. `unsupported` means the
 operator says it is unavailable. `not_documented` means the official page does

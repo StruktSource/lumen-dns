@@ -12,13 +12,25 @@ Phases 1 and 2 resolver/filtering implementation are complete. See the detailed
 - [x] Add bounded list imports for hosts, domains, and Adblock DNS formats.
 - [x] Add validated atomic list refresh, rollback, and schedules.
 
-## UI timing and recommended order
+## Phase 3 local state and control: implemented
 
-1. Build Phase 3 persistence, config reload/migrations, and authenticated control.
-2. Begin UI design/prototyping alongside Phase 3 work. Use mock
+- [x] Add versioned SQLite config and device persistence with migrations.
+- [x] Add staged config apply, runtime validation, reload, and rollback.
+- [x] Add cross-platform local CLI config, device, filter, status, and shutdown controls.
+
+## Phase 3 next work
+
+1. [x] Build the loopback authenticated `/v1` management API on the completed
+   persistence, reload, migration, and local-control base. Add scoped roles,
+   bounded tokens, request limits, and durable audit events.
+2. [x] Add extended privacy-safe Prometheus metrics, a ready Grafana dashboard,
+   bounded signed HTTPS webhooks, and Home Assistant examples.
+3. [x] Add embedded blank-shell hosting over HTTP and direct TLS HTTP/2, with a
+   vendor-neutral reverse-proxy contract for HTTP/3.
+4. Begin UI design/prototyping. Use mock
    data for an overview, list management, and settings; keep the prototype local
    and management API access disabled.
-3. Build the functional UI during Phase 3, once configuration persistence/reload
+5. Build the functional UI during Phase 3, once configuration persistence/reload
    and an authenticated, scoped management API are ready. Start with aggregate
    status, then settings and filtering controls. Keep query history off by default.
 
@@ -31,7 +43,8 @@ first-release commitment remains a blank UI shell; a functional UI is later scop
 - [ ] Extended DNS interoperability, DNSSEC conformance, and long-running soak tests.
 - [ ] Independent security review and production memory/performance measurements.
 - [ ] Trust-anchor rollover automation and certificate lifecycle tooling.
-- [ ] Config reload/migrations, complete CLI, authenticated API, and optional UI.
+- [ ] Optional functional UI and opt-in query history. Authenticated API, scoped
+  audit events, extended metrics, and integration examples are implemented.
 - [ ] Record passing native multi-OS/architecture and multi-arch OCI release runs.
 - [ ] Add keyless image signing and reproducible-build comparison; SBOM/provenance is configured.
 - [ ] Run real Proxmox, Unraid, Raspberry Pi, Podman ARM64, and dual-stack Kubernetes tests.

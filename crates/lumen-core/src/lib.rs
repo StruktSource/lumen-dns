@@ -33,6 +33,9 @@ pub struct Metrics {
     pub timeouts: AtomicU64,
     pub failures: AtomicU64,
     pub active: AtomicU64,
+    transports: [AtomicU64; 6],
+    latency_buckets: [AtomicU64; 8],
+    latency_micros: AtomicU64,
 }
 
 impl Metrics {
@@ -84,7 +87,62 @@ impl Metrics {
                 value.load(Ordering::Relaxed)
             );
         }
+        text.push_str("# HELP lumen_dns_transport_queries_total Admitted DNS queries by bounded transport.\n# TYPE lumen_dns_transport_queries_total counter\n");
+        for (name, value) in [
+            ("udp", &self.transports[0]),
+            ("tcp", &self.transports[1]),
+            ("tls", &self.transports[2]),
+            ("https", &self.transports[3]),
+            ("quic", &self.transports[4]),
+            ("other", &self.transports[5]),
+        ] {
+            let _ = writeln!(
+                text,
+                "lumen_dns_transport_queries_total{{transport=\"{name}\"}} {}",
+                value.load(Ordering::Relaxed)
+            );
+        }
+        text.push_str("# HELP lumen_dns_query_duration_seconds End-to-end admitted DNS query time.\n# TYPE lumen_dns_query_duration_seconds histogram\n");
+        let bounds = [0.001_f64, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0];
+        let mut cumulative = 0_u64;
+        for (index, bound) in bounds.into_iter().enumerate() {
+            cumulative =
+                cumulative.saturating_add(self.latency_buckets[index].load(Ordering::Relaxed));
+            let _ = writeln!(
+                text,
+                "lumen_dns_query_duration_seconds_bucket{{le=\"{bound}\"}} {cumulative}"
+            );
+        }
+        cumulative = cumulative.saturating_add(self.latency_buckets[7].load(Ordering::Relaxed));
+        let micros = self.latency_micros.load(Ordering::Relaxed);
+        let _ = writeln!(
+            text,
+            "lumen_dns_query_duration_seconds_bucket{{le=\"+Inf\"}} {cumulative}\nlumen_dns_query_duration_seconds_sum {}.{:06}\nlumen_dns_query_duration_seconds_count {cumulative}",
+            micros / 1_000_000,
+            micros % 1_000_000
+        );
         text
+    }
+
+    fn observe(&self, protocol: Transport, started: Instant) {
+        let transport = match protocol {
+            Transport::Udp => 0,
+            Transport::Tcp => 1,
+            Transport::Tls => 2,
+            Transport::Https => 3,
+            Transport::Quic => 4,
+            _ => 5,
+        };
+        self.transports[transport].fetch_add(1, Ordering::Relaxed);
+        let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.latency_micros.fetch_add(micros, Ordering::Relaxed);
+        let bucket = [
+            1_000_u64, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000,
+        ]
+        .into_iter()
+        .position(|bound| micros <= bound)
+        .unwrap_or(7);
+        self.latency_buckets[bucket].fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -170,21 +228,22 @@ impl Service {
             return None;
         }
         self.metrics.queries.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
         if !self.allowed(peer) || !self.rate_allowed(peer.ip().to_canonical()) {
             self.metrics.refused.fetch_add(1, Ordering::Relaxed);
             return None;
         }
         if packet.len() > usize::from(self.config.limits.max_message_bytes) {
             self.metrics.malformed.fetch_add(1, Ordering::Relaxed);
-            return Some(self.record_response(malformed_response(packet)));
+            return Some(self.record_response(malformed_response(packet), protocol, started));
         }
         let Ok(query) = Query::parse(packet) else {
             self.metrics.malformed.fetch_add(1, Ordering::Relaxed);
-            return Some(self.record_response(malformed_response(packet)));
+            return Some(self.record_response(malformed_response(packet), protocol, started));
         };
         let Ok(_permit) = self.queries.try_acquire() else {
             self.metrics.refused.fetch_add(1, Ordering::Relaxed);
-            return Some(self.record_response(query.response(Rcode::Refused)));
+            return Some(self.record_response(query.response(Rcode::Refused), protocol, started));
         };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -209,7 +268,11 @@ impl Service {
             } else {
                 maximum
             };
-            return Some(self.record_response(lumen_filter::response(&query, action, maximum)));
+            return Some(self.record_response(
+                lumen_filter::response(&query, action, maximum),
+                protocol,
+                started,
+            ));
         }
         self.metrics.active.fetch_add(1, Ordering::Relaxed);
         let _active = ActiveQuery(&self.metrics.active);
@@ -231,11 +294,12 @@ impl Service {
                 query.response(Rcode::ServFail)
             }
         };
-        Some(self.record_response(response))
+        Some(self.record_response(response, protocol, started))
     }
 
-    fn record_response(&self, response: Vec<u8>) -> Vec<u8> {
+    fn record_response(&self, response: Vec<u8>, protocol: Transport, started: Instant) -> Vec<u8> {
         self.metrics.responses.fetch_add(1, Ordering::Relaxed);
+        self.metrics.observe(protocol, started);
         if response.get(3).is_some_and(|byte| byte & 15 == 2) {
             self.metrics.failures.fetch_add(1, Ordering::Relaxed);
         }
@@ -274,5 +338,16 @@ mod tests {
         assert!(rates.allow(second, now + Duration::from_secs(1), &limits));
         assert_eq!(rates.entries.len(), 1);
         assert!(rates.allow(second, now + Duration::from_secs(2), &limits));
+    }
+
+    #[test]
+    fn extended_metrics_have_bounded_transport_and_latency_series() {
+        let metrics = Metrics::default();
+        metrics.observe(Transport::Udp, Instant::now());
+        let text = metrics.render();
+        assert!(text.contains("lumen_dns_transport_queries_total{transport=\"udp\"} 1"));
+        assert!(text.contains("lumen_dns_query_duration_seconds_count 1"));
+        assert!(!text.contains("client="));
+        assert!(!text.contains("domain="));
     }
 }

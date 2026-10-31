@@ -2,7 +2,7 @@
 
 Phase 1 provides DNS transport, iterative recursion, forwarding, caches, local
 DNSSEC validation, admission control, and aggregate metrics. Filtering, storage,
-management API access, and a functional UI are not implemented yet.
+an opt-in management API, and a functional UI are separate Phase 3 surfaces.
 
 ## Start and query
 
@@ -14,8 +14,11 @@ dig @::1 -p 5353 example.com AAAA +tcp
 dig @127.0.0.1 -p 5353 example.com A +dnssec
 ```
 
-Use `config/forward.example.toml` for explicit encrypted forwarding. The same cache and
-resolver are shared across client transports. Only one mode runs at a time.
+Use `config/forward.example.toml` for encrypted provider forwarding. Provider
+`protocol = "auto"` keeps a configured encrypted transport order and fails over
+only after connection, transport, or timeout errors. It never adds UDP or TCP.
+DNS answers and DNSSEC failures do not trigger another transport. The same cache
+and resolver are shared across client transports. Only one mode runs at a time.
 
 ## Optional recursive fallback
 
@@ -120,14 +123,17 @@ DNS reachability or a DNSSEC guarantee. No management operations are exposed.
 | `lumen_dns_timeouts_total` | counter |
 | `lumen_dns_failures_total` | counter |
 | `lumen_dns_active_queries` | gauge |
+| `lumen_dns_transport_queries_total{transport}` | counter |
+| `lumen_dns_query_duration_seconds` | histogram |
 | `lumen_dns_fallback_attempts_total` | counter |
 | `lumen_dns_fallback_successes_total` | counter |
 | `lumen_dns_fallback_failures_total` | counter |
 | `lumen_dns_fallback_trigger_recursion_timeout_total` | counter |
 
 These have no client/domain labels. Query names and history are not stored or
-logged. Full query logs, cache-hit metrics, latency histograms, and Grafana
-panels remain later observability work. See
+logged. Transport totals and query latency use fixed-cardinality series. Full
+query logs remain disabled. A ready Grafana dashboard is under
+`deploy/observability/`. See
 [configuration](configuration.md) for admission/drop semantics.
 
 ## Shutdown and failure

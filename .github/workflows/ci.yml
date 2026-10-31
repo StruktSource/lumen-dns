@@ -2,8 +2,18 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - ".agent/**"
+      - "docs/**"
+      - "LICENSE*"
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - ".agent/**"
+      - "docs/**"
+      - "LICENSE*"
   workflow_dispatch:
 
 permissions:
@@ -108,13 +118,19 @@ jobs:
       - run: helm lint deploy/helm/lumen
       - run: helm template ci deploy/helm/lumen > /dev/null
       - run: docker build --tag lumen:ci .
-      - run: kind load docker-image lumen:ci
+      - run: docker pull python:3.14-alpine
+      - run: kind load docker-image lumen:ci python:3.14-alpine --name chart-testing
       - run: kubectl apply -k deploy/kubernetes
       - run: kubectl rollout status deployment/lumen --timeout=120s
       - run: kubectl create configmap dns-smoke --from-file=dns-smoke.py=scripts/dns-smoke.py
       - run: kubectl apply -f deploy/kubernetes/smoke-pod.yaml
       - run: kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/dns-smoke --timeout=120s
-      - run: kubectl logs dns-smoke
+      - if: failure()
+        run: kubectl describe pod dns-smoke
+      - if: failure()
+        run: kubectl logs deployment/lumen
+      - if: always()
+        run: kubectl logs dns-smoke
 
   audit:
     name: Dependency security audit

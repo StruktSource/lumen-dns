@@ -1,92 +1,409 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Local, read-only policy diagnosis. No management listener is exposed.
+//! Cross-platform local control through Lumen's versioned `SQLite` state.
+
+use lumen_filter::config::Device;
+use lumen_store::{Command as ControlCommand, Store};
 use std::{
     io,
     net::IpAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const HELP: &str = "Usage: lumenctl filter-explain --config FILE --client IP --domain NAME [--at UNIX_SECONDS]\n\nLoads configured lists (including HTTPS sources), then explains a decision.\nNo DNS query is sent. --at selects a UTC instant for schedule checks.";
+const HELP: &str = "Usage:
+  lumenctl config validate --config FILE
+  lumenctl config apply --config FILE --state FILE
+  lumenctl config show --state FILE
+  lumenctl reload|status|shutdown --state FILE
+  lumenctl filter refresh|rollback --state FILE
+  lumenctl filter-explain --config FILE --client IP --domain NAME [--at UNIX_SECONDS]
+  lumenctl device list --state FILE
+  lumenctl device set --state FILE --id ID --address IP [--address IP] [--profile ID] [--group ID]
+  lumenctl device remove --state FILE --id ID";
 
-#[derive(Debug, PartialEq, Eq)]
-struct Explain {
-    path: PathBuf,
-    client: IpAddr,
-    domain: String,
-    at: Option<u64>,
+#[derive(Debug)]
+enum Command {
+    ConfigValidate {
+        config: PathBuf,
+    },
+    ConfigApply {
+        config: PathBuf,
+        state: PathBuf,
+    },
+    ConfigShow {
+        state: PathBuf,
+    },
+    Control {
+        state: PathBuf,
+        command: ControlCommand,
+    },
+    Status {
+        state: PathBuf,
+    },
+    DeviceList {
+        state: PathBuf,
+    },
+    DeviceSet {
+        state: PathBuf,
+        device: Device,
+    },
+    DeviceRemove {
+        state: PathBuf,
+        id: String,
+    },
+    Explain {
+        config: PathBuf,
+        client: IpAddr,
+        domain: String,
+        at: Option<u64>,
+    },
 }
 
-fn arguments(args: impl IntoIterator<Item = String>) -> Result<Option<Explain>, String> {
-    let mut args = args.into_iter();
-    match args.next().as_deref() {
-        None => return Ok(None),
-        Some("--help" | "-h") if args.next().is_none() => return Ok(None),
-        Some("filter-explain") => (),
-        _ => return Err(HELP.into()),
+fn arguments(args: impl IntoIterator<Item = String>) -> Result<Option<Command>, String> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    if args.is_empty() || args == ["--help"] || args == ["-h"] {
+        return Ok(None);
     }
-    let (mut path, mut client, mut domain, mut at) = (None, None, None, None);
-    while let Some(flag) = args.next() {
-        let value = args.next().ok_or("missing option value")?;
-        match flag.as_str() {
-            "--config" if path.is_none() => path = Some(PathBuf::from(value)),
-            "--client" if client.is_none() => {
-                client = Some(value.parse().map_err(|_| "invalid client IP")?);
-            }
-            "--domain" if domain.is_none() => {
-                domain = Some(lumen_filter::rules::normalize(&value)?);
-            }
-            "--at" if at.is_none() => at = Some(value.parse().map_err(|_| "invalid Unix time")?),
-            _ => return Err("unknown or repeated option".into()),
+    match args.as_slice() {
+        [name, rest @ ..] if name == "config" => config_command(rest),
+        [name, rest @ ..] if name == "device" => device_command(rest),
+        [name, action, rest @ ..] if name == "filter" && action == "refresh" => {
+            Ok(Some(Command::Control {
+                state: one_path(rest, "--state")?,
+                command: ControlCommand::FilterRefresh,
+            }))
         }
+        [name, action, rest @ ..] if name == "filter" && action == "rollback" => {
+            Ok(Some(Command::Control {
+                state: one_path(rest, "--state")?,
+                command: ControlCommand::FilterRollback,
+            }))
+        }
+        [name, rest @ ..] if name == "reload" => Ok(Some(Command::Control {
+            state: one_path(rest, "--state")?,
+            command: ControlCommand::Reload,
+        })),
+        [name, rest @ ..] if name == "shutdown" => Ok(Some(Command::Control {
+            state: one_path(rest, "--state")?,
+            command: ControlCommand::Shutdown,
+        })),
+        [name, rest @ ..] if name == "status" => Ok(Some(Command::Status {
+            state: one_path(rest, "--state")?,
+        })),
+        [name, rest @ ..] if name == "filter-explain" => explain_command(rest),
+        _ => Err(HELP.into()),
     }
-    Ok(Some(Explain {
-        path: path.ok_or("--config required")?,
-        client: client.ok_or("--client required")?,
-        domain: domain.ok_or("--domain required")?,
-        at,
+}
+
+fn config_command(args: &[String]) -> Result<Option<Command>, String> {
+    match args {
+        [action, rest @ ..] if action == "validate" => Ok(Some(Command::ConfigValidate {
+            config: one_path(rest, "--config")?,
+        })),
+        [action, rest @ ..] if action == "show" => Ok(Some(Command::ConfigShow {
+            state: one_path(rest, "--state")?,
+        })),
+        [action, rest @ ..] if action == "apply" => {
+            let values = options(rest, &["--config", "--state"], &[])?;
+            Ok(Some(Command::ConfigApply {
+                config: PathBuf::from(required(&values, "--config")?),
+                state: PathBuf::from(required(&values, "--state")?),
+            }))
+        }
+        _ => Err(HELP.into()),
+    }
+}
+
+fn device_command(args: &[String]) -> Result<Option<Command>, String> {
+    match args {
+        [action, rest @ ..] if action == "list" => Ok(Some(Command::DeviceList {
+            state: one_path(rest, "--state")?,
+        })),
+        [action, rest @ ..] if action == "remove" => {
+            let values = options(rest, &["--state", "--id"], &[])?;
+            Ok(Some(Command::DeviceRemove {
+                state: PathBuf::from(required(&values, "--state")?),
+                id: required(&values, "--id")?.to_owned(),
+            }))
+        }
+        [action, rest @ ..] if action == "set" => {
+            let values = options(
+                rest,
+                &["--state", "--id", "--profile", "--group"],
+                &["--address"],
+            )?;
+            let addresses = values
+                .iter()
+                .filter(|(key, _)| key == "--address")
+                .map(|(_, value)| value.parse().map_err(|_| "invalid device IP".to_owned()))
+                .collect::<Result<Vec<_>, _>>()?;
+            if addresses.is_empty() {
+                return Err("at least one --address is required".into());
+            }
+            let profile = optional(&values, "--profile").map(ToOwned::to_owned);
+            let group = optional(&values, "--group").map(ToOwned::to_owned);
+            if profile.is_none() && group.is_none() {
+                return Err("choose --profile, --group, or both".into());
+            }
+            Ok(Some(Command::DeviceSet {
+                state: PathBuf::from(required(&values, "--state")?),
+                device: Device {
+                    id: required(&values, "--id")?.to_owned(),
+                    addresses,
+                    profile,
+                    group,
+                },
+            }))
+        }
+        _ => Err(HELP.into()),
+    }
+}
+
+fn explain_command(args: &[String]) -> Result<Option<Command>, String> {
+    let values = options(args, &["--config", "--client", "--domain", "--at"], &[])?;
+    Ok(Some(Command::Explain {
+        config: PathBuf::from(required(&values, "--config")?),
+        client: required(&values, "--client")?
+            .parse()
+            .map_err(|_| "invalid client IP")?,
+        domain: lumen_filter::rules::normalize(required(&values, "--domain")?)?,
+        at: optional(&values, "--at")
+            .map(str::parse)
+            .transpose()
+            .map_err(|_| "invalid Unix time")?,
     }))
 }
 
+fn options(
+    args: &[String],
+    allowed: &[&str],
+    repeated: &[&str],
+) -> Result<Vec<(String, String)>, String> {
+    if !args.len().is_multiple_of(2) {
+        return Err("missing option value".into());
+    }
+    let mut values = Vec::new();
+    for pair in args.chunks_exact(2) {
+        if !allowed.contains(&pair[0].as_str()) && !repeated.contains(&pair[0].as_str()) {
+            return Err(format!("unknown option: {}", pair[0]));
+        }
+        if !repeated.contains(&pair[0].as_str()) && values.iter().any(|(key, _)| key == &pair[0]) {
+            return Err(format!("repeated option: {}", pair[0]));
+        }
+        values.push((pair[0].clone(), pair[1].clone()));
+    }
+    Ok(values)
+}
+
+fn required<'a>(values: &'a [(String, String)], key: &str) -> Result<&'a str, String> {
+    optional(values, key).ok_or_else(|| format!("{key} required"))
+}
+
+fn optional<'a>(values: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    values
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.as_str())
+}
+
+fn one_path(args: &[String], flag: &str) -> Result<PathBuf, String> {
+    let values = options(args, &[flag], &[])?;
+    Ok(PathBuf::from(required(&values, flag)?))
+}
+
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // Keep command dispatch together.
 async fn main() -> io::Result<()> {
-    let Some(args) = arguments(std::env::args().skip(1)).map_err(io::Error::other)? else {
+    let Some(command) = arguments(std::env::args().skip(1)).map_err(io::Error::other)? else {
         println!("{HELP}");
         return Ok(());
     };
-    let config = lumen_config::Config::load(&args.path).map_err(io::Error::other)?;
-    let filter = lumen_filter::Filter::load(config.filtering)
-        .await
-        .map_err(io::Error::other)?;
-    let at = args.at.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    });
-    println!("{}", filter.explain(&args.domain, args.client, at));
+    match command {
+        Command::ConfigValidate { config } => {
+            let config = lumen_config::Config::load(&config).map_err(io::Error::other)?;
+            lumen_core::RunningServer::check(&config).await?;
+            println!("Lumen configuration valid");
+        }
+        Command::ConfigApply { config, state } => {
+            let parsed = lumen_config::Config::load(&config).map_err(io::Error::other)?;
+            lumen_core::RunningServer::check(&parsed).await?;
+            let bytes = lumen_config::read_bounded(&config, 65536).map_err(io::Error::other)?;
+            let source = std::str::from_utf8(&bytes)
+                .map_err(|_| io::Error::other("config must be UTF-8"))?;
+            let mut store = Store::open(&state).map_err(io::Error::other)?;
+            let revision = store
+                .stage_config(source, config.parent().unwrap_or_else(|| Path::new(".")))
+                .map_err(io::Error::other)?;
+            store
+                .enqueue(ControlCommand::ConfigReload(revision))
+                .map_err(io::Error::other)?;
+            println!("Stored config revision {revision}; reload queued");
+        }
+        Command::ConfigShow { state } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            let config = store
+                .config()
+                .map_err(io::Error::other)?
+                .ok_or_else(|| io::Error::other("state has no active config"))?;
+            print!("{}", config.source);
+        }
+        Command::Control { state, command } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            let id = store.enqueue(command).map_err(io::Error::other)?;
+            println!("Control command {id} queued");
+        }
+        Command::Status { state } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            let (status, error) = store.status().map_err(io::Error::other)?;
+            println!("{}", status.as_deref().unwrap_or("unknown"));
+            if let Some(error) = error {
+                println!("last error: {error}");
+            }
+        }
+        Command::DeviceList { state } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            for device in store.devices().map_err(io::Error::other)? {
+                println!(
+                    "{}\t{}\tprofile={}\tgroup={}",
+                    device.id,
+                    device
+                        .addresses
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    device.profile.as_deref().unwrap_or("-"),
+                    device.group.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        Command::DeviceSet { state, device } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            let mut devices = store.devices().map_err(io::Error::other)?;
+            if let Some(existing) = devices.iter_mut().find(|item| item.id == device.id) {
+                *existing = device.clone();
+            } else {
+                devices.push(device.clone());
+            }
+            validate_devices(&store, devices)?;
+            store.set_device(&device).map_err(io::Error::other)?;
+            store
+                .enqueue(ControlCommand::Reload)
+                .map_err(io::Error::other)?;
+            println!("Device {} stored; reload queued", device.id);
+        }
+        Command::DeviceRemove { state, id } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            let mut devices = store.devices().map_err(io::Error::other)?;
+            let count = devices.len();
+            devices.retain(|device| device.id != id);
+            if devices.len() == count {
+                return Err(io::Error::other("device not found"));
+            }
+            validate_devices(&store, devices)?;
+            store.remove_device(&id).map_err(io::Error::other)?;
+            store
+                .enqueue(ControlCommand::Reload)
+                .map_err(io::Error::other)?;
+            println!("Device {id} removed; reload queued");
+        }
+        Command::Explain {
+            config,
+            client,
+            domain,
+            at,
+        } => {
+            let config = lumen_config::Config::load(&config).map_err(io::Error::other)?;
+            let filter = lumen_filter::Filter::load(config.filtering)
+                .await
+                .map_err(io::Error::other)?;
+            let at = at.unwrap_or_else(|| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            });
+            println!("{}", filter.explain(&domain, client, at));
+        }
+    }
     Ok(())
+}
+
+fn validate_devices(store: &Store, devices: Vec<Device>) -> io::Result<()> {
+    let stored = store
+        .config()
+        .map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::other("state has no active config; start managed Lumen first"))?;
+    let mut config = lumen_config::Config::parse(&stored.source, Path::new(&stored.base_dir))
+        .map_err(io::Error::other)?;
+    config.filtering.devices = devices;
+    config.validate().map_err(io::Error::other)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse(args: &[&str]) -> Result<Option<Command>, String> {
+        arguments(args.iter().map(ToString::to_string))
+    }
+
     #[test]
-    fn strict_arguments() {
-        let parse = |args: &[&str]| arguments(args.iter().map(ToString::to_string));
+    fn strict_cross_platform_commands() {
         assert!(parse(&["--help"]).unwrap().is_none());
+        assert!(parse(&["reload", "--state", "lumen.db"]).is_ok());
+        assert!(
+            parse(&[
+                "config",
+                "apply",
+                "--config",
+                "lumen.toml",
+                "--state",
+                "lumen.db"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "device",
+                "set",
+                "--state",
+                "lumen.db",
+                "--id",
+                "phone",
+                "--address",
+                "192.0.2.4",
+                "--profile",
+                "family"
+            ])
+            .is_ok()
+        );
         for args in [
-            vec!["filter-explain"],
-            vec!["--help", "extra"],
-            vec!["filter-explain", "--client", "bad"],
-            vec!["filter-explain", "--config", "x", "--config", "y"],
+            vec!["reload"],
+            vec!["status", "--state", "a", "--state", "b"],
+            vec!["device", "set", "--state", "a", "--id", "phone"],
+            vec![
+                "device",
+                "set",
+                "--state",
+                "a",
+                "--id",
+                "phone",
+                "--address",
+                "bad",
+            ],
+            vec!["filter", "missing", "--state", "a"],
         ] {
             assert!(parse(&args).is_err());
         }
-        let result = parse(&[
+    }
+
+    #[test]
+    fn explain_normalizes_domain() {
+        let command = parse(&[
             "filter-explain",
             "--config",
-            "config.toml",
+            "x",
             "--client",
             "::1",
             "--domain",
@@ -96,7 +413,8 @@ mod tests {
         ])
         .unwrap()
         .unwrap();
-        assert_eq!(result.domain, "example.com");
-        assert_eq!(result.at, Some(0));
+        assert!(
+            matches!(command, Command::Explain { domain, at: Some(0), .. } if domain == "example.com")
+        );
     }
 }

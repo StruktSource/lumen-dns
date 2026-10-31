@@ -12,6 +12,9 @@ spec:
     - from:
         - podSelector: {}
       ports:
+        # Keep both the Service port and the pod target port for CNI portability.
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
         - { port: 5353, protocol: UDP }
         - { port: 5353, protocol: TCP }
   egress:

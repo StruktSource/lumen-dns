@@ -1,9 +1,75 @@
 # Verification
 
+## Embedded web hosting — 2026-10-31
+
+Native validation: macOS ARM64. The locked workspace run passes 61 tests plus
+doc tests. Coverage includes strict fixed routes, response security headers,
+an actual loopback HTTP request for the embedded shell, release-config web
+startup, listener collision checks, bounded connection config, and TLS 1.3
+credential/HTTP/2 ALPN setup. Direct HTTPS was configuration-tested with a local
+self-signed certificate; no browser or external reverse proxy was contacted.
+
+Format and Clippy with warnings denied pass. Both `config/lumen.toml` and
+`deploy/lumen.toml` pass daemon checks. Compose YAML and diff whitespace checks
+pass. No container image was built in this slice. Direct HTTP/3 is not claimed;
+the documented contract uses any HTTP/3-capable reverse proxy over a private
+Lumen HTTP upstream.
+
+## Phase 3 management and observability — 2026-10-31
+
+Native validation: macOS ARM64. The full locked workspace test run passed 57
+tests plus doc tests. This includes an authenticated loopback API request,
+constant-time token hash matching, role routing, per-token rate bounds, schema-3
+audit migration/round-trip, management config rejection cases, and extended
+metric output. Format, Clippy with warnings denied, Grafana JSON parsing, and
+`git diff --check` pass.
+
+The API is disabled by default, managed-mode-only, and loopback-only. Headers,
+bodies, connections, rates, tokens, webhooks, and audit retention are bounded.
+Audit records omit tokens and bodies. Webhook configuration enforces HTTPS port
+443, no credentials/fragments, public WebPKI roots, no redirects/proxy, a short
+deadline, HMAC-SHA256 bodies, and a bounded best-effort queue. No live external
+webhook or Home Assistant instance was contacted. Grafana and Home Assistant
+files were validated as local examples only. Remote API exposure is not supported.
+
+## Phase 3 local state and control — 2026-10-31
+
+Native validation: macOS ARM64. `lumen-store` migration tests create a schema-1
+database, migrate it through schema 3, preserve active config, stage/promote a new
+revision, round-trip IPv4/IPv6 devices, consume commands once, and verify Unix
+mode `0600`. Strict CLI parsing covers config, device, reload, status, filter,
+and shutdown commands.
+
+The full local `./scripts/dev.sh check` passed format, Clippy with warnings
+denied, 50 tests, and doc tests. Rust 1.88 workspace/all-target compilation also
+passed with the locked dependency graph.
+
+An end-to-end managed daemon test used loopback ports 55353/55354. Device update
+queued reload and stayed running. A staged config then targeted an occupied port;
+the daemon reported the bind failure, restored the old 55353 listeners, discarded
+the candidate, and kept the prior config active. Local status and queued shutdown
+also passed. Listener restart has a brief bind gap and resets DNS caches. Native
+Windows managed-control runtime and crash/power-loss testing remain unverified.
+
 ## Phase 2 — 2026-10-30
 
 Native validation: macOS ARM64. Phase 1 results below are historical and are not
 new Linux/Windows results for Phase 2.
+
+Issue #7 provider presets were validated on macOS ARM64 on 2026-10-31. The full
+local check passed 48 tests, format, and Clippy. The preset forwarding example
+also passed daemon config validation. Coverage includes stable-ID expansion,
+address-family selection, TLS identity mapping, unknown-ID rejection, and
+rejection of mixed preset and custom upstream configuration. Public provider
+reachability was not tested.
+
+Issue #8 automatic encrypted transport selection was validated on macOS ARM64
+on 2026-10-31. The full local check passed 51 tests, format, Clippy, and doc
+tests. Rust 1.88 workspace checks and automatic provider example validation also
+passed. Offline coverage checks priority order, unsupported transport skipping,
+encrypted-only expansion, connection-failure failover, no failover after
+NXDOMAIN, and certificate-name rejection. Public provider reachability was not
+tested.
 
 - `./scripts/dev.sh check`: format, Clippy with warnings denied, **42 tests**,
   and doc tests pass. Socket tests run outside the restricted filesystem/network
@@ -174,11 +240,9 @@ docker run --rm --network none --read-only --cap-drop ALL \
 
 ## Not established by these checks
 
-Windows and x86_64 native execution, the PowerShell script on a Windows host,
-and hosted GitHub CI/release execution were not run in this session. CI definitions
-cover those workflows; YAML syntax alone does not prove a hosted run. GitHub issue
-lookup was unavailable through the connected account. No remote release was
-published.
+The PowerShell packaging script was not run by the CI workflow, and the release
+workflow was not triggered because no release tag was created. No remote release
+or multi-architecture image was published.
 
 External DNS/DNSSEC conformance suites, extended soak/abuse tests, production
 memory/performance measurements, automatic trust rollover, signed images,
@@ -202,13 +266,20 @@ and passed these checks:
 
 The temporary Compose stack and Kind cluster were removed. The requested local
 multi-architecture build was stopped before completion; Linux AMD64 and other
-native targets remain for hosted CI.
+native targets were left to hosted CI.
+
+## 2026-10-30 hosted platform verification
+
+[CI run 41116220947](https://github.com/StruktSource/lumen-dns/actions/runs/41116220947)
+passed native build, test, and config checks on Linux AMD64/ARM64, macOS
+AMD64/ARM64, Windows AMD64, and experimental Windows ARM64. Native OCI runtime
+checks passed on Linux AMD64/ARM64. Rootless Podman checks passed. The Kind job
+passed Helm lint/render, raw-manifest rollout, and deterministic UDP/TCP DNS
+queries through the ClusterIP Service.
 
 ## CI socket regression fixes
 
 CI reported a Windows QUIC client socket error and a Linux TCP restart bind
 error. The DoQ test now supplies an explicitly bound socket. Unix TCP listeners
 set `SO_REUSEADDR`, and the shutdown regression restarts the actual service.
-After the fix, the full macOS ARM64 checks and all eight Linux ARM64 container
-integration tests passed. Windows and Ubuntu x86_64 hosted CI must still verify
-their respective fixes.
+After the fix, hosted native checks passed on every configured runner.

@@ -8,7 +8,9 @@ repository.workspace = true
 
 [dependencies]
 lumen-config = { path = "../../crates/lumen-config" }
+lumen-core = { path = "../../crates/lumen-core" }
 lumen-filter = { path = "../../crates/lumen-filter" }
+lumen-store = { path = "../../crates/lumen-store" }
 tokio.workspace = true
 
 [lints]

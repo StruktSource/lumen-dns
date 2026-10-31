@@ -1,6 +1,6 @@
 # Lumen implementation checklist
 
-Updated 2026-10-30. Checked means implemented, documented, and covered by the
+Updated 2026-10-31. Checked means implemented, documented, and covered by the
 checks in [verification](verification.md). It does not mean production-ready.
 
 ## Foundation
@@ -17,7 +17,7 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [x] Aggregate metric naming contract and loopback Prometheus endpoint
 - [x] DNS/config fuzz targets and fuzz smoke CI
 - [x] RustSec dependency audit and audit CI
-- [ ] Actual schema migrations and hot reload
+- [x] SQLite schema migrations and validated config reload with rollback
 - [ ] SBOM, signed images, reproducible-release verification
 
 ## Phase 1 — Secure resolver core: implemented
@@ -32,6 +32,7 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [x] Positive/negative response cache, TTL ceilings, delegation and validation caches
 - [x] DNSSEC validation, signed denial, bundled/override trust anchors, rollover runbook
 - [x] Explicit forwarding with UDP/TCP and verified DoT/DoH/DoQ upstreams
+- [x] Encrypted-only provider transport selection and connection-failure failover
 - [x] Opt-in recursive timeout fallback with DNSSEC, loop, and deadline guards
 - [x] Shared query/connection admission, packet bounds, client IP rate limits
 - [x] Query, IO, handshake, and forwarding retry/deadline bounds
@@ -53,12 +54,14 @@ checks in [verification](verification.md). It does not mean production-ready.
 
 ## Phase 3 — Control and visibility
 
-- [ ] Hot reload and schema migrations
-- [ ] Full `lumenctl` commands
-- [ ] SQLite configuration and device storage
-- [ ] Extended Prometheus metrics and Grafana dashboard
-- [ ] Authenticated `/v1` API, scoped roles, audit events
-- [ ] Webhooks and Home Assistant examples
+- [x] Validated reload and explicit SQLite schema migrations
+- [x] Cross-platform local `lumenctl` config/device/filter/status controls
+- [x] SQLite configuration and device storage
+- [x] Extended privacy-safe Prometheus metrics and ready Grafana dashboard
+- [x] Loopback authenticated `/v1` API, scoped roles, rate limits, audit events
+- [x] Signed HTTPS audit webhooks and Home Assistant examples
+- [x] Embedded blank UI hosting over HTTP and direct TLS HTTP/2
+- [x] Vendor-neutral HTTP/3 reverse-proxy contract
 - [ ] Local UI prototype with mock data after the first filtering slice
 - [ ] Functional web UI after config persistence/reload and API security
 - [ ] Opt-in anonymous/full query history
@@ -71,8 +74,9 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [x] Versioned native archive, checksum, SBOM/provenance, and OCI publish definitions
 - [x] Restricted Docker Compose, Kubernetes, Helm, and systemd deployment files
 - [x] Docker, Podman, Kubernetes, bare-metal, Proxmox, Unraid, Pi, macOS, and Windows guides
-- [ ] Multi-architecture image publishing and platform runtime validation
-- [ ] Passing native CI evidence for every configured runner and release artifact
+- [x] Hosted native runtime evidence for every configured runner
+- [x] Hosted OCI, rootless Podman, and Kind UDP/TCP runtime smoke
+- [ ] Tagged multi-architecture image publishing and release-artifact validation
 - [ ] Real Proxmox, Unraid, Raspberry Pi, and dual-stack Kubernetes validation
 - [ ] Backup, restore, upgrade, removal tests
 
@@ -87,9 +91,9 @@ checks in [verification](verification.md). It does not mean production-ready.
 
 ## Next technical slice
 
-1. Add SQLite configuration/device persistence and explicit schema migrations.
-2. Add validated config reload and full CLI control, including Windows controls.
-3. Build authenticated management API before a functional web UI.
+1. Add the first small UI screen on the embedded hosting base.
+2. Add opt-in anonymous/full query history with retention and redaction controls.
+3. Continue release validation, soak tests, and external review.
 
 Filtering usage and bounds: [guide](filtering.md).
 

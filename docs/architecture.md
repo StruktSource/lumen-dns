@@ -12,8 +12,9 @@ UDP / TCP / TLS / HTTPS / QUIC
                        -> local DNSSEC verification -> bounded DNS encoding
     -> client reply
 
-TOML / CLI -> schema, trust, and filter-source validation -> bind all sockets -> serve
+TOML / SQLite / CLI / authenticated API -> schema and trust validation -> bind -> serve
 Counters -> optional loopback /metrics and /healthz
+Embedded web shell -> bounded HTTP/1.1 or HTTP/2 -> optional TLS 1.3
 ```
 
 All DNS transports share one resolver/cache set and one global query budget.
@@ -37,9 +38,11 @@ limited to OS signal handling and does not change DNS results.
 | `lumen-config` | Startup schema, safe defaults, ACL/limit validation, bounded config reads |
 | `lumen-resolver` | Mode, hints, anchors, verified upstream config, Hickory catalog adapter |
 | `lumen-filter` | Rule normalization, policy selection, bounded imports, snapshots, schedules, synthetic replies |
-| `apps/lumenctl` | Local filter decision diagnosis |
+| `lumen-store` | SQLite migrations, config revisions, devices, control queue, daemon status |
+| `apps/lumenctl` | Local config, device, reload, filter, status, shutdown, and decision controls |
 | `lumen-core` | Transport tasks, shared admission, metrics, service lifecycle |
-| `lumen-api` | Reserved authenticated API boundary; no network routes |
+| `lumen-api` | Loopback `/v1` auth, roles, rate limits, audit, control queue, signed webhooks |
+| `lumen-web` | Embedded static shell, strict routes/headers, HTTP/1.1, HTTP/2, direct TLS |
 | `apps/lumen` | Strict startup arguments and OS signals |
 
 Hickory 0.26.3 provides full DNS records, iterative resolution, referral/glue
@@ -55,10 +58,11 @@ special-use address ranges are denied by Hickory's recommended filters.
 
 ## Planned extension points
 
-Filtering sits before cache lookup and resolution. Config reload must validate
-then replace runtime state atomically. SQLite is planned for configuration and
-opt-in history. The web shell and future scoped API cannot affect parser ownership
-or bypass resolver limits. Future plugins need explicit permissions.
+Filtering sits before cache lookup and resolution. Managed config reload stages
+a SQLite revision, validates it, restarts runtime state, and restores the prior
+server on bind failure. Query history remains planned. The blank web shell and
+scoped API cannot affect parser ownership or bypass resolver limits. Future
+plugins need explicit permissions.
 
 See [configuration](configuration.md), [resolver behavior](resolver.md), and
 [threat model](threat-model.md) for operational contracts. The

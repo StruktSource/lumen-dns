@@ -47,7 +47,8 @@ Product name: **Lumen**. Organization: **Strukt**.
 - Plain readable config file with safe privacy defaults.
 - Full CLI for config, health, cache, list, device, profile, and service actions.
 - Optional web UI for setup, activity, devices, policies, and diagnostics.
-- First release includes CLI, config, and a blank UI shell. API routes and access stay disabled until API security work is complete.
+- First release includes CLI, config, and an embedded blank UI shell. Scoped API
+  routes are now opt-in and loopback-only; functional UI work remains later.
 - Secure local API by default. Strong auth, authorization, rate limits, and audit records when exposed.
 - Stable API with webhooks and integrations for Home Assistant, scripts, and user tooling.
 - Hot reload for safe config and list changes with no resolver downtime.
@@ -70,13 +71,15 @@ Product name: **Lumen**. Organization: **Strukt**.
 - Clear install and upgrade guides for each deployment target.
 - Design for multi-service and cluster use. Start with safe standalone operation.
 
-## Implementation status — 2026-10-29
+## Implementation status — 2026-10-31
 
 Phase 1 secure resolver core is implemented. UDP/TCP/DoH/DoT/DoQ, IPv4/IPv6,
 iterative recursion, DNSSEC, bounded caches, verified upstream forwarding,
 resource admission, aggregate metrics, and offline regression tests are present.
 Startup schema and fuzz/audit CI also landed. This is a pre-release, not the
-complete first release. Phase 2 filtering is implemented. Phase 3 control and visibility is next. See
+complete first release. Phase 2 filtering and the Phase 3 SQLite/local-control
+base are implemented. Authenticated management, extended visibility, and
+integrations are next. See
 [progress](progress.md), [verification](verification.md), and
 [TODO](TODO.md) for shipped scope and remaining release gates.
 

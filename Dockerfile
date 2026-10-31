@@ -14,7 +14,7 @@ COPY --from=build /lumen /usr/local/bin/lumen
 COPY --from=build /lumenctl /usr/local/bin/lumenctl
 COPY config/lumen.toml /etc/lumen/lumen.toml
 USER lumen
-EXPOSE 5353/udp 5353/tcp
+EXPOSE 5353/udp 5353/tcp 8080/tcp
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/lumen"]
 CMD ["--config", "/etc/lumen/lumen.toml"]
