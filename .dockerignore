@@ -4,7 +4,6 @@ target
 agent-docs
 docs
 scripts
-web
 .DS_Store
 .env
 .env.*
