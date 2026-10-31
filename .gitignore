@@ -18,3 +18,4 @@ coverage/
 /fuzz/corpus/
 /fuzz/artifacts/
 /release/
+__pycache__/

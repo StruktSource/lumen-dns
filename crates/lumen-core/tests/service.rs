@@ -33,9 +33,28 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 
+/// Picks a port that is free for both TCP and UDP and was not handed out earlier in this
+/// process. The servers under test take fixed addresses, so the probe sockets must be dropped
+/// before use; checking both protocols and remembering past picks narrows that race, and
+/// `encrypted_forwarding_checks_upstream_certificates` additionally retries on `AddrInUse`.
 fn address(ip: &str) -> SocketAddr {
-    let listener = std::net::TcpListener::bind(format!("{ip}:0")).unwrap();
-    listener.local_addr().unwrap()
+    static HANDED_OUT: std::sync::Mutex<Vec<(String, u16)>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let listener = std::net::TcpListener::bind(format!("{ip}:0")).unwrap();
+        let address = listener.local_addr().unwrap();
+        if std::net::UdpSocket::bind(address).is_err() {
+            continue;
+        }
+        let mut handed_out = HANDED_OUT.lock().unwrap();
+        if handed_out
+            .iter()
+            .any(|(i, port)| i == ip && *port == address.port())
+        {
+            continue;
+        }
+        handed_out.push((ip.to_string(), address.port()));
+        return address;
+    }
 }
 
 fn query(name: &str, kind: RecordType) -> Vec<u8> {
@@ -133,9 +152,17 @@ impl Drop for Fixture {
 }
 
 async fn fixture() -> Fixture {
-    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = tcp.local_addr().unwrap();
-    let udp = UdpSocket::bind(address).await.unwrap();
+    // The UDP port with the same number as a fresh TCP port can already be taken by another
+    // test's socket, so retry with a new TCP port until both protocols bind.
+    let (tcp, udp, address) = loop {
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = tcp.local_addr().unwrap();
+        match UdpSocket::bind(address).await {
+            Ok(udp) => break (tcp, udp, address),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("fixture UDP bind failed: {error}"),
+        }
+    };
     let queries = Arc::new(AtomicUsize::new(0));
     let mut tasks = JoinSet::new();
     let count = Arc::clone(&queries);
@@ -733,18 +760,29 @@ async fn dnssec_valid_bogus_wrong_anchor_and_signed_denial() {
 async fn encrypted_forwarding_checks_upstream_certificates() {
     let fixture = fixture().await;
     let (directory, _) = certificates();
-    let mut upstream_cfg = config(fixture.address, address("127.0.0.1"));
-    upstream_cfg.listen.udp.clear();
-    upstream_cfg.listen.tcp.clear();
-    let tls = address("127.0.0.1");
-    let https = address("127.0.0.1");
-    let quic = address("127.0.0.1");
-    upstream_cfg.listen.dot = vec![tls];
-    upstream_cfg.listen.doh = vec![https];
-    upstream_cfg.listen.doq = vec![quic];
-    upstream_cfg.listen.certificate = Some(directory.path().join("cert.pem"));
-    upstream_cfg.listen.private_key = Some(directory.path().join("key.pem"));
-    let mut upstream = RunningServer::start(upstream_cfg).await.unwrap();
+    // Free ports are probed by binding and dropping, so another test can win the race.
+    // Retry with fresh ports instead of failing on that collision.
+    let mut attempt = 0;
+    let (mut upstream, tls, https, quic) = loop {
+        let mut upstream_cfg = config(fixture.address, address("127.0.0.1"));
+        upstream_cfg.listen.udp.clear();
+        upstream_cfg.listen.tcp.clear();
+        let tls = address("127.0.0.1");
+        let https = address("127.0.0.1");
+        let quic = address("127.0.0.1");
+        upstream_cfg.listen.dot = vec![tls];
+        upstream_cfg.listen.doh = vec![https];
+        upstream_cfg.listen.doq = vec![quic];
+        upstream_cfg.listen.certificate = Some(directory.path().join("cert.pem"));
+        upstream_cfg.listen.private_key = Some(directory.path().join("key.pem"));
+        match RunningServer::start(upstream_cfg).await {
+            Ok(server) => break (server, tls, https, quic),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && attempt < 5 => {
+                attempt += 1;
+            }
+            Err(error) => panic!("upstream failed to start: {error}"),
+        }
+    };
     for (protocol, address) in [
         (UpstreamProtocol::Tls, tls),
         (UpstreamProtocol::Https, https),
@@ -784,9 +822,18 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
     cfg.resolver.attempts = 1;
     cfg.resolver.upstream_timeout_ms = 250;
     cfg.resolver.upstream_ca = Some(directory.path().join("cert.pem"));
+    // A listener that accepts and immediately drops connections fails the TLS handshake at
+    // once on every OS. A closed port does not: Windows keeps retrying the connect.
+    let broken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let broken_address = broken.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in broken.incoming() {
+            drop(stream);
+        }
+    });
     cfg.resolver.upstreams = vec![
         Upstream {
-            address: self::address("127.0.0.1"),
+            address: broken_address,
             protocol: UpstreamProtocol::Tls,
             server_name: Some("localhost".into()),
             doh_path: None,
