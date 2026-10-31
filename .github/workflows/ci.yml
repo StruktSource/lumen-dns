@@ -126,6 +126,8 @@ jobs:
       - run: kubectl apply -f deploy/kubernetes/smoke-pod.yaml
       - run: kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/dns-smoke --timeout=120s
       - if: failure()
+        run: kubectl get pods,svc,endpoints,networkpolicy -o wide
+      - if: failure()
         run: kubectl describe pod dns-smoke
       - if: failure()
         run: kubectl logs deployment/lumen

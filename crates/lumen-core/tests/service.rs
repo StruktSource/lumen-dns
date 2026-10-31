@@ -784,9 +784,18 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
     cfg.resolver.attempts = 1;
     cfg.resolver.upstream_timeout_ms = 250;
     cfg.resolver.upstream_ca = Some(directory.path().join("cert.pem"));
+    // A listener that accepts and immediately drops connections fails the TLS handshake at
+    // once on every OS. A closed port does not: Windows keeps retrying the connect.
+    let broken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let broken_address = broken.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in broken.incoming() {
+            drop(stream);
+        }
+    });
     cfg.resolver.upstreams = vec![
         Upstream {
-            address: self::address("127.0.0.1"),
+            address: broken_address,
             protocol: UpstreamProtocol::Tls,
             server_name: Some("localhost".into()),
             doh_path: None,
