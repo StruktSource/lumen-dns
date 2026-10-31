@@ -121,12 +121,11 @@ the list you just rejected. A second rollback swaps generations again. Only one
 previous generation is retained in memory. Restart reloads configured sources;
 rollback does not edit source files or persist snapshots.
 
-Embedded hosts on all platforms can use `RunningServer.filter.refresh()`,
-`refresh_due()`, `rollback()`, and `explain()`. Windows has periodic updates and
-the Rust control API; a running Windows daemon has no CLI refresh/rollback
-channel yet. Remote management, config hot reload, persistent snapshots, and
-full administrative CLI belong to Phase 3. No unauthenticated management route
-is exposed.
+With managed state enabled, every platform can queue `lumenctl filter refresh`
+or `lumenctl filter rollback` through the local SQLite control store. Unix
+signals remain supported. Embedded hosts can use `RunningServer.filter.refresh()`,
+`refresh_due()`, `rollback()`, and `explain()`. Filter generations remain
+memory-only. No unauthenticated management route is exposed.
 
 ## Block responses and privacy
 

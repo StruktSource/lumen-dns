@@ -23,7 +23,9 @@ under `/etc/lumen/tls`.
 The TCP probes prove that the listener accepts connections. The Kind CI smoke
 test separately sends deterministic UDP and TCP DNS queries for the locally
 blocked `health.lumen.invalid` name. Neither test proves public recursion. The
-current service has no disk state, so no PVC is required.
+shipped manifests do not enable managed state, so no PVC is required. To enable
+it, use one replica, mount a UID 65532-writable PVC, and pass `--state`; SQLite
+must not be shared by multiple pods. HA state replication remains future work.
 
 Kubernetes SNAT, Services, and proxies can hide the original client IP. Per-device
 policy is valid only when packet source IP preservation has been proved for the

@@ -3,15 +3,22 @@
 
 use lumen_config::Config;
 use lumen_core::RunningServer;
-use std::{io, net::SocketAddr, path::PathBuf};
+use lumen_store::{Command as ControlCommand, Store};
+use std::{
+    io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
-const HELP: &str = "Lumen — private DNS, in your control.\n\nUsage: lumen --config FILE [--check]\n       lumen --bind ADDRESS\n       lumen --version\n\n--config FILE   Load schema-versioned TOML configuration.\n--bind ADDRESS  Run UDP/TCP recursive DNS (loopback clients by default).\n--check         Validate config, filter sources, root hints, trust anchors, and TLS keys, then exit.\n--help          Show help.\n--version       Show version.\n\nEncrypted listeners require explicit config and certificate/key files.";
+const HELP: &str = "Lumen — private DNS, in your control.\n\nUsage: lumen --config FILE [--state FILE] [--check]\n       lumen --bind ADDRESS\n       lumen --version\n\n--config FILE   Load schema-versioned TOML configuration.\n--state FILE    Enable SQLite config/device storage and cross-platform control.\n--bind ADDRESS  Run UDP/TCP recursive DNS (loopback clients by default).\n--check         Validate config, filter sources, root hints, trust anchors, and TLS keys, then exit.\n--help          Show help.\n--version       Show version.\n\nEncrypted listeners require explicit config and certificate/key files.";
 
 enum Command {
     Help,
     Version,
     Run {
         path: Option<PathBuf>,
+        state: Option<PathBuf>,
         bind: Option<SocketAddr>,
         check: bool,
     },
@@ -24,6 +31,7 @@ fn arguments(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     }
     let mut path = None;
     let mut bind = None;
+    let mut state = None;
     let mut check = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -48,6 +56,9 @@ fn arguments(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
                         .map_err(|_| "invalid --bind address")?,
                 );
             }
+            "--state" if state.is_none() => {
+                state = Some(PathBuf::from(args.next().ok_or("--state needs a file")?));
+            }
             "--check" if !check => check = true,
             _ => return Err(format!("unknown or repeated argument: {arg}")),
         }
@@ -58,7 +69,15 @@ fn arguments(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     if path.is_none() && bind.is_none() {
         return Err("choose --config or --bind".into());
     }
-    Ok(Command::Run { path, bind, check })
+    if state.is_some() && path.is_none() {
+        return Err("--state requires --config".into());
+    }
+    Ok(Command::Run {
+        path,
+        state,
+        bind,
+        check,
+    })
 }
 
 #[tokio::main]
@@ -66,9 +85,14 @@ async fn main() -> io::Result<()> {
     match arguments(std::env::args().skip(1)).map_err(io::Error::other)? {
         Command::Help => println!("{HELP}"),
         Command::Version => println!("Lumen {}", env!("CARGO_PKG_VERSION")),
-        Command::Run { path, bind, check } => {
-            let mut config = if let Some(path) = path {
-                Config::load(&path).map_err(io::Error::other)?
+        Command::Run {
+            path,
+            state,
+            bind,
+            check,
+        } => {
+            let mut config = if let Some(path) = &path {
+                Config::load(path).map_err(io::Error::other)?
             } else {
                 Config {
                     schema_version: 1,
@@ -84,6 +108,9 @@ async fn main() -> io::Result<()> {
                 println!("Lumen configuration valid");
                 return Ok(());
             }
+            if let (Some(config_path), Some(state_path)) = (path.as_deref(), state.as_deref()) {
+                return run_managed(config_path, state_path).await;
+            }
             let mut server = RunningServer::start(config).await?;
             for (protocol, address) in &server.endpoints {
                 println!("Lumen {protocol:?} listening on {address}");
@@ -94,6 +121,148 @@ async fn main() -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
+    let mut store = Store::open(state_path).map_err(io::Error::other)?;
+    if store.config().map_err(io::Error::other)?.is_none() {
+        let bytes = lumen_config::read_bounded(config_path, 65536).map_err(io::Error::other)?;
+        let source =
+            std::str::from_utf8(&bytes).map_err(|_| io::Error::other("config must be UTF-8"))?;
+        store
+            .set_config(
+                source,
+                config_path.parent().unwrap_or_else(|| Path::new(".")),
+            )
+            .map_err(io::Error::other)?;
+    }
+    let mut config = managed_config(&mut store, false)?;
+    let mut server = RunningServer::start(config.clone()).await?;
+    store
+        .set_status("running", None)
+        .map_err(io::Error::other)?;
+    print_endpoints(&server);
+    let mut controls = tokio::time::interval(Duration::from_millis(500));
+    controls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            result = server.wait() => {
+                let message = result.as_ref().err().map(ToString::to_string);
+                store.set_status("failed", message.as_deref()).map_err(io::Error::other)?;
+                server.shutdown().await;
+                return result;
+            }
+            result = &mut shutdown => {
+                result?;
+                store.set_status("stopped", None).map_err(io::Error::other)?;
+                server.shutdown().await;
+                return Ok(());
+            }
+            _ = controls.tick() => {
+                let Some((_id, command)) = store.next_command().map_err(io::Error::other)? else { continue };
+                match command {
+                    ControlCommand::FilterRefresh => {
+                        record_control(&store, server.filter.refresh().await, "filter refreshed")?;
+                    }
+                    ControlCommand::FilterRollback => {
+                        record_control(&store, server.filter.rollback().await, "filter rolled back")?;
+                    }
+                    ControlCommand::Reload | ControlCommand::ConfigReload(_) => {
+                        let staged_revision = match command {
+                            ControlCommand::ConfigReload(revision) => {
+                                let current = store.staged_config().map_err(io::Error::other)?;
+                                if current.as_ref().is_none_or(|config| config.revision != revision) {
+                                    continue;
+                                }
+                                Some(revision)
+                            }
+                            _ => None,
+                        };
+                        let staged = staged_revision.is_some();
+                        match managed_config(&mut store, staged) {
+                            Ok(next) => {
+                                if let Err(error) = RunningServer::check(&next).await {
+                                    if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
+                                    store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
+                                    continue;
+                                }
+                                server.shutdown().await;
+                                match RunningServer::start(next.clone()).await {
+                                    Ok(next_server) => {
+                                        server = next_server;
+                                        config = next;
+                                        if let Some(revision) = staged_revision { let _ = store.promote_staged_config(revision).map_err(io::Error::other)?; }
+                                        store.set_status("running", None).map_err(io::Error::other)?;
+                                        print_endpoints(&server);
+                                    }
+                                    Err(error) => {
+                                        if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
+                                        server = RunningServer::start(config.clone()).await.map_err(|rollback| {
+                                            io::Error::other(format!("reload failed: {error}; rollback failed: {rollback}"))
+                                        })?;
+                                        store.set_status("running", Some(&format!("reload failed; prior config restored: {error}"))).map_err(io::Error::other)?;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
+                                store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
+                            }
+                        }
+                    }
+                    ControlCommand::Shutdown => {
+                        store.set_status("stopped", None).map_err(io::Error::other)?;
+                        server.shutdown().await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn managed_config(store: &mut Store, staged: bool) -> io::Result<Config> {
+    let stored = if staged {
+        store.staged_config()
+    } else {
+        store.config()
+    }
+    .map_err(io::Error::other)?
+    .ok_or_else(|| {
+        io::Error::other(if staged {
+            "state has no staged config"
+        } else {
+            "state has no active config"
+        })
+    })?;
+    let mut config =
+        Config::parse(&stored.source, Path::new(&stored.base_dir)).map_err(io::Error::other)?;
+    store
+        .initialize_devices(&config.filtering.devices)
+        .map_err(io::Error::other)?;
+    config.filtering.devices = store.devices().map_err(io::Error::other)?;
+    config.validate().map_err(io::Error::other)?;
+    Ok(config)
+}
+
+fn record_control(store: &Store, result: Result<(), String>, success: &str) -> io::Result<()> {
+    match result {
+        Ok(()) => {
+            eprintln!("{success}");
+            store.set_status("running", None).map_err(io::Error::other)
+        }
+        Err(error) => store
+            .set_status("running", Some(&error))
+            .map_err(io::Error::other),
+    }
+}
+
+fn print_endpoints(server: &RunningServer) {
+    for (protocol, address) in &server.endpoints {
+        println!("Lumen {protocol:?} listening on {address}");
+    }
 }
 
 async fn shutdown_signal() -> io::Result<()> {

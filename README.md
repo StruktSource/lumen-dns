@@ -20,8 +20,8 @@ review remain before production readiness.
 | --- | --- |
 | UDP, TCP, DoH, DoT, DoQ on IPv4/IPv6 | Authenticated management API |
 | Filtering, device policies, bounded list imports and atomic refresh/rollback | Functional web UI |
-| Recursive resolution, delegation checks, DNSSEC | Config reload and migrations |
-| Positive, negative, delegation, and validation caches | Full administrative CLI and web UI |
+| Recursive resolution, delegation checks, DNSSEC | Authenticated management API |
+| SQLite config/device state, migrations, reload, and local CLI | Functional web UI |
 | Explicit plaintext or encrypted upstream forwarding | Deployment guides, signed images, external review |
 | Startup config, client ACLs, resource limits, aggregate metrics | Extended interoperability and performance validation |
 
@@ -40,6 +40,9 @@ builds use Rust 1.95.0. No external DNS server is needed for automated tests.
 cargo run --locked --bin lumen -- --config config/lumen.toml --check
 cargo run --locked --bin lumen -- --config config/lumen.toml
 ```
+
+Add `--state ./data/state.db` to enable persistent config/devices and local
+`lumenctl` reload/control. See [state and local control](docs/state-and-control.md).
 
 In another terminal:
 

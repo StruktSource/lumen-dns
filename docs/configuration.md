@@ -6,9 +6,10 @@ Lumen accepts TOML schema **1** through `lumen --config FILE`. See
 live in [`config/filtering.example.toml`](../config/filtering.example.toml).
 
 Unknown fields, future schema versions, invalid addresses, and out-of-range
-limits fail startup. No implicit migration occurs. Config files are limited to
+limits fail startup. Config files are limited to
 64 KiB and must be UTF-8. Relative file paths resolve beside the config file,
-not the process working directory. Hot reload and schema migrations are later work.
+not the process working directory. `--state FILE` enables explicit SQLite schema
+migrations, persistent config/device state, and local cross-platform control.
 
 `config/lumen.toml` is the only release default. It enables local recursive DNS
 and required safety bounds, but no metrics, provider, fallback, filter policy,
@@ -22,6 +23,14 @@ TLS credentials and all filter sources without opening listeners. HTTPS filter
 sources perform host DNS lookups and downloads during this check. Port availability
 is checked only when the daemon starts. All enabled sockets must bind before
 traffic is served. Startup fails if any listener cannot bind.
+
+Managed mode starts with `lumen --config FILE --state FILE`. The first start
+stores config revision 1 and seeds devices from TOML once. Later device changes
+come from SQLite. `lumenctl config apply` validates and stages a revision; the
+daemon accepts it only after runtime checks and socket binding succeed. Failure
+restores the prior server and discards the candidate. Reload restarts listeners,
+so active connections close and there is a brief bind gap. DNS caches reset.
+See [state and control](state-and-control.md).
 
 ## Top level
 

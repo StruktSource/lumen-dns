@@ -1,6 +1,6 @@
 # Lumen implementation checklist
 
-Updated 2026-10-30. Checked means implemented, documented, and covered by the
+Updated 2026-10-31. Checked means implemented, documented, and covered by the
 checks in [verification](verification.md). It does not mean production-ready.
 
 ## Foundation
@@ -17,7 +17,7 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [x] Aggregate metric naming contract and loopback Prometheus endpoint
 - [x] DNS/config fuzz targets and fuzz smoke CI
 - [x] RustSec dependency audit and audit CI
-- [ ] Actual schema migrations and hot reload
+- [x] SQLite schema migrations and validated config reload with rollback
 - [ ] SBOM, signed images, reproducible-release verification
 
 ## Phase 1 — Secure resolver core: implemented
@@ -53,9 +53,9 @@ checks in [verification](verification.md). It does not mean production-ready.
 
 ## Phase 3 — Control and visibility
 
-- [ ] Hot reload and schema migrations
-- [ ] Full `lumenctl` commands
-- [ ] SQLite configuration and device storage
+- [x] Validated reload and explicit SQLite schema migrations
+- [x] Cross-platform local `lumenctl` config/device/filter/status controls
+- [x] SQLite configuration and device storage
 - [ ] Extended Prometheus metrics and Grafana dashboard
 - [ ] Authenticated `/v1` API, scoped roles, audit events
 - [ ] Webhooks and Home Assistant examples
@@ -88,9 +88,9 @@ checks in [verification](verification.md). It does not mean production-ready.
 
 ## Next technical slice
 
-1. Add SQLite configuration/device persistence and explicit schema migrations.
-2. Add validated config reload and full CLI control, including Windows controls.
-3. Build authenticated management API before a functional web UI.
+1. Build authenticated management API with scoped roles and audit events.
+2. Add extended metrics, Grafana, webhooks, and Home Assistant examples.
+3. Build the functional web UI after API security is complete.
 
 Filtering usage and bounds: [guide](filtering.md).
 

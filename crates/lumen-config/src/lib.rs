@@ -198,10 +198,23 @@ impl Config {
     /// Returns a safe startup error for unreadable or invalid configuration.
     pub fn load(path: &Path) -> Result<Self, String> {
         let source = read_bounded(path, 65536)?;
-        let mut config: Self =
-            toml::from_str(std::str::from_utf8(&source).map_err(|_| "config must be UTF-8")?)
-                .map_err(|error| format!("invalid config at {:?}", error.span()))?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::parse(
+            std::str::from_utf8(&source).map_err(|_| "config must be UTF-8")?,
+            base,
+        )
+    }
+
+    /// Parse stored TOML using an explicit base for relative paths.
+    ///
+    /// # Errors
+    /// Returns a safe parse or validation error for malformed configuration.
+    pub fn parse(source: &str, base: &Path) -> Result<Self, String> {
+        if source.len() > 65536 {
+            return Err("config source exceeds 65536 bytes".into());
+        }
+        let mut config: Self = toml::from_str(source)
+            .map_err(|error| format!("invalid config at {:?}", error.span()))?;
         for item in [
             &mut config.listen.certificate,
             &mut config.listen.private_key,

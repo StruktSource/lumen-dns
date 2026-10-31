@@ -3,19 +3,21 @@
 ## Identity and scope
 
 Lumen is private, self-hosted DNS software by Strukt. Rust, Apache-2.0, workspace
-version `0.1.0`. Phases 1 and 2 implement the resolver core and filtering; management
+version `0.1.0`. Phases 1 and 2 implement the resolver core and filtering. Phase 3
+local persistence and control are implemented; authenticated remote management
 remains planned. See [progress](progress.md) for exact shipped scope.
 
 ## Workspace
 
 ```text
 apps/lumen/          daemon startup and signal handling
-apps/lumenctl/       local filter-explain CLI
+apps/lumenctl/       local cross-platform administrative CLI
 crates/lumen-proto/  bounded DNS wire admission and full message decoding
 crates/lumen-config/ schema 1, validation, safe defaults, bounded file reads
 crates/lumen-resolver/ recursive/forward modes, DNSSEC, cache and trust setup
 crates/lumen-filter/ rules, policies, imports, snapshots, schedules and responses
 crates/lumen-core/   client transports, limits, lifecycle and aggregate metrics
+crates/lumen-store/  SQLite migrations, config/device state and local controls
 crates/lumen-api/    reserved /v1 boundary; no API listener
 config/             safe release default and opt-in feature examples
 web/                blank optional UI shell
@@ -24,8 +26,8 @@ scripts/            local checks, builds, packaging
 .agent/             concise project continuity notes
 ```
 
-Configuration persistence, extended observability, deployment
-examples, and a full CLI are future slices. Protocol parsing never imports UI,
+Extended observability and authenticated remote control are future slices.
+Protocol parsing never imports UI,
 API, storage, or resolver code. `lumen-core` wires components; resolver business
 rules stay in `lumen-resolver`. Hickory owns DNS algorithms and cryptography;
 Lumen does not implement custom DNSSEC crypto.
@@ -41,7 +43,8 @@ must be backed by the [verification record](verification.md).
 ## Contracts
 
 - Startup [configuration schema](configuration.md) is versioned; unknown fields
-  and future versions fail closed. Migrations/reload are not implemented.
+  and future versions fail closed. SQLite state migrations are explicit and
+  config candidates are validated before reload.
 - DNS errors use protocol response codes. Startup errors are local and do not
   dump configuration, keys, query packets, or query names.
 - [Metrics](resolver.md#metrics-and-health) have stable `lumen_dns_` names with
@@ -49,7 +52,7 @@ must be backed by the [verification record](verification.md).
 - Future API starts at `/v1`; authentication, authorization, and audit must be
   complete before API routes can be exposed. DNS-over-HTTPS is a DNS transport,
   not a management API.
-- Future storage uses SQLite for configuration and optional history. Hot DNS
+- SQLite stores config revisions and devices when `--state` is enabled. Hot DNS
   caches remain bounded in memory. Query history and external telemetry are off.
 - Operators opt into each encrypted listener and each upstream; recursive mode
   has no implicit upstream fallback.

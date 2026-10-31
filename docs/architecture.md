@@ -12,7 +12,7 @@ UDP / TCP / TLS / HTTPS / QUIC
                        -> local DNSSEC verification -> bounded DNS encoding
     -> client reply
 
-TOML / CLI -> schema, trust, and filter-source validation -> bind all sockets -> serve
+TOML / SQLite / CLI -> schema, trust, and filter-source validation -> bind all sockets -> serve
 Counters -> optional loopback /metrics and /healthz
 ```
 
@@ -37,7 +37,8 @@ limited to OS signal handling and does not change DNS results.
 | `lumen-config` | Startup schema, safe defaults, ACL/limit validation, bounded config reads |
 | `lumen-resolver` | Mode, hints, anchors, verified upstream config, Hickory catalog adapter |
 | `lumen-filter` | Rule normalization, policy selection, bounded imports, snapshots, schedules, synthetic replies |
-| `apps/lumenctl` | Local filter decision diagnosis |
+| `lumen-store` | SQLite migrations, config revisions, devices, control queue, daemon status |
+| `apps/lumenctl` | Local config, device, reload, filter, status, shutdown, and decision controls |
 | `lumen-core` | Transport tasks, shared admission, metrics, service lifecycle |
 | `lumen-api` | Reserved authenticated API boundary; no network routes |
 | `apps/lumen` | Strict startup arguments and OS signals |
@@ -55,9 +56,10 @@ special-use address ranges are denied by Hickory's recommended filters.
 
 ## Planned extension points
 
-Filtering sits before cache lookup and resolution. Config reload must validate
-then replace runtime state atomically. SQLite is planned for configuration and
-opt-in history. The web shell and future scoped API cannot affect parser ownership
+Filtering sits before cache lookup and resolution. Managed config reload stages
+a SQLite revision, validates it, restarts runtime state, and restores the prior
+server on bind failure. Query history remains planned. The web shell and future
+scoped API cannot affect parser ownership
 or bypass resolver limits. Future plugins need explicit permissions.
 
 See [configuration](configuration.md), [resolver behavior](resolver.md), and

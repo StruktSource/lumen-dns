@@ -1,5 +1,24 @@
 # Verification
 
+## Phase 3 local state and control — 2026-10-31
+
+Native validation: macOS ARM64. `lumen-store` migration tests create a schema-1
+database, migrate it to schema 2, preserve active config, stage/promote a new
+revision, round-trip IPv4/IPv6 devices, consume commands once, and verify Unix
+mode `0600`. Strict CLI parsing covers config, device, reload, status, filter,
+and shutdown commands.
+
+The full local `./scripts/dev.sh check` passed format, Clippy with warnings
+denied, 50 tests, and doc tests. Rust 1.88 workspace/all-target compilation also
+passed with the locked dependency graph.
+
+An end-to-end managed daemon test used loopback ports 55353/55354. Device update
+queued reload and stayed running. A staged config then targeted an occupied port;
+the daemon reported the bind failure, restored the old 55353 listeners, discarded
+the candidate, and kept the prior config active. Local status and queued shutdown
+also passed. Listener restart has a brief bind gap and resets DNS caches. Native
+Windows managed-control runtime and crash/power-loss testing remain unverified.
+
 ## Phase 2 — 2026-10-30
 
 Native validation: macOS ARM64. Phase 1 results below are historical and are not

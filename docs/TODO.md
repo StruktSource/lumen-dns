@@ -12,6 +12,12 @@ Phases 1 and 2 resolver/filtering implementation are complete. See the detailed
 - [x] Add bounded list imports for hosts, domains, and Adblock DNS formats.
 - [x] Add validated atomic list refresh, rollback, and schedules.
 
+## Phase 3 local state and control: implemented
+
+- [x] Add versioned SQLite config and device persistence with migrations.
+- [x] Add staged config apply, runtime validation, reload, and rollback.
+- [x] Add cross-platform local CLI config, device, filter, status, and shutdown controls.
+
 ## UI timing and recommended order
 
 1. Build Phase 3 persistence, config reload/migrations, and authenticated control.
@@ -31,7 +37,7 @@ first-release commitment remains a blank UI shell; a functional UI is later scop
 - [ ] Extended DNS interoperability, DNSSEC conformance, and long-running soak tests.
 - [ ] Independent security review and production memory/performance measurements.
 - [ ] Trust-anchor rollover automation and certificate lifecycle tooling.
-- [ ] Config reload/migrations, complete CLI, authenticated API, and optional UI.
+- [ ] Authenticated API, scoped audit events, and optional UI.
 - [ ] Record passing native multi-OS/architecture and multi-arch OCI release runs.
 - [ ] Add keyless image signing and reproducible-build comparison; SBOM/provenance is configured.
 - [ ] Run real Proxmox, Unraid, Raspberry Pi, Podman ARM64, and dual-stack Kubernetes tests.
