@@ -2,13 +2,13 @@
 //! Domain-only parsers. Unsupported Adblock syntax is counted, never widened.
 
 use lumen_proto::hickory_proto::rr::Name;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub const MAX_LIST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_RULES: usize = 250_000;
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Format {
     Domains,

@@ -19,7 +19,7 @@ Recursive DNS, encrypted transports, DNSSEC validation, and fine-grained filteri
 ---
 
 > [!IMPORTANT]
-> **Lumen is in active pre-release development.** The DNS resolver, transport support, filtering engine, local controls, and optional management API are implemented. The embedded web page is **currently a blank shell, not a functional dashboard**. Security review, soak testing, and release validation are still underway. Evaluate it in a controlled environment before relying on it for production or network-wide DNS.
+> **Lumen is in active pre-release development.** The DNS resolver, transport support, filtering engine, local controls, and optional management API are implemented. A **web console** (accounts, overview, filtering, devices, DNS settings) is built in and runs in managed mode (`--state`). Security review, soak testing, and release validation are still underway. Evaluate it in a controlled environment before relying on it for production or network-wide DNS.
 
 ## DNS infrastructure that answers to you
 
@@ -46,7 +46,7 @@ Your DNS service sits at the front door of almost every network connection. Lume
 | **Per-client policy** | Device, subnet, group, profile, category, and UTC-scheduled rules, with explainable rule decisions. |
 | **Local operations** | Validated TOML configuration; optional SQLite state, migrations, staged reload and rollback; `lumenctl` commands. |
 | **Observability** | Opt-in aggregate Prometheus metrics, a liveness endpoint, Grafana assets, authenticated management API, audit events, and signed webhooks. |
-| **Web interface** | Embedded HTTP/HTTPS **hosting shell only**; interactive management UI is not yet available. |
+| **Web console** | Built in. First-run account setup, sign-in with admin and user roles and optional two-step verification (TOTP), live overview, filtering and profiles, devices, full DNS settings with review-before-apply, users, audit log, and opt-in in-memory recent queries. See [Web console](docs/web-hosting.md). |
 
 Implementation details: [architecture](docs/architecture.md) · [resolver](docs/resolver.md) · [filtering](docs/filtering.md) · [management API](docs/management-api.md).
 
@@ -147,7 +147,7 @@ For local images and optimized binaries:
 
 ### Opening access to your LAN
 
-Lumen deliberately listens on loopback by default. To serve other devices, configure **both** the listener bind addresses **and** `listen.allow_clients` CIDRs, then validate the configuration. Standard client DNS typically uses port 53; the source-development default uses 5353. Review host firewall rules, container port mapping, client-IP visibility behind NAT, and TLS certificate handling before exposing services. **Do not expose the unauthenticated placeholder web page as a management console.**
+Lumen deliberately listens on loopback by default. To serve other devices, configure **both** the listener bind addresses **and** `listen.allow_clients` CIDRs, then validate the configuration. Standard client DNS typically uses port 53; the source-development default uses 5353. Review host firewall rules, container port mapping, client-IP visibility behind NAT, and TLS certificate handling before exposing services. Keep the console on loopback or behind HTTPS: sign-in over plain HTTP is only safe on the local machine.
 
 See [configuration](docs/configuration.md), [deployment instructions](docs/deployment/README.md), and [security boundaries](docs/threat-model.md).
 
@@ -193,7 +193,7 @@ The diagram is conceptual; see [architecture](docs/architecture.md) for exact co
 
 **Implemented:** recursive and forwarding DNS, five client transports, DNSSEC, policy filtering, local state/CLI controls, authenticated management API, metrics, and baseline deployment artifacts.
 
-**Still ahead:** a functional web dashboard, optional query history, expanded interoperability and soak tests, image/release validation, automatic certificate and trust-anchor rotation, split DNS/local records, high availability, and independent security review. These are **roadmap items, not current product capabilities**.
+**Still ahead:** persistent query history, expanded interoperability and soak tests, image/release validation, automatic certificate and trust-anchor rotation, split DNS/local records, high availability, and independent security review. These are **roadmap items, not current product capabilities**.
 
 Follow the [implementation checklist](docs/progress.md), [detailed TODO](docs/TODO.md), and [long-term product plan](docs/DNS_SERVICE_PLAN.md). Existing measurements and their limitations are in [performance snapshots](docs/performance.md); there is no verified production throughput or latency claim here.
 
@@ -208,7 +208,7 @@ Follow the [implementation checklist](docs/progress.md), [detailed TODO](docs/TO
 | Local control & storage | [State and control](docs/state-and-control.md) |
 | Authenticated API | [Management API](docs/management-api.md) |
 | Metrics & integrations | [Observability](docs/observability.md) |
-| Embedded HTTP / HTTPS shell | [Web hosting](docs/web-hosting.md) |
+| Web console (accounts, UI, HTTPS) | [Web console](docs/web-hosting.md) |
 | Design and security | [Architecture](docs/architecture.md) · [Threat model](docs/threat-model.md) |
 | Testing and measurement | [Verification](docs/verification.md) · [Performance](docs/performance.md) |
 

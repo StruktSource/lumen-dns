@@ -16,15 +16,17 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        fsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: lumen
           image: lumen:ci
           imagePullPolicy: IfNotPresent
-          args: ["--config", "/etc/lumen/lumen.toml"]
+          args: ["--config", "/etc/lumen/lumen.toml", "--state", "/var/lib/lumen/state.db"]
           ports:
             - { name: dns-udp, containerPort: 5353, protocol: UDP }
             - { name: dns-tcp, containerPort: 5353, protocol: TCP }
+            - { name: web, containerPort: 8080, protocol: TCP }
           readinessProbe:
             tcpSocket: { port: dns-tcp }
             periodSeconds: 5
@@ -42,8 +44,11 @@ spec:
           volumeMounts:
             - { name: config, mountPath: /etc/lumen, readOnly: true }
             - { name: tmp, mountPath: /tmp }
+            - { name: state, mountPath: /var/lib/lumen }
       volumes:
         - name: config
           configMap: { name: lumen }
         - name: tmp
           emptyDir: { sizeLimit: 16Mi }
+        - name: state
+          persistentVolumeClaim: { claimName: lumen-state }

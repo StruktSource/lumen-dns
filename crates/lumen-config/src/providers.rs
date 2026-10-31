@@ -2,7 +2,7 @@
 //! Bundled, disabled-by-default upstream resolver metadata.
 
 use crate::{EncryptedProtocol, Upstream, UpstreamProtocol};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     net::{IpAddr, SocketAddr},
@@ -91,7 +91,7 @@ pub enum FilterVariant {
     Uncensored,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum AddressFamily {
     #[default]

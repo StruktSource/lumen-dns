@@ -27,16 +27,15 @@ Phases 1 and 2 resolver/filtering implementation are complete. See the detailed
    bounded signed HTTPS webhooks, and Home Assistant examples.
 3. [x] Add embedded blank-shell hosting over HTTP and direct TLS HTTP/2, with a
    vendor-neutral reverse-proxy contract for HTTP/3.
-4. Begin UI design/prototyping. Use mock
+4. [x] Console UI design and implementation (done; see web-hosting.md). Original note: begin UI design/prototyping. Use mock
    data for an overview, list management, and settings; keep the prototype local
    and management API access disabled.
-5. Build the functional UI during Phase 3, once configuration persistence/reload
-   and an authenticated, scoped management API are ready. Start with aggregate
-   status, then settings and filtering controls. Keep query history off by default.
+5. [x] Functional console: aggregate status, settings, filtering, devices, users,
+   audit log, and opt-in in-memory recent queries (off by default).
 
 This is a recommended dependency order, not a dated delivery commitment. UI
 prototyping need not wait for every advanced filtering feature. The existing
-first-release commitment remains a blank UI shell; a functional UI is later scope.
+console is part of the current build; persistent query history is still later scope.
 
 ## Issue #9 recursion speed: implemented, partly measured
 

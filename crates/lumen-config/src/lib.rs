@@ -2,7 +2,7 @@
 //! Versioned startup configuration. Unknown fields and unsafe limits fail closed.
 
 use ipnet::IpNet;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     net::SocketAddr,
@@ -12,7 +12,7 @@ use std::{
 pub mod providers;
 
 /// Startup configuration; relative paths resolve beside the config file.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub schema_version: u32,
@@ -26,7 +26,7 @@ pub struct Config {
 }
 
 /// Embedded static UI listeners. Empty address lists disable hosting.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Web {
     pub http: Vec<SocketAddr>,
@@ -49,7 +49,7 @@ impl Default for Web {
 }
 
 /// Opt-in local management API. Bearer-token hashes stay in operator config.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Management {
     pub listen: Option<SocketAddr>,
@@ -59,7 +59,7 @@ pub struct Management {
 }
 
 /// Signed outbound audit-event webhook.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Webhook {
     pub id: String,
@@ -68,7 +68,7 @@ pub struct Webhook {
 }
 
 /// One named API principal with a fixed role and SHA-256 token hash.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiToken {
     pub name: String,
@@ -77,7 +77,7 @@ pub struct ApiToken {
 }
 
 /// Management scopes. Higher roles include lower-role actions.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiRole {
     Viewer,
@@ -121,7 +121,7 @@ impl Default for Management {
 }
 
 /// Independently enabled listener addresses. Empty arrays disable a transport.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Listeners {
     pub udp: Vec<SocketAddr>,
@@ -153,7 +153,7 @@ impl Default for Listeners {
 }
 
 /// Resolver mode. Recursive mode only uses a forwarder when fallback is explicit.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     #[default]
@@ -162,7 +162,7 @@ pub enum Mode {
 }
 
 /// DNSSEC validates by default in both modes.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Resolver {
     pub mode: Mode,
@@ -220,7 +220,7 @@ impl Default for Resolver {
 ///
 /// Queries name only zones listed here, never client data, and run with fixed low
 /// concurrency in the background. Disabled by default.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Warm {
     pub enabled: bool,
@@ -244,7 +244,7 @@ impl Default for Warm {
 /// Bounded refresh of frequently requested names when their cached answer expires.
 ///
 /// Names are held in memory only, never logged or exported. Disabled by default.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Prefetch {
     pub enabled: bool,
@@ -271,7 +271,7 @@ impl Default for Prefetch {
 }
 
 /// Optional forwarding path used only after an identified recursive timeout.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Fallback {
     pub enabled: bool,
@@ -294,7 +294,7 @@ impl Default for Fallback {
 }
 
 /// Upstream identity is explicit; encrypted connections require a DNS certificate name.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Upstream {
     pub address: SocketAddr,
@@ -306,7 +306,7 @@ pub struct Upstream {
 }
 
 /// One bundled provider selection expanded into explicit runtime upstreams.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderSelection {
     pub id: String,
@@ -317,7 +317,7 @@ pub struct ProviderSelection {
     pub transport_priority: Option<Vec<EncryptedProtocol>>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderProtocol {
     Udp,
@@ -341,13 +341,13 @@ impl ProviderProtocol {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptionPolicy {
     Required,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptedProtocol {
     Quic,
@@ -355,7 +355,7 @@ pub enum EncryptedProtocol {
     Tls,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamProtocol {
     Udp,
@@ -366,7 +366,7 @@ pub enum UpstreamProtocol {
 }
 
 /// Hard admission and IO bounds. Limits apply across all transports.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Limits {
     pub max_in_flight: u32,

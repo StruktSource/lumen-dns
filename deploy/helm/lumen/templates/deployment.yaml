@@ -20,15 +20,17 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        fsGroup: 65532
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: lumen
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["--config", "/etc/lumen/lumen.toml"]
+          args: ["--config", "/etc/lumen/lumen.toml", "--state", "/var/lib/lumen/state.db"]
           ports:
             - { name: dns-udp, containerPort: 5353, protocol: UDP }
             - { name: dns-tcp, containerPort: 5353, protocol: TCP }
+            - { name: web, containerPort: 8080, protocol: TCP }
           readinessProbe:
             tcpSocket: { port: dns-tcp }
             periodSeconds: 5
@@ -44,6 +46,7 @@ spec:
           volumeMounts:
             - { name: config, mountPath: /etc/lumen, readOnly: true }
             - { name: tmp, mountPath: /tmp }
+            - { name: state, mountPath: /var/lib/lumen }
             {{- if .Values.tls.existingSecret }}
             - { name: tls, mountPath: /etc/lumen/tls, readOnly: true }
             {{- end }}
@@ -52,6 +55,12 @@ spec:
           configMap: { name: {{ include "lumen.fullname" . }} }
         - name: tmp
           emptyDir: { sizeLimit: 16Mi }
+        - name: state
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim: { claimName: {{ .Values.persistence.existingClaim | default (printf "%s-state" (include "lumen.fullname" .)) }} }
+          {{- else }}
+          emptyDir: { sizeLimit: 16Mi }
+          {{- end }}
         {{- if .Values.tls.existingSecret }}
         - name: tls
           secret: { secretName: {{ .Values.tls.existingSecret }} }

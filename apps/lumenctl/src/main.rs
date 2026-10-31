@@ -2,7 +2,7 @@
 //! Cross-platform local control through Lumen's versioned `SQLite` state.
 
 use lumen_filter::config::Device;
-use lumen_store::{Command as ControlCommand, Store};
+use lumen_store::{Command as ControlCommand, Role, Store, password};
 use std::{
     io,
     net::IpAddr,
@@ -19,7 +19,15 @@ const HELP: &str = "Usage:
   lumenctl filter-explain --config FILE --client IP --domain NAME [--at UNIX_SECONDS]
   lumenctl device list --state FILE
   lumenctl device set --state FILE --id ID --address IP [--address IP] [--profile ID] [--group ID]
-  lumenctl device remove --state FILE --id ID";
+  lumenctl device remove --state FILE --id ID
+  lumenctl user list --state FILE
+  lumenctl user add --state FILE --name NAME [--role admin|user] --password stdin|generate
+  lumenctl user reset-password --state FILE --name NAME --password stdin|generate
+  lumenctl user reset-2fa --state FILE --name NAME
+
+Console accounts: `--password stdin` reads one line from standard input, e.g.
+  printf '%s' \"$PASSWORD\" | lumenctl user add --state state.db --name admin --role admin --password stdin
+`--password generate` prints a random password the person must change at first sign-in.";
 
 #[derive(Debug)]
 enum Command {
@@ -57,6 +65,24 @@ enum Command {
         domain: String,
         at: Option<u64>,
     },
+    UserList {
+        state: PathBuf,
+    },
+    UserAdd {
+        state: PathBuf,
+        name: String,
+        role: Role,
+        generate: bool,
+    },
+    User2faReset {
+        state: PathBuf,
+        name: String,
+    },
+    UserReset {
+        state: PathBuf,
+        name: String,
+        generate: bool,
+    },
 }
 
 fn arguments(args: impl IntoIterator<Item = String>) -> Result<Option<Command>, String> {
@@ -67,6 +93,7 @@ fn arguments(args: impl IntoIterator<Item = String>) -> Result<Option<Command>, 
     match args.as_slice() {
         [name, rest @ ..] if name == "config" => config_command(rest),
         [name, rest @ ..] if name == "device" => device_command(rest),
+        [name, rest @ ..] if name == "user" => user_command(rest),
         [name, action, rest @ ..] if name == "filter" && action == "refresh" => {
             Ok(Some(Command::Control {
                 state: one_path(rest, "--state")?,
@@ -157,6 +184,56 @@ fn device_command(args: &[String]) -> Result<Option<Command>, String> {
         }
         _ => Err(HELP.into()),
     }
+}
+
+fn user_command(args: &[String]) -> Result<Option<Command>, String> {
+    let generate = |values: &[(String, String)]| match required(values, "--password")? {
+        "generate" => Ok(true),
+        "stdin" => Ok(false),
+        _ => Err("--password must be stdin or generate".to_owned()),
+    };
+    match args {
+        [action, rest @ ..] if action == "list" => Ok(Some(Command::UserList {
+            state: one_path(rest, "--state")?,
+        })),
+        [action, rest @ ..] if action == "add" => {
+            let values = options(rest, &["--state", "--name", "--role", "--password"], &[])?;
+            Ok(Some(Command::UserAdd {
+                state: PathBuf::from(required(&values, "--state")?),
+                name: required(&values, "--name")?.to_owned(),
+                role: Role::parse(optional(&values, "--role").unwrap_or("user"))?,
+                generate: generate(&values)?,
+            }))
+        }
+        [action, rest @ ..] if action == "reset-2fa" => {
+            let values = options(rest, &["--state", "--name"], &[])?;
+            Ok(Some(Command::User2faReset {
+                state: PathBuf::from(required(&values, "--state")?),
+                name: required(&values, "--name")?.to_owned(),
+            }))
+        }
+        [action, rest @ ..] if action == "reset-password" => {
+            let values = options(rest, &["--state", "--name", "--password"], &[])?;
+            Ok(Some(Command::UserReset {
+                state: PathBuf::from(required(&values, "--state")?),
+                name: required(&values, "--name")?.to_owned(),
+                generate: generate(&values)?,
+            }))
+        }
+        _ => Err(HELP.into()),
+    }
+}
+
+/// A new password: generated, or one line from standard input.
+fn new_password(generate: bool, name: &str) -> io::Result<String> {
+    if generate {
+        return password::random_hex(10).map_err(io::Error::other);
+    }
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let line = line.trim_end_matches(['\r', '\n']).to_owned();
+    password::check_policy(&line, name).map_err(io::Error::other)?;
+    Ok(line)
 }
 
 fn explain_command(args: &[String]) -> Result<Option<Command>, String> {
@@ -306,6 +383,74 @@ async fn main() -> io::Result<()> {
                 .enqueue(ControlCommand::Reload)
                 .map_err(io::Error::other)?;
             println!("Device {id} removed; reload queued");
+        }
+        Command::UserList { state } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            for user in store.users().map_err(io::Error::other)? {
+                println!(
+                    "{}\t{}{}",
+                    user.name,
+                    user.role.as_str(),
+                    if user.must_change {
+                        "\tmust change password"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+        Command::UserAdd {
+            state,
+            name,
+            role,
+            generate,
+        } => {
+            let mut store = Store::open(&state).map_err(io::Error::other)?;
+            let secret = new_password(generate, &name)?;
+            let record = password::hash(&secret).map_err(io::Error::other)?;
+            let user = if role == Role::Admin && store.user_count().map_err(io::Error::other)? == 0
+            {
+                store.create_first_admin(&name, &record)
+            } else {
+                store.create_user(&name, role, &record, generate)
+            }
+            .map_err(io::Error::other)?;
+            println!("User {} created ({})", user.name, user.role.as_str());
+            if generate {
+                println!("Temporary password: {secret}");
+            }
+        }
+        Command::User2faReset { state, name } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            let user = store
+                .user_with_record(&name)
+                .map_err(io::Error::other)?
+                .ok_or_else(|| io::Error::other("unknown user"))?
+                .0;
+            store.disable_totp(&name).map_err(io::Error::other)?;
+            store
+                .delete_user_sessions(user.id, None)
+                .map_err(io::Error::other)?;
+            println!("Two-step verification removed for {name}; their sessions ended");
+        }
+        Command::UserReset {
+            state,
+            name,
+            generate,
+        } => {
+            let mut store = Store::open(&state).map_err(io::Error::other)?;
+            let secret = new_password(generate, &name)?;
+            let record = password::hash(&secret).map_err(io::Error::other)?;
+            if !store
+                .set_password(&name, &record, generate)
+                .map_err(io::Error::other)?
+            {
+                return Err(io::Error::other("unknown user"));
+            }
+            println!("Password reset for {name}; all their sessions ended");
+            if generate {
+                println!("Temporary password: {secret}");
+            }
         }
         Command::Explain {
             config,

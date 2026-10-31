@@ -3,10 +3,10 @@
 
 use crate::rules::{Format, Rule, normalize};
 use ipnet::IpNet;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, net::IpAddr, path::PathBuf};
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub rules: Rules,
@@ -21,14 +21,14 @@ pub struct Config {
     pub decision_log: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Rules {
     pub allow: Vec<String>,
     pub block: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     #[default]
@@ -44,7 +44,7 @@ pub enum Action {
     Refused,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct List {
     pub id: String,
@@ -60,7 +60,7 @@ fn default_refresh() -> u32 {
     86400
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Profile {
     pub id: String,
@@ -73,7 +73,7 @@ pub struct Profile {
     pub schedules: Vec<Schedule>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
     /// ISO weekdays: Monday=1, Sunday=7. Overnight windows belong to start day.
@@ -102,7 +102,7 @@ impl Schedule {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Device {
     pub id: String,
@@ -110,13 +110,13 @@ pub struct Device {
     pub profile: Option<String>,
     pub group: Option<String>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
     pub id: String,
     pub profile: String,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Subnet {
     pub network: IpNet,

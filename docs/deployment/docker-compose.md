@@ -10,7 +10,9 @@ docker compose logs -f lumen
 ```
 
 The compose file maps host UDP/TCP 53 to container port 5353 and publishes the
-blank UI as host-loopback `127.0.0.1:8080`. It drops all Linux capabilities,
+web console as host-loopback `127.0.0.1:8080` and keeps its accounts in the
+`lumen-state` volume. On first start run `docker compose logs lumen` for the
+setup code, then open the console. It drops all Linux capabilities,
 sets a read-only root filesystem, and runs as UID 65532. Any reverse proxy may
 use the private HTTP upstream for HTTPS or HTTP/3. Stop with
 `docker compose down`. Upgrade by changing the pinned tag, pulling, validating

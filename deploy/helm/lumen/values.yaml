@@ -1,7 +1,7 @@
 replicaCount: 1
 image:
   repository: ghcr.io/struktsource/lumen-dns
-  tag: "0.1.3"
+  tag: "0.3.0"
   pullPolicy: IfNotPresent
 service:
   type: ClusterIP
@@ -12,6 +12,11 @@ resources:
   limits: { cpu: "1", memory: 256Mi }
 networkPolicy:
   enabled: true
+persistence:
+  # Accounts, settings and device policy live here. Disable only for throwaway tests.
+  enabled: true
+  size: 64Mi
+  existingClaim: ""
 tls:
   existingSecret: ""
 config: |
@@ -20,6 +25,8 @@ config: |
   udp = ["0.0.0.0:5353", "[::]:5353"]
   tcp = ["0.0.0.0:5353", "[::]:5353"]
   allow_clients = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
+  [web]
+  http = ["0.0.0.0:8080"]
   [resolver]
   mode = "recursive"
   dnssec = true

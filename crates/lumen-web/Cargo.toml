@@ -12,6 +12,11 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "http2", "server-auto", "tokio"] }
 lumen-config = { path = "../lumen-config" }
+lumen-filter = { path = "../lumen-filter" }
+lumen-store = { path = "../lumen-store" }
+serde_json.workspace = true
+subtle.workspace = true
+toml = "0.9"
 rustls.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

@@ -1,6 +1,6 @@
 services:
   lumen:
-    image: ghcr.io/struktsource/lumen-dns:0.1.3
+    image: ghcr.io/struktsource/lumen-dns:0.3.0
     user: "65532:65532"
     read_only: true
     cap_drop: [ALL]
@@ -13,5 +13,9 @@ services:
       - "127.0.0.1:8080:8080/tcp"
     volumes:
       - ./lumen.toml:/etc/lumen/lumen.toml:ro
+      - lumen-state:/var/lib/lumen
     tmpfs:
       - /tmp:size=16m,mode=1777
+
+volumes:
+  lumen-state:
