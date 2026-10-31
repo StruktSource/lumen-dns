@@ -31,6 +31,14 @@ address-family selection, TLS identity mapping, unknown-ID rejection, and
 rejection of mixed preset and custom upstream configuration. Public provider
 reachability was not tested.
 
+Issue #8 automatic encrypted transport selection was validated on macOS ARM64
+on 2026-10-31. The full local check passed 51 tests, format, Clippy, and doc
+tests. Rust 1.88 workspace checks and automatic provider example validation also
+passed. Offline coverage checks priority order, unsupported transport skipping,
+encrypted-only expansion, connection-failure failover, no failover after
+NXDOMAIN, and certificate-name rejection. Public provider reachability was not
+tested.
+
 - `./scripts/dev.sh check`: format, Clippy with warnings denied, **42 tests**,
   and doc tests pass. Socket tests run outside the restricted filesystem/network
   sandbox because its loopback binds return `Operation not permitted`.

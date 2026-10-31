@@ -774,6 +774,71 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
         );
         server.shutdown().await;
     }
+
+    let bind = self::address("127.0.0.1");
+    let mut cfg = config(https, bind);
+    cfg.resolver.automatic_transport = true;
+    cfg.resolver.attempts = 1;
+    cfg.resolver.upstream_timeout_ms = 250;
+    cfg.resolver.upstream_ca = Some(directory.path().join("cert.pem"));
+    cfg.resolver.upstreams = vec![
+        Upstream {
+            address: self::address("127.0.0.1"),
+            protocol: UpstreamProtocol::Tls,
+            server_name: Some("localhost".into()),
+            doh_path: None,
+        },
+        Upstream {
+            address: https,
+            protocol: UpstreamProtocol::Https,
+            server_name: Some("localhost".into()),
+            doh_path: Some("/dns-query".into()),
+        },
+    ];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    assert_eq!(
+        udp(bind, &query("auto.example.", RecordType::A))
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::NoError,
+        "a transport failure should try the next encrypted endpoint"
+    );
+    server.shutdown().await;
+
+    let bind = self::address("127.0.0.1");
+    let mut cfg = config(https, bind);
+    cfg.resolver.automatic_transport = true;
+    cfg.resolver.upstream_ca = Some(directory.path().join("cert.pem"));
+    cfg.resolver.upstreams = vec![
+        Upstream {
+            address: https,
+            protocol: UpstreamProtocol::Https,
+            server_name: Some("localhost".into()),
+            doh_path: Some("/dns-query".into()),
+        },
+        Upstream {
+            address: tls,
+            protocol: UpstreamProtocol::Tls,
+            server_name: Some("localhost".into()),
+            doh_path: None,
+        },
+    ];
+    let before = fixture.queries.load(Ordering::Relaxed);
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    assert_eq!(
+        udp(bind, &query("missing.auto.example.", RecordType::A))
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::NXDomain
+    );
+    assert_eq!(
+        fixture.queries.load(Ordering::Relaxed),
+        before + 1,
+        "a DNS answer must not trigger transport failover"
+    );
+    server.shutdown().await;
     upstream.shutdown().await;
 }
 

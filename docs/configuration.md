@@ -133,6 +133,22 @@ Each `[[resolver.upstreams]]` has:
 Certificate identity and chain verification stay enabled. A
 private CA bundle changes trusted roots; it does not bypass name verification.
 
+Each `[[resolver.providers]]` has:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Required stable ID from the bundled provider catalog |
+| `protocol` | Explicit `udp`, `tcp`, `tls`, `https`, or `quic`; or encrypted-only `auto` |
+| `address_family` | `any`, `ipv4`, or `ipv6`; defaults to `any` |
+| `encryption` | Auto mode only; defaults to and only accepts `required` |
+| `transport_priority` | Auto mode only; unique ordered subset of `quic`, `https`, `tls` |
+
+Auto mode defaults to QUIC, HTTPS, then TLS and skips transports that the preset
+does not support. It preserves this order and fails over only for connection,
+transport, or timeout errors. DNS answers, SERVFAIL, and local DNSSEC failures do
+not trigger another transport. All normal attempt and deadline bounds still
+apply. Automatic and explicit preset transports cannot be mixed.
+
 ## Limits
 
 | Field | Default | Allowed range |

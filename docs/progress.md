@@ -32,6 +32,7 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [x] Positive/negative response cache, TTL ceilings, delegation and validation caches
 - [x] DNSSEC validation, signed denial, bundled/override trust anchors, rollover runbook
 - [x] Explicit forwarding with UDP/TCP and verified DoT/DoH/DoQ upstreams
+- [x] Encrypted-only provider transport selection and connection-failure failover
 - [x] Opt-in recursive timeout fallback with DNSSEC, loop, and deadline guards
 - [x] Shared query/connection admission, packet bounds, client IP rate limits
 - [x] Query, IO, handshake, and forwarding retry/deadline bounds

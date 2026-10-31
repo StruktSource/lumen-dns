@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Bundled, disabled-by-default upstream resolver metadata.
 
-use crate::{Upstream, UpstreamProtocol};
+use crate::{EncryptedProtocol, Upstream, UpstreamProtocol};
 use serde::Deserialize;
 use std::{
     collections::HashSet,
@@ -9,6 +9,11 @@ use std::{
 };
 
 const BUNDLED: &str = include_str!("../../../config/providers/resolvers.toml");
+const DEFAULT_ENCRYPTED_PRIORITY: [EncryptedProtocol; 3] = [
+    EncryptedProtocol::Quic,
+    EncryptedProtocol::Https,
+    EncryptedProtocol::Tls,
+];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -223,6 +228,51 @@ impl Catalog {
         }
         Ok(selected)
     }
+
+    /// Build ordered encrypted upstreams for automatic transport failover.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown preset, invalid priority, or no usable endpoint.
+    pub fn select_encrypted(
+        &self,
+        id: &str,
+        family: AddressFamily,
+        priority: Option<&[EncryptedProtocol]>,
+    ) -> Result<Vec<Upstream>, String> {
+        let provider = self
+            .providers
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or_else(|| format!("unknown provider preset: {id}"))?;
+        let priority = priority.unwrap_or(&DEFAULT_ENCRYPTED_PRIORITY);
+        if priority.is_empty() || priority.len() > DEFAULT_ENCRYPTED_PRIORITY.len() {
+            return Err("transport_priority needs 1..3 encrypted protocols".into());
+        }
+        let mut unique = HashSet::new();
+        if priority.iter().any(|protocol| !unique.insert(*protocol)) {
+            return Err("transport_priority protocols must be unique".into());
+        }
+        let mut selected = Vec::new();
+        for protocol in priority {
+            let protocol = match protocol {
+                EncryptedProtocol::Quic => UpstreamProtocol::Quic,
+                EncryptedProtocol::Https => UpstreamProtocol::Https,
+                EncryptedProtocol::Tls => UpstreamProtocol::Tls,
+            };
+            let supported = provider.transports.iter().any(|transport| {
+                transport.protocol == protocol && transport.availability == Availability::Supported
+            });
+            if supported && let Ok(mut upstreams) = self.select(id, protocol, family) {
+                selected.append(&mut upstreams);
+            }
+        }
+        if selected.is_empty() {
+            return Err(format!(
+                "provider {id} has no encrypted endpoint for the selected family and priority"
+            ));
+        }
+        Ok(selected)
+    }
 }
 
 fn validate_transport(transport: &Transport) -> Result<(), String> {
@@ -366,6 +416,46 @@ mod tests {
         assert!(
             catalog
                 .select("missing", UpstreamProtocol::Udp, AddressFamily::Any)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn automatic_selection_is_encrypted_ordered_and_skips_unsupported() {
+        let catalog = Catalog::bundled().unwrap();
+        let upstreams = catalog
+            .select_encrypted(
+                "quad9-unfiltered",
+                AddressFamily::Ipv4,
+                Some(&[
+                    EncryptedProtocol::Quic,
+                    EncryptedProtocol::Tls,
+                    EncryptedProtocol::Https,
+                ]),
+            )
+            .unwrap();
+        assert_eq!(upstreams.len(), 4);
+        assert!(
+            upstreams[..2]
+                .iter()
+                .all(|upstream| upstream.protocol == UpstreamProtocol::Tls)
+        );
+        assert!(
+            upstreams[2..]
+                .iter()
+                .all(|upstream| upstream.protocol == UpstreamProtocol::Https)
+        );
+        assert!(upstreams.iter().all(|upstream| matches!(
+            upstream.protocol,
+            UpstreamProtocol::Tls | UpstreamProtocol::Https | UpstreamProtocol::Quic
+        )));
+        assert!(
+            catalog
+                .select_encrypted(
+                    "quad9-unfiltered",
+                    AddressFamily::Any,
+                    Some(&[EncryptedProtocol::Tls, EncryptedProtocol::Tls]),
+                )
                 .is_err()
         );
     }

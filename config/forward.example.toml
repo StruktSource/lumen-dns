@@ -16,8 +16,10 @@ upstream_timeout_ms = 2000
 
 [[resolver.providers]]
 id = "cloudflare-unfiltered"
-protocol = "tls"
+protocol = "auto"
+encryption = "required"
 address_family = "ipv4"
+transport_priority = ["quic", "https", "tls"]
 
 # Custom upstreams remain supported, but cannot be mixed with provider presets.
 # [[resolver.upstreams]]

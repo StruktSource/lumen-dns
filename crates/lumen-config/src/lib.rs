@@ -75,6 +75,8 @@ pub struct Resolver {
     pub upstream_ca: Option<PathBuf>,
     pub upstreams: Vec<Upstream>,
     pub providers: Vec<ProviderSelection>,
+    #[serde(skip)]
+    pub automatic_transport: bool,
     pub cache_entries: u32,
     pub nameserver_cache_entries: u32,
     pub validation_cache_entries: u32,
@@ -96,6 +98,7 @@ impl Default for Resolver {
             upstream_ca: None,
             upstreams: vec![],
             providers: vec![],
+            automatic_transport: false,
             cache_entries: 4096,
             nameserver_cache_entries: 256,
             validation_cache_entries: 4096,
@@ -149,9 +152,49 @@ pub struct Upstream {
 #[serde(deny_unknown_fields)]
 pub struct ProviderSelection {
     pub id: String,
-    pub protocol: UpstreamProtocol,
+    pub protocol: ProviderProtocol,
     #[serde(default)]
     pub address_family: providers::AddressFamily,
+    pub encryption: Option<EncryptionPolicy>,
+    pub transport_priority: Option<Vec<EncryptedProtocol>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderProtocol {
+    Udp,
+    Tcp,
+    Tls,
+    Https,
+    Quic,
+    Auto,
+}
+
+impl ProviderProtocol {
+    fn explicit(self) -> Option<UpstreamProtocol> {
+        match self {
+            Self::Udp => Some(UpstreamProtocol::Udp),
+            Self::Tcp => Some(UpstreamProtocol::Tcp),
+            Self::Tls => Some(UpstreamProtocol::Tls),
+            Self::Https => Some(UpstreamProtocol::Https),
+            Self::Quic => Some(UpstreamProtocol::Quic),
+            Self::Auto => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EncryptionPolicy {
+    Required,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EncryptedProtocol {
+    Quic,
+    Https,
+    Tls,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -252,18 +295,52 @@ impl Config {
             return Err("provider presets cannot be mixed with custom upstreams".into());
         }
         let catalog = providers::Catalog::bundled()?;
+        let automatic = self
+            .resolver
+            .providers
+            .iter()
+            .filter(|selection| selection.protocol == ProviderProtocol::Auto)
+            .count();
+        if automatic != 0 && automatic != self.resolver.providers.len() {
+            return Err("automatic and explicit provider transports cannot be mixed".into());
+        }
         let mut upstreams = Vec::new();
         for selection in &self.resolver.providers {
-            upstreams.extend(catalog.select(
-                &selection.id,
-                selection.protocol,
-                selection.address_family,
-            )?);
+            if selection.protocol == ProviderProtocol::Auto {
+                if selection.encryption.unwrap_or(EncryptionPolicy::Required)
+                    != EncryptionPolicy::Required
+                {
+                    return Err("automatic provider transport requires encryption".into());
+                }
+                upstreams.extend(catalog.select_encrypted(
+                    &selection.id,
+                    selection.address_family,
+                    selection.transport_priority.as_deref(),
+                )?);
+            } else {
+                if selection.encryption.is_some() || selection.transport_priority.is_some() {
+                    return Err(
+                        "encryption and transport_priority are only valid with protocol auto"
+                            .into(),
+                    );
+                }
+                upstreams.extend(
+                    catalog.select(
+                        &selection.id,
+                        selection
+                            .protocol
+                            .explicit()
+                            .ok_or("missing explicit protocol")?,
+                        selection.address_family,
+                    )?,
+                );
+            }
         }
         if upstreams.len() > 8 {
             return Err("provider presets resolve to more than 8 upstreams".into());
         }
         self.resolver.upstreams = upstreams;
+        self.resolver.automatic_transport = automatic != 0;
         Ok(())
     }
 
@@ -661,6 +738,32 @@ mod tests {
         fs::write(
             &path,
             "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'missing'\nprotocol = 'tls'\n",
+        )
+        .unwrap();
+        assert!(Config::load(&path).is_err());
+
+        fs::write(
+            &path,
+            "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'quad9-unfiltered'\nprotocol = 'auto'\nencryption = 'required'\naddress_family = 'ipv4'\ntransport_priority = ['tls', 'https']\n",
+        )
+        .unwrap();
+        let automatic = Config::load(&path).unwrap();
+        assert!(automatic.resolver.automatic_transport);
+        assert_eq!(automatic.resolver.upstreams.len(), 4);
+        assert!(
+            automatic.resolver.upstreams[..2]
+                .iter()
+                .all(|upstream| upstream.protocol == UpstreamProtocol::Tls)
+        );
+        assert!(
+            automatic.resolver.upstreams[2..]
+                .iter()
+                .all(|upstream| upstream.protocol == UpstreamProtocol::Https)
+        );
+
+        fs::write(
+            &path,
+            "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'quad9-unfiltered'\nprotocol = 'auto'\ntransport_priority = ['tls', 'tls']\n",
         )
         .unwrap();
         assert!(Config::load(&path).is_err());

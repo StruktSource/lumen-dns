@@ -22,7 +22,7 @@ review remain before production readiness.
 | Filtering, device policies, bounded list imports and atomic refresh/rollback | Functional web UI |
 | Recursive resolution, delegation checks, DNSSEC | Authenticated management API |
 | SQLite config/device state, migrations, reload, and local CLI | Functional web UI |
-| Explicit plaintext or encrypted upstream forwarding | Deployment guides, signed images, external review |
+| Explicit forwarding and encrypted-only provider failover | Deployment guides, signed images, external review |
 | Startup config, client ACLs, resource limits, aggregate metrics | Extended interoperability and performance validation |
 
 Defaults: loopback clients only, recursive resolution, DNSSEC on, no query
@@ -54,7 +54,7 @@ dig @::1 -p 5353 example.com AAAA +tcp
 `lumen --bind 127.0.0.1:5353` starts UDP/TCP with the same safe resolver defaults.
 `lumen --help` lists startup options. Aggregate metrics are disabled until the
 loopback `metrics` line is uncommented. `config/forward.example.toml` is an
-explicit DoT forwarding example; running it sends DNS to its configured upstream.
+encrypted provider failover example; running it sends DNS to its configured upstream.
 
 See [filtering guide](docs/filtering.md), [resolver guide](docs/resolver.md), [configuration reference](docs/configuration.md),
 [upstream provider presets](docs/upstream-providers.md),

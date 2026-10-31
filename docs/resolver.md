@@ -14,8 +14,11 @@ dig @::1 -p 5353 example.com AAAA +tcp
 dig @127.0.0.1 -p 5353 example.com A +dnssec
 ```
 
-Use `config/forward.example.toml` for explicit encrypted forwarding. The same cache and
-resolver are shared across client transports. Only one mode runs at a time.
+Use `config/forward.example.toml` for encrypted provider forwarding. Provider
+`protocol = "auto"` keeps a configured encrypted transport order and fails over
+only after connection, transport, or timeout errors. It never adds UDP or TCP.
+DNS answers and DNSSEC failures do not trigger another transport. The same cache
+and resolver are shared across client transports. Only one mode runs at a time.
 
 ## Optional recursive fallback
 

@@ -17,7 +17,9 @@ use hickory_server::{
     },
     resolver::{
         TtlConfig,
-        config::{NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts},
+        config::{
+            NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts, ServerOrderingStrategy,
+        },
         recursor::{DnssecConfig, DnssecPolicy, Recursor, RecursorOptions},
     },
     server::{Request, RequestHandler, RequestInfo, ResponseHandler, ResponseInfo},
@@ -199,10 +201,17 @@ fn forward_zone(
 fn forward_resolver(
     settings: &lumen_config::Resolver,
     upstreams: &[lumen_config::Upstream],
-    options: ResolverOpts,
+    mut options: ResolverOpts,
     anchors: Option<Arc<TrustAnchors>>,
 ) -> Result<hickory_server::resolver::Resolver<TokioRuntimeProvider>, String> {
-    let servers = upstreams.iter().map(name_server_config).collect();
+    if settings.automatic_transport {
+        options.server_ordering_strategy = ServerOrderingStrategy::UserProvidedOrder;
+        options.num_concurrent_reqs = 1;
+    }
+    let servers = upstreams
+        .iter()
+        .map(|upstream| name_server_config(upstream, settings.automatic_transport))
+        .collect();
     let mut builder = hickory_server::resolver::Resolver::builder_with_config(
         ResolverConfig::from_parts(None, vec![], servers),
         TokioRuntimeProvider::default(),
@@ -237,7 +246,10 @@ fn forward_resolver(
         .map_err(|_| "cannot build forwarding resolver".into())
 }
 
-fn name_server_config(upstream: &lumen_config::Upstream) -> NameServerConfig {
+fn name_server_config(
+    upstream: &lumen_config::Upstream,
+    trust_negative_responses: bool,
+) -> NameServerConfig {
     let name = Arc::from(upstream.server_name.as_deref().unwrap_or(""));
     let mut server = match upstream.protocol {
         UpstreamProtocol::Udp => NameServerConfig::udp_and_tcp(upstream.address.ip()),
@@ -250,7 +262,7 @@ fn name_server_config(upstream: &lumen_config::Upstream) -> NameServerConfig {
         ),
         UpstreamProtocol::Quic => NameServerConfig::quic(upstream.address.ip(), name),
     };
-    server.trust_negative_responses = false;
+    server.trust_negative_responses = trust_negative_responses;
     for connection in &mut server.connections {
         connection.port = upstream.address.port();
     }
