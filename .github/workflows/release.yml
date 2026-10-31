@@ -15,7 +15,7 @@ jobs:
     name: Release quality and audit gate
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component clippy,rustfmt
@@ -38,7 +38,7 @@ jobs:
           - { name: windows-amd64, runner: windows-2025 }
           - { name: windows-arm64-experimental, runner: windows-11-arm }
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal
@@ -54,7 +54,7 @@ jobs:
           - { name: linux-amd64, runner: ubuntu-24.04 }
           - { name: linux-arm64, runner: ubuntu-24.04-arm }
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: docker build --tag lumen:release-test .
@@ -65,7 +65,7 @@ jobs:
     name: Release Kubernetes smoke
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
@@ -101,7 +101,7 @@ jobs:
           - { platform: Windows-X64, runner: windows-2025 }
           - { platform: Windows-ARM64, runner: windows-11-arm }
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal
@@ -122,7 +122,7 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
