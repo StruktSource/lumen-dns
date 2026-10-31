@@ -74,6 +74,7 @@ pub struct Resolver {
     pub trust_anchor: Option<PathBuf>,
     pub upstream_ca: Option<PathBuf>,
     pub upstreams: Vec<Upstream>,
+    pub providers: Vec<ProviderSelection>,
     pub cache_entries: u32,
     pub nameserver_cache_entries: u32,
     pub validation_cache_entries: u32,
@@ -94,6 +95,7 @@ impl Default for Resolver {
             trust_anchor: None,
             upstream_ca: None,
             upstreams: vec![],
+            providers: vec![],
             cache_entries: 4096,
             nameserver_cache_entries: 256,
             validation_cache_entries: 4096,
@@ -140,6 +142,16 @@ pub struct Upstream {
     /// Optional `DoH` request path. The default is `/dns-query`.
     #[serde(default)]
     pub doh_path: Option<String>,
+}
+
+/// One bundled provider selection expanded into explicit runtime upstreams.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSelection {
+    pub id: String,
+    pub protocol: UpstreamProtocol,
+    #[serde(default)]
+    pub address_family: providers::AddressFamily,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -211,8 +223,35 @@ impl Config {
                 *path = base.join(&*path);
             }
         }
+        config.expand_provider_selections()?;
         config.validate()?;
         Ok(config)
+    }
+
+    fn expand_provider_selections(&mut self) -> Result<(), String> {
+        if self.resolver.providers.is_empty() {
+            return Ok(());
+        }
+        if self.resolver.mode != Mode::Forward {
+            return Err("provider presets are only available in forward mode".into());
+        }
+        if !self.resolver.upstreams.is_empty() {
+            return Err("provider presets cannot be mixed with custom upstreams".into());
+        }
+        let catalog = providers::Catalog::bundled()?;
+        let mut upstreams = Vec::new();
+        for selection in &self.resolver.providers {
+            upstreams.extend(catalog.select(
+                &selection.id,
+                selection.protocol,
+                selection.address_family,
+            )?);
+        }
+        if upstreams.len() > 8 {
+            return Err("provider presets resolve to more than 8 upstreams".into());
+        }
+        self.resolver.upstreams = upstreams;
+        Ok(())
     }
 
     /// Validate schema, transport combinations, ACLs, and bounded resource settings.
@@ -267,6 +306,9 @@ impl Config {
         }
         if r.mode == Mode::Recursive && !r.upstreams.is_empty() {
             return Err("recursive mode rejects unused upstreams".into());
+        }
+        if r.mode == Mode::Recursive && !r.providers.is_empty() {
+            return Err("recursive mode rejects provider presets".into());
         }
         if r.mode == Mode::Forward && r.root_hints.is_some() {
             return Err("root_hints is only used in recursive mode".into());
@@ -582,5 +624,39 @@ mod tests {
                 .unwrap();
         assert!(!old.resolver.fallback.enabled);
         assert!(old.validate().is_ok());
+    }
+
+    #[test]
+    fn provider_presets_expand_during_load_and_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'cloudflare-unfiltered'\nprotocol = 'tls'\naddress_family = 'ipv4'\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.resolver.providers.len(), 1);
+        assert!(!config.resolver.upstreams.is_empty());
+        assert!(config.resolver.upstreams.iter().all(|upstream| {
+            upstream.address.is_ipv4()
+                && upstream.address.port() == 853
+                && upstream.protocol == UpstreamProtocol::Tls
+                && upstream.server_name.as_deref() == Some("one.one.one.one")
+        }));
+
+        fs::write(
+            &path,
+            "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'missing'\nprotocol = 'tls'\n",
+        )
+        .unwrap();
+        assert!(Config::load(&path).is_err());
+
+        fs::write(
+            &path,
+            "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'cloudflare-unfiltered'\nprotocol = 'tls'\n[[resolver.upstreams]]\naddress = '1.1.1.1:853'\nprotocol = 'tls'\nserver_name = 'cloudflare-dns.com'\n",
+        )
+        .unwrap();
+        assert!(Config::load(&path).is_err());
     }
 }

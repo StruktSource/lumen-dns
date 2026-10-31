@@ -5,6 +5,13 @@
 Native validation: macOS ARM64. Phase 1 results below are historical and are not
 new Linux/Windows results for Phase 2.
 
+Issue #7 provider presets were validated on macOS ARM64 on 2026-10-31. The full
+local check passed 48 tests, format, and Clippy. The preset forwarding example
+also passed daemon config validation. Coverage includes stable-ID expansion,
+address-family selection, TLS identity mapping, unknown-ID rejection, and
+rejection of mixed preset and custom upstream configuration. Public provider
+reachability was not tested.
+
 - `./scripts/dev.sh check`: format, Clippy with warnings denied, **42 tests**,
   and doc tests pass. Socket tests run outside the restricted filesystem/network
   sandbox because its loopback binds return `Operation not permitted`.

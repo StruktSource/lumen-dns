@@ -69,7 +69,8 @@ and restart after rotation. Lumen does not create or download certificates.
 | `root_hints` | Bundled InterNIC hints | Optional BIND-format file; recursive mode only; 64 KiB; 1–64 IP records; directives disabled |
 | `trust_anchor` | Hickory bundled root DNSKEYs | Optional DNSKEY-format file; 64 KiB; at least one key; DNSSEC must be enabled |
 | `upstream_ca` | Public WebPKI roots | Optional PEM CA bundle, 1 MiB; replaces public roots for encrypted forwarding |
-| `upstreams` | `[]` | 1–8 required in forward mode; rejected in recursive mode |
+| `upstreams` | `[]` | 1–8 custom endpoints in forward mode; rejected in recursive mode |
+| `providers` | `[]` | Bundled provider selections; cannot be mixed with custom upstreams |
 | `cache_entries` | `4096` | 1–65536 response entries |
 | `nameserver_cache_entries` | `256` | 1–4096; recursive delegation cache |
 | `validation_cache_entries` | `4096` | 1–65536; recursive DNSSEC validation cache |

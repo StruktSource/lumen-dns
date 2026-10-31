@@ -1,9 +1,25 @@
 # Upstream provider presets
 
 Lumen ships an offline provider catalog at
-`config/providers/resolvers.toml`. It is metadata only. No preset is selected by
-default, and the release config stays in recursive mode. Custom upstream entries
-remain supported through `[[resolver.upstreams]]`.
+`config/providers/resolvers.toml`. No preset is selected by default, and the
+release config stays in recursive mode. Forward mode can select a preset by its
+stable ID:
+
+```toml
+[resolver]
+mode = "forward"
+dnssec = true
+
+[[resolver.providers]]
+id = "cloudflare-unfiltered"
+protocol = "tls"
+address_family = "ipv4"
+```
+
+`address_family` accepts `any`, `ipv4`, or `ipv6`. Multiple selections are
+allowed when they expand to at most eight endpoints. Protocols are accepted only
+when marked supported by the catalog. Presets cannot be mixed with custom
+`[[resolver.upstreams]]` entries. Custom upstreams remain supported.
 
 The catalog was checked against operator documentation on 2026-10-30. A catalog
 entry is not a live-service, privacy, or availability guarantee. Operators can

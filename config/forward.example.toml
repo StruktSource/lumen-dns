@@ -14,9 +14,13 @@ upstream_timeout_ms = 2000
 # Optional private CA bundle replaces the public CA roots for all upstreams.
 # upstream_ca = "tls/upstream-ca.pem"
 
-[[resolver.upstreams]]
-address = "1.1.1.1:853"
+[[resolver.providers]]
+id = "cloudflare-unfiltered"
 protocol = "tls"
-server_name = "cloudflare-dns.com"
-# Optional. Defaults to "/dns-query". Some official presets use another path.
-# doh_path = "/dns-query"
+address_family = "ipv4"
+
+# Custom upstreams remain supported, but cannot be mixed with provider presets.
+# [[resolver.upstreams]]
+# address = "1.1.1.1:853"
+# protocol = "tls"
+# server_name = "cloudflare-dns.com"
