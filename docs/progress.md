@@ -5,7 +5,7 @@ checks in [verification](verification.md). It does not mean production-ready.
 
 ## Foundation
 
-- [x] Lumen by Strukt, Apache-2.0, Rust workspace, SemVer `0.2.0`
+- [x] Lumen by Strukt, Apache-2.0, Rust workspace, SemVer `0.2.1`
 - [x] README, contributor guide, security policy, code of conduct
 - [x] Architecture, threat model, privacy defaults, and protocol scope
 - [x] CI definitions for Linux, macOS, Windows, lint, tests, and MSRV
