@@ -159,7 +159,11 @@ async fn fixture() -> Fixture {
         let address = tcp.local_addr().unwrap();
         match UdpSocket::bind(address).await {
             Ok(udp) => break (tcp, udp, address),
-            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+                ) => {}
             Err(error) => panic!("fixture UDP bind failed: {error}"),
         }
     };
