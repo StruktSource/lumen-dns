@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! DNS resolution and validation through Hickory, isolated from client transports.
 
+use accel::Accel;
 use async_trait::async_trait;
 use hickory_server::{
     dnssec::NxProofKind,
@@ -11,7 +12,6 @@ use hickory_server::{
     },
     proto::{
         dnssec::TrustAnchors,
-        op::Query as DnsQuery,
         rr::{LowerName, Name, Record, RecordSet, RecordType, TSigResponseContext},
         serialize::{binary::BinEncoder, txt::Parser},
     },
@@ -38,9 +38,11 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::time::timeout;
+
+mod accel;
 
 pub use hickory_server::net::xfer::Protocol as Transport;
 
@@ -48,19 +50,61 @@ pub use hickory_server::net::xfer::Protocol as Transport;
 pub struct Resolver {
     catalog: Catalog,
     metrics: Arc<Metrics>,
+    background: Option<Background>,
 }
 
-/// Aggregate fallback counters. No query names or client labels are retained.
+/// Optional priming and refresh tasks, started explicitly once listeners are bound.
+struct Background {
+    accel: Arc<Accel>,
+    start: Box<dyn Fn() + Send + Sync>,
+}
+
+impl Drop for Resolver {
+    fn drop(&mut self) {
+        if let Some(background) = &self.background {
+            background.accel.stop();
+        }
+    }
+}
+
+/// Latency bucket upper bounds in seconds; one extra slot counts everything above.
+const LATENCY_BOUNDS: [f64; 10] = [0.001, 0.005, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0];
+
+/// Aggregate counters. No query names or client labels are retained.
 #[derive(Default)]
 pub struct Metrics {
     attempts: AtomicU64,
     successes: AtomicU64,
     failures: AtomicU64,
     timeout_triggers: AtomicU64,
+    lookups: AtomicU64,
+    coalesced: AtomicU64,
+    hedged: AtomicU64,
+    prefetch_refreshes: AtomicU64,
+    prefetch_failures: AtomicU64,
+    prefetch_skipped: AtomicU64,
+    warm_queries: AtomicU64,
+    warm_failures: AtomicU64,
+    latency: [AtomicU64; 11],
+    latency_sum_micros: AtomicU64,
 }
 
 impl Metrics {
-    /// Stable Prometheus text for the optional recursive fallback path.
+    fn observe(&self, elapsed: Duration) {
+        let seconds = elapsed.as_secs_f64();
+        let slot = LATENCY_BOUNDS
+            .iter()
+            .position(|bound| seconds <= *bound)
+            .unwrap_or(LATENCY_BOUNDS.len());
+        self.latency[slot].fetch_add(1, Ordering::Relaxed);
+        self.lookups.fetch_add(1, Ordering::Relaxed);
+        self.latency_sum_micros.fetch_add(
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Stable Prometheus text for recursion latency, sharing, priming, and fallback.
     #[must_use]
     pub fn render(&self) -> String {
         let mut text = String::new();
@@ -85,6 +129,41 @@ impl Metrics {
                 "Fallback attempts triggered by an identified recursion timeout.",
                 &self.timeout_triggers,
             ),
+            (
+                "recursive_coalesced_total",
+                "Identical in-flight recursive queries that shared one recursion.",
+                &self.coalesced,
+            ),
+            (
+                "recursive_hedged_total",
+                "Slow recursive lookups that started a second recursion.",
+                &self.hedged,
+            ),
+            (
+                "prefetch_refreshes_total",
+                "Popular answers refreshed after expiry.",
+                &self.prefetch_refreshes,
+            ),
+            (
+                "prefetch_failures_total",
+                "Refreshes that did not produce an answer.",
+                &self.prefetch_failures,
+            ),
+            (
+                "prefetch_skipped_total",
+                "Refreshes skipped because the per-minute budget was spent.",
+                &self.prefetch_skipped,
+            ),
+            (
+                "warm_queries_total",
+                "Startup priming queries for root and top-level zones.",
+                &self.warm_queries,
+            ),
+            (
+                "warm_failures_total",
+                "Startup priming queries without an answer.",
+                &self.warm_failures,
+            ),
         ] {
             let _ = writeln!(
                 text,
@@ -92,6 +171,22 @@ impl Metrics {
                 value.load(Ordering::Relaxed)
             );
         }
+        let name = "lumen_dns_recursive_lookup_duration_seconds";
+        let _ = writeln!(
+            text,
+            "# HELP {name} Time to answer a recursive lookup, including cache hits.\n# TYPE {name} histogram"
+        );
+        let mut total = 0;
+        for (slot, count) in self.latency.iter().enumerate() {
+            total += count.load(Ordering::Relaxed);
+            let bound = LATENCY_BOUNDS
+                .get(slot)
+                .map_or_else(|| "+Inf".to_owned(), ToString::to_string);
+            let _ = writeln!(text, "{name}_bucket{{le=\"{bound}\"}} {total}");
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let sum = self.latency_sum_micros.load(Ordering::Relaxed) as f64 / 1e6;
+        let _ = writeln!(text, "{name}_sum {sum}\n{name}_count {total}");
         text
     }
 }
@@ -132,13 +227,29 @@ impl Resolver {
         options.edns_payload_len = 1232;
         options.positive_max_ttl = Some(Duration::from_secs(u64::from(settings.positive_ttl_secs)));
         options.negative_max_ttl = Some(Duration::from_secs(u64::from(settings.negative_ttl_secs)));
-        let handler: Arc<dyn ZoneHandler> = match settings.mode {
-            Mode::Forward => forward_zone(settings, options, anchors)?,
-            Mode::Recursive => recursive_zone(settings, &options, anchors, Arc::clone(&metrics))?,
+        let (handler, background) = match settings.mode {
+            Mode::Forward => (forward_zone(settings, options, anchors)?, None),
+            Mode::Recursive => {
+                let (handler, background) =
+                    recursive_zone(settings, &options, anchors, Arc::clone(&metrics))?;
+                (handler, Some(background))
+            }
         };
         let mut catalog = Catalog::new();
         catalog.upsert(Name::root().into(), vec![handler]);
-        Ok(Self { catalog, metrics })
+        Ok(Self {
+            catalog,
+            metrics,
+            background,
+        })
+    }
+
+    /// Begin optional priming and refresh. Call once, after every listener is bound;
+    /// dropping the resolver stops them. Does nothing when both are disabled.
+    pub fn start_background(&self) {
+        if let Some(background) = &self.background {
+            (background.start)();
+        }
     }
 
     /// Resolver-owned aggregate metrics.
@@ -274,7 +385,7 @@ fn recursive_zone(
     options: &ResolverOpts,
     anchors: Option<Arc<TrustAnchors>>,
     metrics: Arc<Metrics>,
-) -> Result<Arc<dyn ZoneHandler>, String> {
+) -> Result<(Arc<dyn ZoneHandler>, Background), String> {
     let roots = match &settings.root_hints {
         Some(path) => {
             String::from_utf8(read_bounded(path, 65536)?).map_err(|_| "root hints must be UTF-8")?
@@ -323,6 +434,10 @@ fn recursive_zone(
         TokioRuntimeProvider::default(),
     )
     .map_err(|_| "cannot build recursive resolver")?;
+    let recursor = Arc::new(recursor);
+    let accel = Arc::new(
+        Accel::new(Arc::clone(&metrics), settings.prefetch.clone()).with_hedge(settings.hedge_ms),
+    );
     let fallback = if settings.fallback.enabled {
         let mut fallback_options = options.clone();
         fallback_options.attempts = usize::from(settings.fallback.attempts);
@@ -343,13 +458,23 @@ fn recursive_zone(
     } else {
         None
     };
-    Ok(Arc::new(ResolutionZone {
+    let start = {
+        let (accel, recursor, warm) = (
+            Arc::clone(&accel),
+            Arc::clone(&recursor),
+            settings.warm.clone(),
+        );
+        Box::new(move || accel.start(&recursor, &warm))
+    };
+    let zone: Arc<dyn ZoneHandler> = Arc::new(ResolutionZone {
         origin: Name::root().into(),
         backend: Backend::Recursive {
-            recursor: Box::new(recursor),
+            recursor,
             fallback,
+            accel: Arc::clone(&accel),
         },
-    }))
+    });
+    Ok((zone, Background { accel, start }))
 }
 
 #[derive(Clone)]
@@ -385,8 +510,9 @@ impl ResponseHandler for Capture {
 
 enum Backend<P: hickory_server::net::runtime::RuntimeProvider> {
     Recursive {
-        recursor: Box<Recursor<P>>,
+        recursor: Arc<Recursor<P>>,
         fallback: Option<FallbackBackend<P>>,
+        accel: Arc<Accel>,
     },
     Forward(Box<hickory_server::resolver::Resolver<P>>),
 }
@@ -429,65 +555,60 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
         options: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
         let result = match &self.backend {
-            Backend::Recursive { recursor, fallback } => {
-                let query = DnsQuery::query(name.into(), rtype);
-                match fallback {
-                    Some(fallback) => {
-                        let recursive = timeout(
-                            fallback.recursive_timeout,
-                            recursor.resolve(query.clone(), Instant::now(), options.dnssec_ok),
-                        )
-                        .await;
-                        match recursive {
-                            Ok(Ok(message)) => Ok(AuthLookup::Response(message)),
-                            Ok(Err(error)) if !recursion_timed_out(&error) => {
-                                Err(LookupError::from(error))
-                            }
-                            Ok(Err(_)) | Err(_) => {
-                                fallback.metrics.attempts.fetch_add(1, Ordering::Relaxed);
-                                fallback
-                                    .metrics
-                                    .timeout_triggers
-                                    .fetch_add(1, Ordering::Relaxed);
-                                match timeout(
-                                    fallback.timeout,
-                                    fallback.resolver.lookup(Name::from(name), rtype),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(lookup)) => {
+            Backend::Recursive {
+                recursor,
+                fallback,
+                accel,
+            } => match fallback {
+                Some(fallback) => {
+                    let recursive = timeout(
+                        fallback.recursive_timeout,
+                        accel.resolve(recursor, name, rtype, options.dnssec_ok, false),
+                    )
+                    .await;
+                    match recursive {
+                        Ok(Ok(message)) => Ok(AuthLookup::Response(message)),
+                        Ok(Err(error)) if !recursion_timed_out(&error) => {
+                            Err(LookupError::from(error))
+                        }
+                        Ok(Err(_)) | Err(_) => {
+                            fallback.metrics.attempts.fetch_add(1, Ordering::Relaxed);
+                            fallback
+                                .metrics
+                                .timeout_triggers
+                                .fetch_add(1, Ordering::Relaxed);
+                            match timeout(
+                                fallback.timeout,
+                                fallback.resolver.lookup(Name::from(name), rtype),
+                            )
+                            .await
+                            {
+                                Ok(Ok(lookup)) => {
+                                    fallback.metrics.successes.fetch_add(1, Ordering::Relaxed);
+                                    Ok(AuthLookup::from(lookup))
+                                }
+                                Ok(Err(error)) => {
+                                    if error.is_no_records_found() {
                                         fallback.metrics.successes.fetch_add(1, Ordering::Relaxed);
-                                        Ok(AuthLookup::from(lookup))
-                                    }
-                                    Ok(Err(error)) => {
-                                        if error.is_no_records_found() {
-                                            fallback
-                                                .metrics
-                                                .successes
-                                                .fetch_add(1, Ordering::Relaxed);
-                                        } else {
-                                            fallback
-                                                .metrics
-                                                .failures
-                                                .fetch_add(1, Ordering::Relaxed);
-                                        }
-                                        Err(LookupError::from(error))
-                                    }
-                                    Err(_) => {
+                                    } else {
                                         fallback.metrics.failures.fetch_add(1, Ordering::Relaxed);
-                                        Err(LookupError::from(NetError::Timeout))
                                     }
+                                    Err(LookupError::from(error))
+                                }
+                                Err(_) => {
+                                    fallback.metrics.failures.fetch_add(1, Ordering::Relaxed);
+                                    Err(LookupError::from(NetError::Timeout))
                                 }
                             }
                         }
                     }
-                    None => recursor
-                        .resolve(query, Instant::now(), options.dnssec_ok)
-                        .await
-                        .map(AuthLookup::Response)
-                        .map_err(LookupError::from),
                 }
-            }
+                None => accel
+                    .resolve(recursor, name, rtype, options.dnssec_ok, false)
+                    .await
+                    .map(AuthLookup::Response)
+                    .map_err(LookupError::from),
+            },
             Backend::Forward(resolver) => resolver
                 .lookup(Name::from(name), rtype)
                 .await
@@ -527,7 +648,9 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
     }
 }
 
-fn recursion_timed_out(error: &hickory_server::resolver::recursor::RecursorError) -> bool {
+pub(crate) fn recursion_timed_out(
+    error: &hickory_server::resolver::recursor::RecursorError,
+) -> bool {
     error.is_timeout()
         || matches!(
             error,

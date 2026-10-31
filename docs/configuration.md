@@ -89,7 +89,7 @@ and restart after rotation. Lumen does not create or download certificates.
 | `upstreams` | `[]` | 1–8 custom endpoints in forward mode; rejected in recursive mode |
 | `providers` | `[]` | Bundled provider selections; cannot be mixed with custom upstreams |
 | `cache_entries` | `4096` | 1–65536 response entries |
-| `nameserver_cache_entries` | `256` | 1–4096; recursive delegation cache |
+| `nameserver_cache_entries` | `1024` | 1–4096; recursive delegation cache (raised from 256 so busy networks stop re-walking delegations) |
 | `validation_cache_entries` | `4096` | 1–65536; recursive DNSSEC validation cache |
 | `positive_ttl_secs` | `86400` | 1–604800; TTL ceiling, never a forced minimum |
 | `negative_ttl_secs` | `3600` | 1–86400; TTL ceiling for NXDOMAIN/NODATA |
@@ -97,6 +97,9 @@ and restart after rotation. Lumen does not create or download certificates.
 | `attempts` | `2` | 1–5; forwarding attempts |
 | `upstream_timeout_ms` | `2000` | 1–30000; per-attempt forwarding timeout |
 | `fallback` | Disabled | Optional timeout-only forwarding after recursive mode times out |
+| `warm` | Disabled in code, enabled in the shipped configs | Startup priming of the root and listed top-level zones; recursive mode only |
+| `hedge_ms` | `0` (off) | 0 or 100–5000; recursive mode only; starts one extra recursion for lookups still unanswered after this long. The first usable answer wins. Inconclusive in measurements; see [performance](performance.md) |
+| `prefetch` | Disabled | Refresh of repeatedly requested names when their answer expires; recursive mode only |
 
 Recursive transport retries/timeouts use Hickory's bounded internal policy. The
 outer query deadline applies to both modes. Recursive mode filters private,
@@ -122,6 +125,32 @@ loop if they route back to Lumen; verify the network path before enabling them.
 The fallback runs only for resolver-layer recursion timeouts. NXDOMAIN, NODATA,
 DNSSEC bogus responses, generic SERVFAIL, filtering, admission refusal, and
 other network failures do not trigger it.
+
+`[resolver.warm]` primes delegations and DNSSEC keys once at startup:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Set explicitly; the shipped `config/lumen.toml` and `deploy/lumen.toml` enable it |
+| `zones` | 12 common zones | At most 64 ASCII names without a trailing dot; the root is always primed |
+
+Priming sends an `NS` and a `DNSKEY` query per zone through the normal validating
+recursor, two at a time, each bounded to 10 seconds. The queries name only the
+listed zones, never client data. Failures are counted and otherwise ignored.
+
+`[resolver.prefetch]` refreshes popular answers just after they expire:
+
+| Field | Default | Bounds | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `false` | | Must be set explicitly |
+| `min_hits` | `2` | 1–100 | Lookups needed during one cache lifetime |
+| `max_tracked` | `1024` | 16–8192 | Names tracked at once; least recently seen is dropped |
+| `max_concurrent` | `4` | 1–16 | Refreshes running at the same time |
+| `budget_per_minute` | `240` | 1–6000 | Refreshes started in any minute |
+
+Tracked names live in memory only, are never logged, exported, or persisted, and
+are forgotten after an hour without a lookup. Refresh never starts before the
+authoritative TTL has elapsed, so answers are not served longer than allowed.
+Answers with a TTL under 10 seconds are not refreshed.
 
 Cache capacities count entries, not process RSS bytes. Record sizes, separate
 caches, in-flight work, library eviction maintenance, and TLS/QUIC buffers also

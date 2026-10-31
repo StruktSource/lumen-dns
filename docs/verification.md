@@ -1,5 +1,16 @@
 # Verification
 
+## Recursion speed (Issue #9) and 0.1.1 — 2026-10-31
+
+Native validation: macOS ARM64. Format, Clippy with warnings denied, and the full
+locked workspace tests pass, including 14 new resolver tests (deterministic
+coalescing against a counting local hierarchy, cancelled-leader recovery,
+refresh scheduling and budgets, priming, hedging, histogram shape) and config
+bound tests. A mutation check confirmed the coalescing test fails (73 vs 4 upstream
+packets) when sharing is disabled. Both shipped configs pass daemon checks.
+Public-internet A/B results and limits: [performance](performance.md). No Windows
+or Linux hosted run of the new code was available when this was written.
+
 ## Embedded web hosting — 2026-10-31
 
 Native validation: macOS ARM64. The locked workspace run passes 61 tests plus

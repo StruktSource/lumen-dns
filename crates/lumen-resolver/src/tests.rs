@@ -2,6 +2,7 @@
 //! An isolated DNS hierarchy. Port mapping exists only in this test runtime.
 #![allow(clippy::too_many_lines)]
 use super::*;
+use hickory_server::proto::op::Query as DnsQuery;
 use hickory_server::resolver::config::ProtocolConfig;
 use hickory_server::{
     net::runtime::{DnsUdpSocket, RuntimeProvider, TokioTime},
@@ -13,7 +14,8 @@ use hickory_server::{
         },
     },
 };
-use lumen_config::Upstream;
+use lumen_config::{Prefetch, Upstream, Warm};
+use std::time::Instant;
 use std::{
     collections::HashMap,
     future::Future,
@@ -223,14 +225,16 @@ async fn iterative_delegations_cache_and_depth_limit() {
         vec![Arc::new(ResolutionZone {
             origin: Name::root().into(),
             backend: Backend::Recursive {
-                recursor: Box::new(recursor),
+                recursor: Arc::new(recursor),
                 fallback: None,
+                accel: Arc::new(Accel::new(Arc::default(), Prefetch::default())),
             },
         })],
     );
     let resolver = Resolver {
         catalog,
         metrics: Arc::new(Metrics::default()),
+        background: None,
     };
     let mut request = Message::query();
     request.metadata.recursion_desired = true;
@@ -409,7 +413,8 @@ async fn recursion_timeout_invokes_fallback_once() {
         vec![Arc::new(ResolutionZone {
             origin: Name::root().into(),
             backend: Backend::Recursive {
-                recursor: Box::new(recursor),
+                recursor: Arc::new(recursor),
+                accel: Arc::new(Accel::new(Arc::clone(&metrics), Prefetch::default())),
                 fallback: Some(FallbackBackend {
                     resolver: Box::new(forward),
                     recursive_timeout: Duration::from_millis(30),
@@ -422,6 +427,7 @@ async fn recursion_timeout_invokes_fallback_once() {
     let resolver = Resolver {
         catalog,
         metrics: Arc::clone(&metrics),
+        background: None,
     };
     let mut request = Message::query();
     request.metadata.recursion_desired = true;
@@ -478,4 +484,324 @@ async fn bundled_roots_and_default_dnssec_build() {
     assert!(hints.contains("AAAA"));
     assert!(hints.contains("198.41.0.4"));
     assert!(TrustAnchors::default().len() >= 2);
+}
+
+/// Local root, `test.`, and `example.test.` servers. `delay` slows every reply.
+async fn hierarchy(
+    delay: Duration,
+) -> (
+    JoinSet<()>,
+    TestRuntime,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let mut tasks = JoinSet::new();
+    let mut mapping = HashMap::new();
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for (role, ip) in ["198.41.0.4", "192.0.2.2", "192.0.2.3"].iter().enumerate() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        mapping.insert(ip.parse().unwrap(), socket.local_addr().unwrap());
+        let hits = Arc::clone(&hits);
+        tasks.spawn(async move {
+            let mut buffer = [0; 4096];
+            loop {
+                let (size, peer) = socket.recv_from(&mut buffer).await.unwrap();
+                hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let request = Message::from_vec(&buffer[..size]).unwrap();
+                let bytes = hierarchy_reply(request, role).to_vec().unwrap();
+                let socket = Arc::clone(&socket);
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let _ = socket.send_to(&bytes, peer).await;
+                });
+            }
+        });
+    }
+    let provider = TestRuntime {
+        inner: TokioRuntimeProvider::default(),
+        mapping: Arc::new(mapping),
+    };
+    (tasks, provider, hits)
+}
+
+fn test_recursor(provider: TestRuntime) -> Arc<Recursor<TestRuntime>> {
+    Arc::new(
+        Recursor::new(
+            &["198.41.0.4".parse().unwrap()],
+            DnssecPolicy::ValidationDisabled,
+            None,
+            RecursorOptions {
+                deny_server: vec![],
+                case_randomization: true,
+                recursion_limit: 8,
+                ns_recursion_limit: 8,
+                response_cache_size: 64,
+                ns_cache_size: 64,
+                ..RecursorOptions::default()
+            },
+            provider,
+        )
+        .unwrap(),
+    )
+}
+
+fn www_example() -> LowerName {
+    LowerName::from(Name::from_ascii("www.example.test.").unwrap())
+}
+
+#[tokio::test]
+async fn identical_concurrent_queries_share_one_recursion() {
+    let (mut single_tasks, provider, single_hits) = hierarchy(Duration::from_millis(40)).await;
+    let accel = Accel::new(Arc::default(), Prefetch::default());
+    let recursor = test_recursor(provider);
+    accel
+        .resolve(&recursor, &www_example(), RecordType::A, false, false)
+        .await
+        .unwrap();
+    let one = single_hits.load(std::sync::atomic::Ordering::Relaxed);
+    single_tasks.abort_all();
+
+    let (mut tasks, provider, hits) = hierarchy(Duration::from_millis(40)).await;
+    let metrics = Arc::new(Metrics::default());
+    let accel = Arc::new(Accel::new(Arc::clone(&metrics), Prefetch::default()));
+    let recursor = test_recursor(provider);
+    let mut jobs = JoinSet::new();
+    for _ in 0..24 {
+        let (accel, recursor) = (Arc::clone(&accel), Arc::clone(&recursor));
+        jobs.spawn(async move {
+            accel
+                .resolve(&recursor, &www_example(), RecordType::A, false, false)
+                .await
+                .map(|message| message.answers.len())
+        });
+    }
+    while let Some(result) = jobs.join_next().await {
+        assert_eq!(result.unwrap().unwrap(), 1);
+    }
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::Relaxed),
+        one,
+        "24 identical concurrent queries must cost one recursion"
+    );
+    assert_eq!(metrics.coalesced.load(Ordering::Relaxed), 23);
+    assert!(lock_flights_empty(&accel));
+    tasks.abort_all();
+}
+
+fn lock_flights_empty(accel: &Accel) -> bool {
+    accel.flights.lock().unwrap().is_empty()
+}
+
+#[tokio::test]
+async fn cancelled_leader_does_not_strand_waiters() {
+    let (mut tasks, provider, _) = hierarchy(Duration::from_millis(300)).await;
+    let accel = Arc::new(Accel::new(Arc::default(), Prefetch::default()));
+    let recursor = test_recursor(provider);
+    let leader = {
+        let (accel, recursor) = (Arc::clone(&accel), Arc::clone(&recursor));
+        tokio::spawn(async move {
+            let _ = timeout(
+                Duration::from_millis(100),
+                accel.resolve(&recursor, &www_example(), RecordType::A, false, false),
+            )
+            .await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let waiter = timeout(
+        Duration::from_secs(8),
+        accel.resolve(&recursor, &www_example(), RecordType::A, false, false),
+    )
+    .await
+    .expect("waiter must not hang on an abandoned flight")
+    .unwrap();
+    assert_eq!(waiter.answers.len(), 1);
+    leader.await.unwrap();
+    assert!(lock_flights_empty(&accel));
+    tasks.abort_all();
+}
+
+#[tokio::test]
+async fn different_query_types_and_dnssec_flags_do_not_share() {
+    let (mut tasks, provider, _) = hierarchy(Duration::from_millis(20)).await;
+    let accel = Arc::new(Accel::new(Arc::default(), Prefetch::default()));
+    let recursor = test_recursor(provider);
+    let name = www_example();
+    let a = accel.resolve(&recursor, &name, RecordType::A, false, false);
+    let a_do = accel.resolve(&recursor, &name, RecordType::A, true, false);
+    let (a, a_do) = tokio::join!(a, a_do);
+    assert!(a.is_ok() && a_do.is_ok());
+    assert_eq!(accel.metrics.coalesced.load(Ordering::Relaxed), 0);
+    tasks.abort_all();
+}
+
+fn hot_accel(prefetch: Prefetch) -> Accel {
+    Accel::new(Arc::default(), prefetch)
+}
+
+fn answer_with_ttl(ttl: u32) -> Message {
+    let mut message = Message::query();
+    message.add_answer(Record::from_rdata(
+        Name::from_ascii("www.example.test.").unwrap(),
+        ttl,
+        RData::A(A::new(203, 0, 113, 42)),
+    ));
+    message
+}
+
+fn due_now(accel: &Accel, key: &accel::Key) {
+    let mut hot = accel.hot.lock().unwrap();
+    hot.entries.get_mut(key).unwrap().refresh_at = Some(Instant::now());
+}
+
+#[test]
+fn refresh_needs_hits_inside_one_cache_window() {
+    let accel = hot_accel(Prefetch {
+        enabled: true,
+        min_hits: 2,
+        ..Prefetch::default()
+    });
+    let key = (www_example(), RecordType::A, false);
+    let permits = tokio::sync::Semaphore::new(4);
+
+    accel.touch(&key); // first sighting does not count
+    accel.schedule(&key, &answer_with_ttl(60));
+    // Lookups served from the same cache entry keep one window and keep counting.
+    accel.touch(&key);
+    accel.schedule(&key, &answer_with_ttl(59));
+    due_now(&accel, &key);
+    assert!(accel.due(&permits).is_empty(), "one hit is below min_hits");
+    assert!(accel.hot.lock().unwrap().entries.is_empty());
+
+    accel.touch(&key);
+    accel.schedule(&key, &answer_with_ttl(60));
+    accel.touch(&key);
+    accel.touch(&key);
+    accel.schedule(&key, &answer_with_ttl(58));
+    due_now(&accel, &key);
+    assert_eq!(accel.due(&permits), vec![key.clone()]);
+    // Launched entries wait for their refreshed answer instead of repeating.
+    assert!(accel.due(&permits).is_empty());
+}
+
+#[test]
+fn refresh_obeys_short_ttl_budget_and_tracking_bounds() {
+    let accel = hot_accel(Prefetch {
+        enabled: true,
+        min_hits: 1,
+        max_tracked: 16,
+        budget_per_minute: 2,
+        ..Prefetch::default()
+    });
+    let permits = tokio::sync::Semaphore::new(16);
+    let name = |n: usize| {
+        (
+            LowerName::from(Name::from_ascii(format!("n{n}.example.test.")).unwrap()),
+            RecordType::A,
+            false,
+        )
+    };
+    // Very short answers are never scheduled.
+    let short = name(100);
+    accel.touch(&short);
+    accel.schedule(&short, &answer_with_ttl(5));
+    assert!(
+        accel.hot.lock().unwrap().entries[&short]
+            .refresh_at
+            .is_none()
+    );
+
+    for n in 0..4 {
+        let key = name(n);
+        accel.touch(&key);
+        accel.schedule(&key, &answer_with_ttl(60));
+        accel.touch(&key);
+        due_now(&accel, &key);
+    }
+    assert_eq!(
+        accel.due(&permits).len(),
+        2,
+        "per-minute budget caps starts"
+    );
+    assert_eq!(accel.metrics.prefetch_skipped.load(Ordering::Relaxed), 2);
+
+    for n in 0..40 {
+        accel.touch(&name(1000 + n));
+    }
+    assert!(accel.hot.lock().unwrap().entries.len() <= 16);
+}
+
+#[tokio::test]
+async fn disabled_prefetch_tracks_nothing() {
+    let accel = hot_accel(Prefetch::default());
+    let key = (www_example(), RecordType::A, false);
+    accel.touch(&key);
+    accel.schedule(&key, &answer_with_ttl(60));
+    assert!(accel.hot.lock().unwrap().entries.is_empty());
+}
+
+#[tokio::test]
+async fn warm_primes_listed_zones_once_and_uses_no_client_data() {
+    let (mut tasks, provider, hits) = hierarchy(Duration::ZERO).await;
+    let metrics = Arc::new(Metrics::default());
+    let accel = Arc::new(Accel::new(Arc::clone(&metrics), Prefetch::default()));
+    let recursor = test_recursor(provider);
+    let warm = Warm {
+        enabled: true,
+        zones: vec!["test".into(), "example.test".into()],
+    };
+    accel.start(&recursor, &warm);
+    accel.start(&recursor, &warm); // a second start is ignored
+    timeout(Duration::from_secs(8), async {
+        while metrics.warm_queries.load(Ordering::Relaxed) < 6 || lock_flights_busy(&accel) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("root plus two zones, NS and DNSKEY each");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(metrics.warm_queries.load(Ordering::Relaxed), 6);
+    assert!(hits.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    accel.stop();
+    tasks.abort_all();
+}
+
+fn lock_flights_busy(accel: &Accel) -> bool {
+    !lock_flights_empty(accel)
+}
+
+#[test]
+fn latency_histogram_is_cumulative_and_fixed_cardinality() {
+    let metrics = Metrics::default();
+    metrics.observe(Duration::from_micros(400));
+    metrics.observe(Duration::from_millis(30));
+    metrics.observe(Duration::from_secs(9));
+    let text = metrics.render();
+    let name = "lumen_dns_recursive_lookup_duration_seconds";
+    assert!(text.contains(&format!("{name}_bucket{{le=\"0.001\"}} 1\n")));
+    assert!(text.contains(&format!("{name}_bucket{{le=\"0.05\"}} 2\n")));
+    assert!(text.contains(&format!("{name}_bucket{{le=\"+Inf\"}} 3\n")));
+    assert!(text.contains(&format!("{name}_count 3\n")));
+    assert_eq!(text.matches("_bucket{").count(), 11);
+}
+
+#[tokio::test]
+async fn slow_lookup_starts_one_hedge_and_fast_lookup_does_not() {
+    let (mut tasks, provider, _) = hierarchy(Duration::from_millis(250)).await;
+    let metrics = Arc::new(Metrics::default());
+    let accel = Accel::new(Arc::clone(&metrics), Prefetch::default()).with_hedge(100);
+    let recursor = test_recursor(provider);
+    let name = www_example();
+    let answer = accel
+        .resolve(&recursor, &name, RecordType::A, false, false)
+        .await
+        .unwrap();
+    assert_eq!(answer.answers.len(), 1);
+    assert_eq!(metrics.hedged.load(Ordering::Relaxed), 1);
+    // Cached now: far below the hedge delay, so no second recursion.
+    accel
+        .resolve(&recursor, &name, RecordType::A, false, false)
+        .await
+        .unwrap();
+    assert_eq!(metrics.hedged.load(Ordering::Relaxed), 1);
+    tasks.abort_all();
 }

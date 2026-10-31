@@ -38,6 +38,13 @@ This is a recommended dependency order, not a dated delivery commitment. UI
 prototyping need not wait for every advanced filtering feature. The existing
 first-release commitment remains a blank UI shell; a functional UI is later scope.
 
+## Issue #9 recursion speed: implemented, partly measured
+
+- [x] Reproducible A/B benchmark with trial-level statistics (`scripts/recursion_bench.py`).
+- [x] Shared in-flight recursion, startup priming, opt-in expiry refresh and hedging, latency metrics.
+- [ ] Demonstrate a statistically significant cold single-query gain; the first run (12 trials) was not significant. More trials, a controlled local hierarchy, or a lower per-attempt timeout would be needed.
+- [ ] Measure expiry refresh; it has unit tests but no benchmark.
+
 ## Release gates and later work
 
 - [ ] Extended DNS interoperability, DNSSEC conformance, and long-running soak tests.
