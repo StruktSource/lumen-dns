@@ -50,6 +50,15 @@ impl std::fmt::Display for Decision {
     }
 }
 
+/// Size of one loaded list in the live generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListStatus {
+    pub id: String,
+    pub rules: usize,
+    pub unsupported: usize,
+    pub duplicates: usize,
+}
+
 #[derive(Default)]
 pub struct Metrics {
     pub blocked: AtomicU64,
@@ -203,6 +212,36 @@ impl Filter {
             }),
             metrics: Metrics::default(),
         })
+    }
+
+    /// Name of the configured device owning this client address, if any.
+    #[must_use]
+    pub fn device_of(&self, client: IpAddr) -> Option<String> {
+        self.devices
+            .get(&client.to_canonical())
+            .map(|index| self.config.devices[*index].id.clone())
+    }
+
+    /// Live generation number and per-list rule counts. Names and rules are not exposed.
+    ///
+    /// # Panics
+    /// Panics if an internal writer previously poisoned the snapshot lock.
+    #[must_use]
+    pub fn status(&self) -> (u64, Vec<ListStatus>) {
+        let live = Arc::clone(&self.state.read().expect("filter state lock").live);
+        let lists = self
+            .config
+            .lists
+            .iter()
+            .zip(&live.lists)
+            .map(|(config, parsed)| ListStatus {
+                id: config.id.clone(),
+                rules: parsed.rules.len(),
+                unsupported: parsed.unsupported,
+                duplicates: parsed.duplicates,
+            })
+            .collect();
+        (live.generation, lists)
     }
 
     /// Explain without recording a query or changing aggregate counters.

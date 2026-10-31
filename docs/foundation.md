@@ -3,7 +3,7 @@
 ## Identity and scope
 
 Lumen is private, self-hosted DNS software by Strukt. Rust, Apache-2.0, workspace
-version `0.1.3`. Phases 1 and 2 implement the resolver core and filtering. Phase 3
+version `0.2.0`. Phases 1 and 2 implement the resolver core and filtering. Phase 3
 local persistence, control, authenticated loopback management, and observability
 are implemented. Remote management remains out of scope. See [progress](progress.md).
 
@@ -20,7 +20,7 @@ crates/lumen-core/   client transports, limits, lifecycle and aggregate metrics
 crates/lumen-store/  SQLite migrations, config/device state and local controls
 crates/lumen-api/    opt-in loopback /v1 management, roles, audit, webhooks
 config/             safe release default and opt-in feature examples
-web/                blank UI shell embedded by lumen-web at compile time
+web/                console UI (HTML, CSS, JS) embedded by lumen-web at compile time
 fuzz/               DNS/config/filter fuzz targets; separate Cargo workspace
 scripts/            local checks, builds, packaging
 .agent/             concise project continuity notes

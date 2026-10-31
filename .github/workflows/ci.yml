@@ -87,7 +87,7 @@ jobs:
           docker run --rm --read-only --tmpfs /tmp lumen:ci --config /etc/lumen/lumen.toml --check
       - name: Validate startup and graceful shutdown
         run: |
-          docker run --detach --name lumen-ci --read-only --tmpfs /tmp lumen:ci
+          docker run --detach --name lumen-ci --read-only --tmpfs /tmp --tmpfs /var/lib/lumen:uid=65532,mode=0700 lumen:ci
           sleep 3
           docker inspect --format '{{.State.Running}}' lumen-ci | grep true
           docker stop --time 10 lumen-ci

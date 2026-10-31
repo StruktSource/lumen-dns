@@ -13,8 +13,10 @@ RUN useradd --system --uid 65532 --create-home lumen
 COPY --from=build /lumen /usr/local/bin/lumen
 COPY --from=build /lumenctl /usr/local/bin/lumenctl
 COPY config/lumen.toml /etc/lumen/lumen.toml
+RUN mkdir -p /var/lib/lumen && chown 65532:65532 /var/lib/lumen && chmod 0700 /var/lib/lumen
+VOLUME /var/lib/lumen
 USER lumen
 EXPOSE 5353/udp 5353/tcp 8080/tcp
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/lumen"]
-CMD ["--config", "/etc/lumen/lumen.toml"]
+CMD ["--config", "/etc/lumen/lumen.toml", "--state", "/var/lib/lumen/state.db"]

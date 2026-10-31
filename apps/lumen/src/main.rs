@@ -3,7 +3,7 @@
 
 use lumen_api::RunningApi;
 use lumen_config::Config;
-use lumen_core::RunningServer;
+use lumen_core::{ConsoleOptions, RunningServer};
 use lumen_store::{Command as ControlCommand, Store};
 use std::{
     io,
@@ -143,7 +143,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
             .map_err(io::Error::other)?;
     }
     let mut config = managed_config(&mut store, false)?;
-    let mut server = RunningServer::start(config.clone()).await?;
+    let mut server = start_managed(config.clone(), state_path).await?;
     let mut api = match RunningApi::start(config.management.clone(), state_path).await {
         Ok(api) => api,
         Err(error) => {
@@ -218,7 +218,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                 }
                                 server.shutdown().await;
                                 shutdown_api(&mut api).await;
-                                match RunningServer::start(next.clone()).await {
+                                match start_managed(next.clone(), state_path).await {
                                     Ok(mut next_server) => {
                                         match RunningApi::start(next.management.clone(), state_path).await {
                                             Ok(next_api) => {
@@ -233,7 +233,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                             Err(error) => {
                                                 next_server.shutdown().await;
                                                 if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
-                                                server = RunningServer::start(config.clone()).await.map_err(|rollback| io::Error::other(format!("API reload failed: {error}; DNS rollback failed: {rollback}")))?;
+                                                server = start_managed(config.clone(), state_path).await.map_err(|rollback| io::Error::other(format!("API reload failed: {error}; DNS rollback failed: {rollback}")))?;
                                                 api = RunningApi::start(config.management.clone(), state_path).await.map_err(|rollback| io::Error::other(format!("API reload failed: {error}; API rollback failed: {rollback}")))?;
                                                 store.set_status("running", Some(&format!("reload failed; prior config restored: {error}"))).map_err(io::Error::other)?;
                                             }
@@ -241,7 +241,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                     }
                                     Err(error) => {
                                         if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
-                                        server = RunningServer::start(config.clone()).await.map_err(|rollback| {
+                                        server = start_managed(config.clone(), state_path).await.map_err(|rollback| {
                                             io::Error::other(format!("reload failed: {error}; rollback failed: {rollback}"))
                                         })?;
                                         api = RunningApi::start(config.management.clone(), state_path).await.map_err(|rollback| io::Error::other(format!("reload failed: {error}; API rollback failed: {rollback}")))?;
@@ -278,6 +278,17 @@ async fn shutdown_api(api: &mut Option<RunningApi>) {
     if let Some(api) = api {
         api.shutdown().await;
     }
+}
+
+async fn start_managed(config: Config, state_path: &Path) -> io::Result<RunningServer> {
+    RunningServer::start_with(
+        config,
+        ConsoleOptions {
+            state: Some(state_path.to_owned()),
+            version: env!("CARGO_PKG_VERSION"),
+        },
+    )
+    .await
 }
 
 fn print_api(api: Option<&RunningApi>) {
@@ -329,6 +340,11 @@ fn print_endpoints(server: &RunningServer) {
     for (tls, address) in &server.web_endpoints {
         let protocol = if *tls { "HTTPS" } else { "HTTP" };
         println!("Lumen web {protocol} listening on {address}");
+    }
+    if let Some(code) = &server.setup_code {
+        println!(
+            "Lumen first-run setup: open the console and create the administrator account.\nSetup code (needed unless you browse from this machine): {code}"
+        );
     }
 }
 

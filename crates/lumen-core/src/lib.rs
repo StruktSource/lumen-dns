@@ -3,7 +3,7 @@
 
 mod transport;
 pub use lumen_resolver::Transport;
-pub use transport::RunningServer;
+pub use transport::{ConsoleOptions, RunningServer};
 
 use lumen_config::Config;
 use lumen_proto::{Query, Rcode, is_response, malformed_response};
@@ -36,6 +36,7 @@ pub struct Metrics {
     transports: [AtomicU64; 6],
     latency_buckets: [AtomicU64; 8],
     latency_micros: AtomicU64,
+    rcodes: [AtomicU64; 5],
 }
 
 impl Metrics {
@@ -190,7 +191,13 @@ impl ClientRates {
     }
 }
 
+/// Most recent queries kept in memory while history is enabled. Never persisted.
+const HISTORY_LIMIT: usize = 1000;
+
 struct Service {
+    started: Instant,
+    history_on: std::sync::atomic::AtomicBool,
+    history: Mutex<std::collections::VecDeque<lumen_web::QueryRecord>>,
     config: Arc<Config>,
     resolver: Resolver,
     filter: Arc<lumen_filter::Filter>,
@@ -268,11 +275,9 @@ impl Service {
             } else {
                 maximum
             };
-            return Some(self.record_response(
-                lumen_filter::response(&query, action, maximum),
-                protocol,
-                started,
-            ));
+            let response = lumen_filter::response(&query, action, maximum);
+            self.log_query(&query, peer, true, &response, started);
+            return Some(self.record_response(response, protocol, started));
         }
         self.metrics.active.fetch_add(1, Ordering::Relaxed);
         let _active = ActiveQuery(&self.metrics.active);
@@ -294,16 +299,64 @@ impl Service {
                 query.response(Rcode::ServFail)
             }
         };
+        self.log_query(&query, peer, false, &response, started);
         Some(self.record_response(response, protocol, started))
     }
 
     fn record_response(&self, response: Vec<u8>, protocol: Transport, started: Instant) -> Vec<u8> {
         self.metrics.responses.fetch_add(1, Ordering::Relaxed);
         self.metrics.observe(protocol, started);
-        if response.get(3).is_some_and(|byte| byte & 15 == 2) {
+        let rcode = response.get(3).map_or(0, |byte| byte & 15);
+        if rcode == 2 {
             self.metrics.failures.fetch_add(1, Ordering::Relaxed);
         }
+        self.metrics.rcodes[match rcode {
+            0 => 0,
+            3 => 1,
+            2 => 2,
+            5 => 3,
+            _ => 4,
+        }]
+        .fetch_add(1, Ordering::Relaxed);
         response
+    }
+
+    fn log_query(
+        &self,
+        query: &Query,
+        peer: SocketAddr,
+        blocked: bool,
+        response: &[u8],
+        started: Instant,
+    ) {
+        if !self.history_on.load(Ordering::Relaxed) {
+            return;
+        }
+        let client = peer.ip().to_canonical();
+        let question = &query.message.queries[0];
+        let record = lumen_web::QueryRecord {
+            unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            domain: question.name().to_ascii().trim_end_matches('.').to_owned(),
+            qtype: question.query_type().to_string(),
+            client,
+            device: self.filter.device_of(client),
+            blocked,
+            rcode: match response.get(3).map_or(0, |byte| byte & 15) {
+                0 => "NOERROR",
+                2 => "SERVFAIL",
+                3 => "NXDOMAIN",
+                5 => "REFUSED",
+                _ => "OTHER",
+            },
+            micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        };
+        let mut log = self.history.lock().expect("history lock");
+        if log.len() >= HISTORY_LIMIT {
+            log.pop_back();
+        }
+        log.push_front(record);
     }
 }
 
@@ -311,6 +364,85 @@ struct ActiveQuery<'a>(&'a AtomicU64);
 impl Drop for ActiveQuery<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl lumen_web::Host for Service {
+    fn counters(&self) -> lumen_web::Counters {
+        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        let m = &self.metrics;
+        let (generation, _) = self.filter.status();
+        lumen_web::Counters {
+            queries: load(&m.queries),
+            responses: load(&m.responses),
+            malformed: load(&m.malformed),
+            refused: load(&m.refused),
+            timeouts: load(&m.timeouts),
+            failures: load(&m.failures),
+            active: load(&m.active),
+            transports: std::array::from_fn(|i| load(&m.transports[i])),
+            latency: std::array::from_fn(|i| load(&m.latency_buckets[i])),
+            rcodes: std::array::from_fn(|i| load(&m.rcodes[i])),
+            blocked: load(&self.filter.metrics.blocked),
+            allowed: load(&self.filter.metrics.allowed),
+            refresh_successes: load(&self.filter.metrics.refresh_successes),
+            refresh_failures: load(&self.filter.metrics.refresh_failures),
+            rollbacks: load(&self.filter.metrics.rollbacks),
+            filter_generation: generation,
+        }
+    }
+
+    fn lists(&self) -> Vec<lumen_web::ListInfo> {
+        self.filter
+            .status()
+            .1
+            .into_iter()
+            .map(|list| lumen_web::ListInfo {
+                id: list.id,
+                rules: list.rules,
+                unsupported: list.unsupported,
+                duplicates: list.duplicates,
+            })
+            .collect()
+    }
+
+    fn explain(&self, domain: &str, client: IpAddr, unix_seconds: u64) -> lumen_web::Explained {
+        let decision = self.filter.explain(domain, client, unix_seconds);
+        lumen_web::Explained {
+            blocked: decision.blocked,
+            rule: decision.rule,
+            list: decision.list,
+            category: decision.category,
+            profile: decision.profile,
+            device: decision.device,
+            group: decision.group,
+            generation: decision.generation,
+        }
+    }
+
+    fn uptime_secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    fn history_enabled(&self) -> bool {
+        self.history_on.load(Ordering::Relaxed)
+    }
+
+    fn set_history(&self, enabled: bool) {
+        self.history_on.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            self.history.lock().expect("history lock").clear();
+        }
+    }
+
+    fn history(&self, limit: usize) -> Vec<lumen_web::QueryRecord> {
+        self.history
+            .lock()
+            .expect("history lock")
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect()
     }
 }
 

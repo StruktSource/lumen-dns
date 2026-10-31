@@ -30,6 +30,17 @@ pub struct RunningServer {
     pub metrics: Arc<Metrics>,
     pub filter: Arc<lumen_filter::Filter>,
     pub web_endpoints: Vec<(bool, SocketAddr)>,
+    /// One-time code needed to create the first console account from another machine.
+    pub setup_code: Option<String>,
+}
+
+/// Optional managed-mode inputs for the web console.
+#[derive(Clone, Debug, Default)]
+pub struct ConsoleOptions {
+    /// Managed state database. Without it the console API stays disabled.
+    pub state: Option<std::path::PathBuf>,
+    /// Version string shown by the console.
+    pub version: &'static str,
 }
 
 impl RunningServer {
@@ -37,8 +48,16 @@ impl RunningServer {
     ///
     /// # Errors
     /// Fails startup if any enabled transport cannot be configured or bound.
-    #[allow(clippy::too_many_lines)] // Bind all resources before starting workers.
     pub async fn start(config: Config) -> io::Result<Self> {
+        Self::start_with(config, ConsoleOptions::default()).await
+    }
+
+    /// Start with console options: managed state for accounts and the console API.
+    ///
+    /// # Errors
+    /// Same as [`Self::start`], plus an unusable state database.
+    #[allow(clippy::too_many_lines)] // Bind all resources before starting workers.
+    pub async fn start_with(config: Config, console: ConsoleOptions) -> io::Result<Self> {
         tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         config.validate().map_err(io::Error::other)?;
         let resolver = lumen_resolver::Resolver::new(&config).map_err(io::Error::other)?;
@@ -63,6 +82,9 @@ impl RunningServer {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2())?;
         let metrics = Arc::new(Metrics::default());
         let service = Arc::new(Service {
+            started: std::time::Instant::now(),
+            history_on: std::sync::atomic::AtomicBool::new(false),
+            history: std::sync::Mutex::default(),
             queries: Arc::new(Semaphore::new(config.limits.max_in_flight as usize)),
             connections: Arc::new(Semaphore::new(config.limits.max_connections as usize)),
             clients: std::sync::Mutex::default(),
@@ -116,7 +138,18 @@ impl RunningServer {
             quic.push(endpoint);
         }
         let metrics_listener = config.metrics.map(tcp_listener).transpose()?;
-        let web = lumen_web::BoundWeb::bind(&config.web).await?;
+        let console = console.state.map(|state| {
+            lumen_web::Console::new(
+                state,
+                Arc::clone(&service) as Arc<dyn lumen_web::Host>,
+                console.version,
+            )
+        });
+        let setup_code = match &console {
+            Some(console) => console.prepare().map_err(io::Error::other)?,
+            None => None,
+        };
+        let web = lumen_web::BoundWeb::bind(&config.web, console.map(Arc::new)).await?;
         let web_endpoints = web
             .as_ref()
             .map_or_else(Vec::new, |web| web.endpoints.clone());
@@ -171,6 +204,7 @@ impl RunningServer {
             metrics,
             filter,
             web_endpoints,
+            setup_code,
         })
     }
 

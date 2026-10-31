@@ -5,13 +5,13 @@ checks in [verification](verification.md). It does not mean production-ready.
 
 ## Foundation
 
-- [x] Lumen by Strukt, Apache-2.0, Rust workspace, SemVer `0.1.3`
+- [x] Lumen by Strukt, Apache-2.0, Rust workspace, SemVer `0.2.0`
 - [x] README, contributor guide, security policy, code of conduct
 - [x] Architecture, threat model, privacy defaults, and protocol scope
 - [x] CI definitions for Linux, macOS, Windows, lint, tests, and MSRV
 - [x] Binary release workflow with distinct platform archives and checksums
 - [x] Non-root Docker image and local build scripts
-- [x] Blank UI shell and disabled API extension boundary
+- [x] Embedded web console: accounts, sessions, UI, config/device/filter control
 - [x] Startup schema 1, validation rules, explicit future-version rejection
 - [x] Minimal release default with opt-in forwarding and filtering examples
 - [x] Aggregate metric naming contract and loopback Prometheus endpoint

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Versioned local `SQLite` state for configuration, devices, and daemon control.
+//! Versioned local `SQLite` state for configuration, devices, accounts, and daemon control.
+
+pub mod password;
 
 use lumen_filter::config::Device;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -9,7 +11,37 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
+
+/// Console accounts, sessions and applied-config history.
+const MIGRATION_4: &str = "CREATE TABLE users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+                    password TEXT NOT NULL,
+                    must_change INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    last_login INTEGER
+                );
+                CREATE TABLE sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    csrf TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    last_seen INTEGER NOT NULL,
+                    peer TEXT NOT NULL
+                );
+                CREATE INDEX sessions_user ON sessions(user_id);
+                CREATE TABLE config_history (
+                    revision INTEGER PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    applied_at INTEGER NOT NULL,
+                    actor TEXT NOT NULL
+                );
+                ALTER TABLE pending_config ADD COLUMN actor TEXT NOT NULL DEFAULT '';
+                INSERT INTO config_history(revision, source, applied_at, actor)
+                    SELECT revision, source, updated_at, '' FROM config WHERE singleton = 1;
+                PRAGMA user_version = 4;";
 
 /// Durable management action without secrets or request bodies.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +61,60 @@ pub struct StoredConfig {
     pub source: String,
     pub base_dir: String,
     pub revision: u64,
+}
+
+/// Console account role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Admin,
+    User,
+}
+
+impl Role {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::User => "user",
+        }
+    }
+
+    /// # Errors
+    /// Rejects any value other than `admin` or `user`.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "admin" => Ok(Self::Admin),
+            "user" => Ok(Self::User),
+            _ => Err("role must be admin or user".into()),
+        }
+    }
+}
+
+/// Console account without its password record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct User {
+    pub id: i64,
+    pub name: String,
+    pub role: Role,
+    pub must_change: bool,
+    pub created_at: u64,
+    pub last_login: Option<u64>,
+}
+
+/// A validated, unexpired browser session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Session {
+    pub user: User,
+    pub csrf: String,
+}
+
+/// One applied configuration revision, newest first in listings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigRevision {
+    pub revision: u64,
+    pub source: String,
+    pub applied_at: u64,
+    pub actor: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +256,11 @@ impl Store {
                 )
                 .map_err(database_error)?;
         }
+        if version < 4 {
+            transaction
+                .execute_batch(MIGRATION_4)
+                .map_err(database_error)?;
+        }
         transaction.commit().map_err(database_error)
     }
 
@@ -220,6 +311,7 @@ impl Store {
              base_dir=excluded.base_dir, revision=excluded.revision, updated_at=excluded.updated_at",
             params![source, base_dir.to_string_lossy(), revision, now()?],
         ).map_err(database_error)?;
+        record_history(&transaction, revision, source, "")?;
         transaction.commit().map_err(database_error)?;
         Ok(revision)
     }
@@ -229,7 +321,23 @@ impl Store {
     /// # Errors
     /// Returns an error when the candidate cannot be written.
     pub fn stage_config(&mut self, source: &str, base_dir: &Path) -> Result<u64, String> {
+        self.stage_config_by(source, base_dir, "")
+    }
+
+    /// Stage a revision and remember who proposed it.
+    ///
+    /// # Errors
+    /// Returns an error when the candidate cannot be written.
+    pub fn stage_config_by(
+        &mut self,
+        source: &str,
+        base_dir: &Path,
+        actor: &str,
+    ) -> Result<u64, String> {
         validate_config_record(source, base_dir)?;
+        if !valid_audit_field(actor, 64) && !actor.is_empty() {
+            return Err("invalid actor".into());
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -257,11 +365,12 @@ impl Store {
             .checked_add(1)
             .ok_or("config revision overflow")?;
         transaction.execute(
-            "INSERT INTO pending_config(singleton, source, base_dir, revision, updated_at)
-             VALUES(1, ?1, ?2, ?3, ?4)
+            "INSERT INTO pending_config(singleton, source, base_dir, revision, updated_at, actor)
+             VALUES(1, ?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(singleton) DO UPDATE SET source=excluded.source,
-             base_dir=excluded.base_dir, revision=excluded.revision, updated_at=excluded.updated_at",
-            params![source, base_dir.to_string_lossy(), revision, now()?],
+             base_dir=excluded.base_dir, revision=excluded.revision, updated_at=excluded.updated_at,
+             actor=excluded.actor",
+            params![source, base_dir.to_string_lossy(), revision, now()?, actor],
         ).map_err(database_error)?;
         transaction.commit().map_err(database_error)?;
         Ok(revision)
@@ -297,6 +406,17 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
+        let proposer: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT source, actor FROM pending_config WHERE singleton = 1 AND revision = ?1",
+                [revision],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(database_error)?;
+        if let Some((source, actor)) = &proposer {
+            record_history(&transaction, revision, source, actor)?;
+        }
         let changed = transaction.execute(
             "INSERT INTO config(singleton, source, base_dir, revision, updated_at)
              SELECT 1, source, base_dir, revision, updated_at FROM pending_config
@@ -551,6 +671,343 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
     }
 
+    /// Read a console setting. Settings never collide with internal metadata.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn setting(&self, key: &str) -> Result<Option<String>, String> {
+        self.metadata(&format!("setting:{key}"))
+    }
+
+    /// Write a console setting.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        self.set_metadata(&format!("setting:{key}"), value)
+    }
+
+    /// Remove a console setting.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn clear_setting(&self, key: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM metadata WHERE key = ?1",
+                [format!("setting:{key}")],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Applied configuration revisions, newest first.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn config_history(&self, limit: u16) -> Result<Vec<ConfigRevision>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT revision, source, applied_at, actor FROM config_history
+                 ORDER BY revision DESC LIMIT ?1",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([limit.clamp(1, 100)], |row| {
+                Ok(ConfigRevision {
+                    revision: row.get(0)?,
+                    source: row.get(1)?,
+                    applied_at: row.get(2)?,
+                    actor: row.get(3)?,
+                })
+            })
+            .map_err(database_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
+    }
+
+    /// Number of console accounts.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn user_count(&self) -> Result<u64, String> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+            .map_err(database_error)
+    }
+
+    /// Create the first administrator. Fails once any account exists.
+    ///
+    /// # Errors
+    /// Returns an error when an account exists or the name is invalid.
+    pub fn create_first_admin(&mut self, name: &str, record: &str) -> Result<User, String> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let count: u64 = transaction
+            .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+            .map_err(database_error)?;
+        if count != 0 {
+            return Err("setup is already complete".into());
+        }
+        let user = insert_user(&transaction, name, Role::Admin, record, false)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(user)
+    }
+
+    /// Create an account with a stored password record.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid or duplicate name.
+    pub fn create_user(
+        &mut self,
+        name: &str,
+        role: Role,
+        record: &str,
+        must_change: bool,
+    ) -> Result<User, String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        let user = insert_user(&transaction, name, role, record, must_change)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(user)
+    }
+
+    /// All accounts in name order.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn users(&self) -> Result<Vec<User>, String> {
+        let mut statement = self
+            .connection
+            .prepare(&format!("{USER_COLUMNS} ORDER BY name"))
+            .map_err(database_error)?;
+        let rows = statement.query_map([], read_user).map_err(database_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
+    }
+
+    /// An account and its stored password record.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn user_with_record(&self, name: &str) -> Result<Option<(User, String)>, String> {
+        self.connection
+            .query_row(
+                "SELECT id, name, role, must_change, created_at, last_login, password
+                 FROM users WHERE name = ?1",
+                [name],
+                |row| Ok((read_user(row)?, row.get::<_, String>(6)?)),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
+    /// Change a role. The last administrator cannot be demoted.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown account or when no administrator would remain.
+    pub fn set_role(&mut self, name: &str, role: Role) -> Result<(), String> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        if role != Role::Admin && last_admin(&transaction, name)? {
+            return Err("there must be at least one administrator".into());
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE users SET role = ?1 WHERE name = ?2",
+                params![role.as_str(), name],
+            )
+            .map_err(database_error)?;
+        if changed == 0 {
+            return Err("unknown user".into());
+        }
+        transaction.commit().map_err(database_error)
+    }
+
+    /// Replace a password record and end all of that account's sessions.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn set_password(
+        &mut self,
+        name: &str,
+        record: &str,
+        must_change: bool,
+    ) -> Result<bool, String> {
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        let changed = transaction
+            .execute(
+                "UPDATE users SET password = ?1, must_change = ?2 WHERE name = ?3",
+                params![record, must_change, name],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE name = ?1)",
+                [name],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(changed != 0)
+    }
+
+    /// Delete an account and its sessions. The last administrator is protected.
+    ///
+    /// # Errors
+    /// Returns an error when no administrator would remain.
+    pub fn delete_user(&mut self, name: &str) -> Result<bool, String> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        if last_admin(&transaction, name)? {
+            return Err("there must be at least one administrator".into());
+        }
+        transaction
+            .execute(
+                "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE name = ?1)",
+                [name],
+            )
+            .map_err(database_error)?;
+        let changed = transaction
+            .execute("DELETE FROM users WHERE name = ?1", [name])
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(changed != 0)
+    }
+
+    /// Remember a successful sign-in.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn record_login(&self, id: i64) -> Result<(), String> {
+        self.connection
+            .execute(
+                "UPDATE users SET last_login = ?1 WHERE id = ?2",
+                params![now()?, id],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Store a new session by the hash of its secret.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn create_session(
+        &self,
+        user_id: i64,
+        token_hash: &str,
+        csrf: &str,
+        peer: &str,
+    ) -> Result<(), String> {
+        let now = now()?;
+        self.connection
+            .execute(
+                "INSERT INTO sessions(token_hash, user_id, csrf, created_at, last_seen, peer)
+                 VALUES(?1, ?2, ?3, ?4, ?4, ?5)",
+                params![token_hash, user_id, csrf, now, peer],
+            )
+            .map_err(database_error)?;
+        self.connection
+            .execute(
+                "DELETE FROM sessions WHERE user_id = ?1 AND token_hash NOT IN
+                 (SELECT token_hash FROM sessions WHERE user_id = ?1 ORDER BY last_seen DESC LIMIT 20)",
+                [user_id],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Look up a live session. Expired sessions are deleted.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn session(
+        &self,
+        token_hash: &str,
+        idle_secs: u64,
+        max_secs: u64,
+    ) -> Result<Option<Session>, String> {
+        let now = now()?;
+        let found: Option<(User, String, u64, u64)> = self
+            .connection
+            .query_row(
+                "SELECT u.id, u.name, u.role, u.must_change, u.created_at, u.last_login,
+                        s.csrf, s.created_at, s.last_seen
+                 FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?1",
+                [token_hash],
+                |row| {
+                    Ok((
+                        read_user(row)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, u64>(7)?,
+                        row.get::<_, u64>(8)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(database_error)?;
+        let Some((user, csrf, created, seen)) = found else {
+            return Ok(None);
+        };
+        if now.saturating_sub(seen) > idle_secs || now.saturating_sub(created) > max_secs {
+            self.delete_session(token_hash)?;
+            return Ok(None);
+        }
+        if now.saturating_sub(seen) >= 15 {
+            self.connection
+                .execute(
+                    "UPDATE sessions SET last_seen = ?1 WHERE token_hash = ?2",
+                    params![now, token_hash],
+                )
+                .map_err(database_error)?;
+        }
+        Ok(Some(Session { user, csrf }))
+    }
+
+    /// End one session.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn delete_session(&self, token_hash: &str) -> Result<(), String> {
+        self.connection
+            .execute("DELETE FROM sessions WHERE token_hash = ?1", [token_hash])
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// End every session of an account except an optional one to keep.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn delete_user_sessions(&self, user_id: i64, keep: Option<&str>) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM sessions WHERE user_id = ?1 AND token_hash <> ?2",
+                params![user_id, keep.unwrap_or("")],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    /// Delete sessions past their idle or absolute lifetime.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn purge_sessions(&self, idle_secs: u64, max_secs: u64) -> Result<(), String> {
+        let now = now()?;
+        self.connection
+            .execute(
+                "DELETE FROM sessions WHERE ?1 - last_seen > ?2 OR ?1 - created_at > ?3",
+                params![now, idle_secs, max_secs],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
     fn metadata(&self, key: &str) -> Result<Option<String>, String> {
         self.connection
             .query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| {
@@ -570,6 +1027,109 @@ impl Store {
             .map_err(database_error)?;
         Ok(())
     }
+}
+
+const USER_COLUMNS: &str = "SELECT id, name, role, must_change, created_at, last_login FROM users";
+
+fn read_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
+    let role: String = row.get(2)?;
+    Ok(User {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        role: Role::parse(&role).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        must_change: row.get::<_, i64>(3)? != 0,
+        created_at: row.get(4)?,
+        last_login: row.get(5)?,
+    })
+}
+
+fn valid_username(name: &str) -> bool {
+    let mut chars = name.chars();
+    (3..=32).contains(&name.len())
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
+fn insert_user(
+    connection: &Connection,
+    name: &str,
+    role: Role,
+    record: &str,
+    must_change: bool,
+) -> Result<User, String> {
+    if !valid_username(name) {
+        return Err("username must be 3-32 lowercase letters, digits, dot, dash or underscore, starting with a letter".into());
+    }
+    if !record.starts_with("pbkdf2-sha256$") {
+        return Err("invalid password record".into());
+    }
+    let created = now()?;
+    connection
+        .execute(
+            "INSERT INTO users(name, role, password, must_change, created_at) VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![name, role.as_str(), record, must_change, created],
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::SqliteFailure(failure, _)
+                if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                "that username is taken".to_owned()
+            }
+            other => database_error(other),
+        })?;
+    Ok(User {
+        id: connection.last_insert_rowid(),
+        name: name.to_owned(),
+        role,
+        must_change,
+        created_at: created,
+        last_login: None,
+    })
+}
+
+/// True when removing or demoting `name` would leave no administrator.
+fn last_admin(connection: &Connection, name: &str) -> Result<bool, String> {
+    let admins: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(database_error)?;
+    let is_admin: bool = connection
+        .query_row(
+            "SELECT role = 'admin' FROM users WHERE name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database_error)?
+        .unwrap_or(false);
+    Ok(is_admin && admins <= 1)
+}
+
+fn record_history(
+    connection: &Connection,
+    revision: u64,
+    source: &str,
+    actor: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO config_history(revision, source, applied_at, actor)
+             VALUES(?1, ?2, ?3, ?4)",
+            params![revision, source, now()?, actor],
+        )
+        .map_err(database_error)?;
+    connection
+        .execute(
+            "DELETE FROM config_history WHERE revision NOT IN
+             (SELECT revision FROM config_history ORDER BY revision DESC LIMIT 50)",
+            [],
+        )
+        .map_err(database_error)?;
+    Ok(())
 }
 
 fn write_device(connection: &Connection, device: &Device) -> Result<(), String> {
@@ -728,5 +1288,112 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn accounts_sessions_and_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.db");
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(store.user_count().unwrap(), 0);
+        let record = "pbkdf2-sha256$1$aa$bb";
+        let admin = store.create_first_admin("admin", record).unwrap();
+        assert_eq!(admin.role, Role::Admin);
+        assert!(store.create_first_admin("other", record).is_err());
+        assert!(
+            store
+                .create_user("Bad Name", Role::User, record, false)
+                .is_err()
+        );
+        let anna = store.create_user("anna", Role::User, record, true).unwrap();
+        assert!(anna.must_change);
+        assert!(
+            store
+                .create_user("anna", Role::User, record, false)
+                .unwrap_err()
+                .contains("taken")
+        );
+        assert_eq!(store.users().unwrap().len(), 2);
+        assert!(
+            store
+                .set_role("admin", Role::User)
+                .unwrap_err()
+                .contains("administrator")
+        );
+        assert!(
+            store
+                .delete_user("admin")
+                .unwrap_err()
+                .contains("administrator")
+        );
+        store.set_role("anna", Role::Admin).unwrap();
+        store.set_role("admin", Role::User).unwrap();
+        store.set_role("admin", Role::Admin).unwrap();
+
+        store
+            .create_session(anna.id, "hash-a", "csrf-a", "127.0.0.1")
+            .unwrap();
+        let session = store.session("hash-a", 60, 3600).unwrap().unwrap();
+        assert_eq!(
+            (session.user.name.as_str(), session.csrf.as_str()),
+            ("anna", "csrf-a")
+        );
+        assert!(store.session("missing", 60, 3600).unwrap().is_none());
+        store
+            .set_password("anna", "pbkdf2-sha256$1$cc$dd", false)
+            .unwrap();
+        assert!(store.session("hash-a", 60, 3600).unwrap().is_none());
+        assert_eq!(
+            store.user_with_record("anna").unwrap().unwrap().1,
+            "pbkdf2-sha256$1$cc$dd"
+        );
+        assert!(store.delete_user("anna").unwrap());
+        assert!(store.user_with_record("anna").unwrap().is_none());
+
+        store.set_setting("session_idle_minutes", "45").unwrap();
+        assert_eq!(
+            store.setting("session_idle_minutes").unwrap().as_deref(),
+            Some("45")
+        );
+        assert_eq!(store.setting("daemon_status").unwrap(), None);
+        store.clear_setting("session_idle_minutes").unwrap();
+        assert_eq!(store.setting("session_idle_minutes").unwrap(), None);
+
+        store
+            .set_config("schema_version = 1\n", directory.path())
+            .unwrap();
+        let staged = store
+            .stage_config_by("schema_version = 1\n# second\n", directory.path(), "admin")
+            .unwrap();
+        assert!(store.promote_staged_config(staged).unwrap());
+        let history = store.config_history(10).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            (history[0].revision, history[0].actor.as_str()),
+            (staged, "admin")
+        );
+    }
+
+    #[test]
+    fn schema_three_upgrades_to_four() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.db");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(
+                "CREATE TABLE config (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), source TEXT NOT NULL, base_dir TEXT NOT NULL, revision INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+                 CREATE TABLE devices (id TEXT PRIMARY KEY, addresses TEXT NOT NULL, profile TEXT, group_id TEXT);
+                 CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE pending_config (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), source TEXT NOT NULL, base_dir TEXT NOT NULL, revision INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+                 CREATE TABLE commands (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, created_at INTEGER NOT NULL, payload INTEGER);
+                 CREATE TABLE audit_events (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL, actor TEXT NOT NULL, role TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, outcome TEXT NOT NULL, peer TEXT NOT NULL);
+                 INSERT INTO config VALUES(1, 'schema_version = 1', '/tmp', 7, 1000);
+                 PRAGMA user_version = 3;",
+            ).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.config().unwrap().unwrap().revision, 7);
+        assert_eq!(store.config_history(5).unwrap()[0].revision, 7);
+        assert_eq!(store.user_count().unwrap(), 0);
     }
 }
