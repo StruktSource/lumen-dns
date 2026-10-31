@@ -93,6 +93,26 @@ const RANK = { user: 1, admin: 2 };
 L.can = r => !!L.session && RANK[L.session.role] >= RANK[r];
 L.ROLE_LABEL = { admin: 'Administrator', user: 'User' };
 
+/* ---------- provider presets ---------- */
+/* How many upstreams the selected presets expand to. The daemon allows at most 8. */
+const DEFAULT_PRIORITY = ['quic', 'https', 'tls'];
+L.providerUpstreams = providers => {
+  let n = 0;
+  for (const sel of providers) {
+    const p = L.S.providers.find(x => x.id === sel.id); if (!p) continue;
+    const protos = sel.protocol === 'auto' ? (sel.transport_priority && sel.transport_priority.length ? sel.transport_priority : DEFAULT_PRIORITY) : [sel.protocol];
+    for (const t of protos) { const e = p.endpoints[t]; if (e) n += sel.address_family === 'ipv4' ? e.ipv4 : sel.address_family === 'ipv6' ? e.ipv6 : e.ipv4 + e.ipv6; }
+  }
+  return n;
+};
+/* Pick the broadest setting for a new preset that still fits the limit. */
+L.fitProvider = (providers, p) => {
+  const supported = DEFAULT_PRIORITY.filter(t => p.transports.includes(t));
+  const tries = [['any', supported], ['ipv4', supported], ['any', supported.filter(t => t !== 'quic')], ['ipv4', supported.filter(t => t !== 'quic')], ['ipv4', supported.slice(0, 1)]];
+  for (const [family, priority] of tries) { const sel = { id: p.id, protocol: 'auto', address_family: family, transport_priority: priority }; if (priority.length && L.providerUpstreams([...providers, sel]) <= 8) return sel; }
+  return { id: p.id, protocol: 'auto', address_family: 'ipv4', transport_priority: supported.slice(0, 1) };
+};
+
 /* ---------- config model ---------- */
 /* The server returns the effective config (the daemon's own defaults filled in). Nulls become empty strings for form fields. */
 const NULL_STRINGS = [['metrics'], ['listen', 'certificate'], ['listen', 'private_key'], ['web', 'certificate'], ['web', 'private_key'], ['filtering', 'default_profile'], ['resolver', 'root_hints'], ['resolver', 'trust_anchor'], ['resolver', 'upstream_ca']];
@@ -109,6 +129,7 @@ L.toServer = cfg => {
   blank(c.filtering, 'default_profile'); ['root_hints', 'trust_anchor', 'upstream_ca'].forEach(k => blank(c.resolver, k));
   for (const l of c.filtering.lists) for (const k of ['category', 'url', 'path', 'text']) blank(l, k);
   const a = c.filtering.action; if (a.kind === 'address') { blank(a, 'ipv4'); blank(a, 'ipv6'); } else { delete a.ipv4; delete a.ipv6; } if (a.kind !== 'cname') delete a.target;
+  for (const sel of c.resolver.providers) { if (sel.protocol !== 'auto') { delete sel.transport_priority; delete sel.encryption; } else delete sel.encryption; }
   if (c.resolver.mode === 'forward') { c.resolver.warm.enabled = false; c.resolver.prefetch.enabled = false; c.resolver.fallback.enabled = false; c.resolver.hedge_ms = 0; }
   return { config: c };
 };
@@ -216,6 +237,7 @@ L.validate = cfg => {
   if (cfg.web.https.length && !(cfg.web.certificate && cfg.web.private_key)) bad('web.certificate', 'HTTPS needs certificate and private_key');
   if (r.mode === 'forward') { if (!r.upstreams.length && !r.providers.length) bad('resolver.upstreams', 'forward mode needs 1–8 upstreams or a provider'); if (r.upstreams.length && r.providers.length) bad('resolver.providers', 'cannot mix providers with custom upstreams'); if (r.upstreams.length > 8) bad('resolver.upstreams', 'at most 8'); }
   else { if (r.upstreams.length) bad('resolver.upstreams', 'rejected in recursive mode'); if (r.providers.length) bad('resolver.providers', 'rejected in recursive mode'); }
+  if (r.mode === 'forward' && r.providers.length) { const n = L.providerUpstreams(r.providers); if (n > 8) bad('resolver.providers', `the selected providers expand to ${n} upstreams but 8 is the most. Choose IPv4 only, fewer providers, or a single protocol`); }
   r.upstreams.forEach((u, i) => { if (!L.v.socket(u.address)) bad(`resolver.upstreams[${i}]`, 'address must be an explicit IP:port'); if (['tls', 'https', 'quic'].includes(u.protocol) && !u.server_name) bad(`resolver.upstreams[${i}]`, 'encrypted protocols need server_name'); });
   const f = r.fallback; if (f.enabled) { if (r.mode !== 'recursive') bad('resolver.fallback', 'recursive mode only'); if (!f.upstreams.length || f.upstreams.length > 8) bad('resolver.fallback.upstreams', 'enabled fallback needs 1–8 upstreams'); if (f.recursive_timeout_ms + f.timeout_ms > cfg.limits.query_timeout_ms) bad('resolver.fallback', 'recursive_timeout_ms + timeout_ms must not exceed limits.query_timeout_ms'); }
   if (!(r.hedge_ms === 0 || (r.hedge_ms >= 100 && r.hedge_ms <= 5000))) bad('resolver.hedge_ms', 'must be 0 or 100–5000'); if (r.hedge_ms && r.mode !== 'recursive') bad('resolver.hedge_ms', 'recursive mode only');

@@ -1330,17 +1330,39 @@ fn providers_json() -> Reply {
         .providers
         .iter()
         .map(|p| {
+            let supported = |t: &&lumen_config::providers::Transport| {
+                snake(&format!("{:?}", t.availability)) == "supported"
+            };
             let transports: Vec<String> = p
                 .transports
                 .iter()
-                .filter(|t| snake(&format!("{:?}", t.availability)) == "supported")
+                .filter(supported)
                 .map(|t| snake(&format!("{:?}", t.protocol)))
+                .collect();
+            // Addresses each transport would add, by family, so the console can
+            // keep a selection within the 8-upstream limit.
+            let endpoints: serde_json::Map<String, Value> = p
+                .transports
+                .iter()
+                .filter(supported)
+                .map(|t| {
+                    let ips: Vec<IpAddr> = if t.bootstrap_ips.is_empty() {
+                        p.ipv4.iter().chain(p.ipv6.iter()).copied().collect()
+                    } else {
+                        t.bootstrap_ips.clone()
+                    };
+                    let v4 = ips.iter().filter(|ip| ip.is_ipv4()).count();
+                    (
+                        snake(&format!("{:?}", t.protocol)),
+                        json!({ "ipv4": v4, "ipv6": ips.len() - v4 }),
+                    )
+                })
                 .collect();
             json!({
                 "id": p.id, "name": p.name, "country": p.operator_country,
                 "scope": snake(&format!("{:?}", p.network_scope)),
                 "filter": snake(&format!("{:?}", p.filter_variant)),
-                "transports": transports,
+                "transports": transports, "endpoints": endpoints,
             })
         })
         .collect();
