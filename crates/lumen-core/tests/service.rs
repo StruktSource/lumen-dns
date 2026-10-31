@@ -980,21 +980,21 @@ async fn filtering_precedes_shared_cache_updates_and_rollback() {
     );
     assert_eq!(fixture.queries.load(Ordering::Relaxed), count);
     std::fs::write(&path, "ok.example").unwrap();
-    server.filter.refresh().await.unwrap();
+    server.refresh_filter().await.unwrap();
     let blocked = udp(v4, &packet).await;
     assert_eq!(blocked.metadata.response_code, ResponseCode::NXDomain);
     assert!(!blocked.metadata.authentic_data);
     assert_eq!(fixture.queries.load(Ordering::Relaxed), count);
     std::fs::write(&path, "https://bad.example").unwrap();
-    assert!(server.filter.refresh().await.is_err());
+    assert!(server.refresh_filter().await.is_err());
     assert_eq!(
         udp(v4, &packet).await.metadata.response_code,
         ResponseCode::NXDomain
     );
-    server.filter.rollback().await.unwrap();
+    server.rollback_filter().await.unwrap();
     assert!(!udp(v4, &packet).await.answers.is_empty());
     assert_eq!(fixture.queries.load(Ordering::Relaxed), count);
-    assert!(!server.filter.refresh_due().await.unwrap());
+    assert!(!server.refresh_filter_due().await.unwrap());
     server.shutdown().await;
 }
 

@@ -142,7 +142,7 @@ listed zones, never client data. Failures are counted and otherwise ignored.
 | Field | Default | Bounds | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `false` | | Must be set explicitly |
-| `min_hits` | `2` | 1–100 | Lookups needed during one cache lifetime |
+| `min_hits` | `2` | 1–100 | Cache hits after the initial fill needed during one cache lifetime |
 | `max_tracked` | `1024` | 16–8192 | Names tracked at once; least recently seen is dropped |
 | `max_concurrent` | `4` | 1–16 | Refreshes running at the same time |
 | `budget_per_minute` | `240` | 1–6000 | Refreshes started in any minute |

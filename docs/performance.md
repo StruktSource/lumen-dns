@@ -44,7 +44,10 @@ What the data supports:
   The pooled Mann–Whitney p = 0.006 is not used as evidence for the reason above.
 - **Priming:** all 26 priming queries succeeded in 11 of 12 candidate trials. In
   trial 5 every one failed (network or server trouble at that moment), so that trial
-  ran without priming. It is kept in the analysis.
+  ran without priming. It is kept in the analysis. A deterministic offline
+  three-authority hierarchy with fixed per-hop delay also verifies that priming
+  reduces both authority round trips and elapsed time for a cold leaf name. This
+  regression proves the mechanism, not a production-network latency claim.
 - **Slow tail unchanged.** About 3% of cold queries time out in both variants. They
   concentrate on a few domains (openbsd.org, videolan.org, torproject.org) whose
   authoritative servers do not answer. Hickory's recursor fixes its per-attempt

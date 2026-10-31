@@ -739,6 +739,22 @@ async fn disabled_prefetch_tracks_nothing() {
     assert!(accel.hot.lock().unwrap().entries.is_empty());
 }
 
+#[test]
+fn filter_change_clears_prefetch_candidates() {
+    let accel = hot_accel(Prefetch {
+        enabled: true,
+        ..Prefetch::default()
+    });
+    let key = (www_example(), RecordType::A, false);
+    accel.touch(&key);
+    accel.schedule(&key, &answer_with_ttl(60));
+    assert!(!accel.hot.lock().unwrap().entries.is_empty());
+
+    accel.clear_prefetch();
+
+    assert!(accel.hot.lock().unwrap().entries.is_empty());
+}
+
 #[tokio::test]
 async fn warm_primes_listed_zones_once_and_uses_no_client_data() {
     let (mut tasks, provider, hits) = hierarchy(Duration::ZERO).await;
@@ -765,6 +781,80 @@ async fn warm_primes_listed_zones_once_and_uses_no_client_data() {
     tasks.abort_all();
 }
 
+#[tokio::test]
+async fn priming_reduces_cold_name_round_trips_in_controlled_hierarchy() {
+    let delay = Duration::from_millis(30);
+    let (mut baseline_tasks, provider, baseline_hits) = hierarchy(delay).await;
+    let baseline_accel = Accel::new(Arc::default(), Prefetch::default());
+    let baseline_recursor = test_recursor(provider);
+    let baseline_started = Instant::now();
+    baseline_accel
+        .resolve(
+            &baseline_recursor,
+            &www_example(),
+            RecordType::A,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    let baseline_elapsed = baseline_started.elapsed();
+    let baseline_round_trips = baseline_hits.load(Ordering::Relaxed);
+    baseline_tasks.abort_all();
+
+    let (mut candidate_tasks, provider, candidate_hits) = hierarchy(delay).await;
+    let metrics = Arc::new(Metrics::default());
+    let candidate_accel = Arc::new(Accel::new(Arc::clone(&metrics), Prefetch::default()));
+    let candidate_recursor = test_recursor(provider);
+    candidate_accel.start(
+        &candidate_recursor,
+        &Warm {
+            enabled: true,
+            zones: vec!["test".into(), "example.test".into()],
+        },
+    );
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if metrics.warm_queries.load(Ordering::Relaxed) == 6
+                && !lock_flights_busy(&candidate_accel)
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if !lock_flights_busy(&candidate_accel) {
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("priming must finish");
+    candidate_hits.store(0, Ordering::Relaxed);
+    let candidate_started = Instant::now();
+    candidate_accel
+        .resolve(
+            &candidate_recursor,
+            &www_example(),
+            RecordType::A,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    let candidate_elapsed = candidate_started.elapsed();
+    let candidate_round_trips = candidate_hits.load(Ordering::Relaxed);
+
+    assert!(
+        candidate_round_trips < baseline_round_trips,
+        "primed cold name must need fewer authority round trips: {candidate_round_trips} vs {baseline_round_trips}"
+    );
+    assert!(
+        candidate_elapsed < baseline_elapsed,
+        "primed cold name must be faster under fixed per-hop delay: {candidate_elapsed:?} vs {baseline_elapsed:?}"
+    );
+    candidate_accel.stop();
+    candidate_tasks.abort_all();
+}
+
 fn lock_flights_busy(accel: &Accel) -> bool {
     !lock_flights_empty(accel)
 }
@@ -772,16 +862,20 @@ fn lock_flights_busy(accel: &Accel) -> bool {
 #[test]
 fn latency_histogram_is_cumulative_and_fixed_cardinality() {
     let metrics = Metrics::default();
-    metrics.observe(Duration::from_micros(400));
-    metrics.observe(Duration::from_millis(30));
-    metrics.observe(Duration::from_secs(9));
+    metrics.observe(Duration::from_micros(400), false);
+    metrics.observe(Duration::from_millis(30), false);
+    metrics.observe(Duration::from_secs(9), false);
+    metrics.observe(Duration::from_millis(20), true);
     let text = metrics.render();
     let name = "lumen_dns_recursive_lookup_duration_seconds";
     assert!(text.contains(&format!("{name}_bucket{{le=\"0.001\"}} 1\n")));
     assert!(text.contains(&format!("{name}_bucket{{le=\"0.05\"}} 2\n")));
     assert!(text.contains(&format!("{name}_bucket{{le=\"+Inf\"}} 3\n")));
     assert!(text.contains(&format!("{name}_count 3\n")));
-    assert_eq!(text.matches("_bucket{").count(), 11);
+    let background = "lumen_dns_recursive_background_duration_seconds";
+    assert!(text.contains(&format!("{background}_bucket{{le=\"0.02\"}} 1\n")));
+    assert!(text.contains(&format!("{background}_count 1\n")));
+    assert_eq!(text.matches("_bucket{").count(), 22);
 }
 
 #[tokio::test]

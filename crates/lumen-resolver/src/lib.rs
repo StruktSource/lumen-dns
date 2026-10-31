@@ -77,7 +77,6 @@ pub struct Metrics {
     successes: AtomicU64,
     failures: AtomicU64,
     timeout_triggers: AtomicU64,
-    lookups: AtomicU64,
     coalesced: AtomicU64,
     hedged: AtomicU64,
     prefetch_refreshes: AtomicU64,
@@ -87,18 +86,27 @@ pub struct Metrics {
     warm_failures: AtomicU64,
     latency: [AtomicU64; 11],
     latency_sum_micros: AtomicU64,
+    background_latency: [AtomicU64; 11],
+    background_latency_sum_micros: AtomicU64,
 }
 
 impl Metrics {
-    fn observe(&self, elapsed: Duration) {
+    fn observe(&self, elapsed: Duration, background: bool) {
         let seconds = elapsed.as_secs_f64();
         let slot = LATENCY_BOUNDS
             .iter()
             .position(|bound| seconds <= *bound)
             .unwrap_or(LATENCY_BOUNDS.len());
-        self.latency[slot].fetch_add(1, Ordering::Relaxed);
-        self.lookups.fetch_add(1, Ordering::Relaxed);
-        self.latency_sum_micros.fetch_add(
+        let (latency, sum) = if background {
+            (
+                &self.background_latency,
+                &self.background_latency_sum_micros,
+            )
+        } else {
+            (&self.latency, &self.latency_sum_micros)
+        };
+        latency[slot].fetch_add(1, Ordering::Relaxed);
+        sum.fetch_add(
             u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
@@ -171,24 +179,43 @@ impl Metrics {
                 value.load(Ordering::Relaxed)
             );
         }
-        let name = "lumen_dns_recursive_lookup_duration_seconds";
-        let _ = writeln!(
-            text,
-            "# HELP {name} Time to answer a recursive lookup, including cache hits.\n# TYPE {name} histogram"
+        render_histogram(
+            &mut text,
+            "lumen_dns_recursive_lookup_duration_seconds",
+            "Time to answer a client recursive lookup, including cache hits.",
+            &self.latency,
+            &self.latency_sum_micros,
         );
-        let mut total = 0;
-        for (slot, count) in self.latency.iter().enumerate() {
-            total += count.load(Ordering::Relaxed);
-            let bound = LATENCY_BOUNDS
-                .get(slot)
-                .map_or_else(|| "+Inf".to_owned(), ToString::to_string);
-            let _ = writeln!(text, "{name}_bucket{{le=\"{bound}\"}} {total}");
-        }
-        #[allow(clippy::cast_precision_loss)]
-        let sum = self.latency_sum_micros.load(Ordering::Relaxed) as f64 / 1e6;
-        let _ = writeln!(text, "{name}_sum {sum}\n{name}_count {total}");
+        render_histogram(
+            &mut text,
+            "lumen_dns_recursive_background_duration_seconds",
+            "Time to run a recursive startup-prime or expiry-refresh lookup.",
+            &self.background_latency,
+            &self.background_latency_sum_micros,
+        );
         text
     }
+}
+
+fn render_histogram(
+    text: &mut String,
+    name: &str,
+    help: &str,
+    latency: &[AtomicU64; 11],
+    sum_micros: &AtomicU64,
+) {
+    let _ = writeln!(text, "# HELP {name} {help}\n# TYPE {name} histogram");
+    let mut total = 0;
+    for (slot, count) in latency.iter().enumerate() {
+        total += count.load(Ordering::Relaxed);
+        let bound = LATENCY_BOUNDS
+            .get(slot)
+            .map_or_else(|| "+Inf".to_owned(), ToString::to_string);
+        let _ = writeln!(text, "{name}_bucket{{le=\"{bound}\"}} {total}");
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let sum = sum_micros.load(Ordering::Relaxed) as f64 / 1e6;
+    let _ = writeln!(text, "{name}_sum {sum}\n{name}_count {total}");
 }
 
 impl Resolver {
@@ -249,6 +276,13 @@ impl Resolver {
     pub fn start_background(&self) {
         if let Some(background) = &self.background {
             (background.start)();
+        }
+    }
+
+    /// Forget names selected for expiry refresh after filtering policy changes.
+    pub fn clear_prefetch(&self) {
+        if let Some(background) = &self.background {
+            background.accel.clear_prefetch();
         }
     }
 

@@ -25,6 +25,7 @@ use tokio_rustls::TlsAcceptor;
 /// Bound service. Dropping it aborts all listener and child tasks.
 pub struct RunningServer {
     tasks: JoinSet<io::Result<()>>,
+    service: Arc<Service>,
     pub endpoints: Vec<(Transport, SocketAddr)>,
     pub metrics: Arc<Metrics>,
     pub filter: Arc<lumen_filter::Filter>,
@@ -131,12 +132,12 @@ impl RunningServer {
         }
         #[cfg(unix)]
         {
-            let control = Arc::clone(&filter);
+            let control = Arc::clone(&service);
             tasks.spawn(async move {
                 loop {
                     let result = tokio::select! {
-                        _ = refresh_signal.recv() => control.refresh().await,
-                        _ = rollback_signal.recv() => control.rollback().await,
+                        _ = refresh_signal.recv() => refresh_filter(&control).await,
+                        _ = rollback_signal.recv() => rollback_filter(&control).await,
                     };
                     if result.is_err() {
                         eprintln!("filter control failed; keeping live rules");
@@ -146,11 +147,11 @@ impl RunningServer {
                 }
             });
         }
-        let refreshing = Arc::clone(&filter);
+        let refreshing = Arc::clone(&service);
         tasks.spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
-                if refreshing.refresh_due().await.is_err() {
+                if refresh_filter_due(&refreshing).await.is_err() {
                     eprintln!("filter refresh failed; keeping previous rules");
                 }
             }
@@ -165,6 +166,7 @@ impl RunningServer {
         }
         Ok(Self {
             tasks,
+            service,
             endpoints,
             metrics,
             filter,
@@ -209,6 +211,50 @@ impl RunningServer {
         self.tasks.abort_all();
         while self.tasks.join_next().await.is_some() {}
     }
+
+    /// Refresh filtering rules and discard prefetch candidates selected under old rules.
+    ///
+    /// # Errors
+    /// Returns a source or validation error while keeping the current rules live.
+    pub async fn refresh_filter(&self) -> Result<(), String> {
+        refresh_filter(&self.service).await
+    }
+
+    /// Roll filtering rules back and discard prefetch candidates selected under old rules.
+    ///
+    /// # Errors
+    /// Returns an error when no valid previous generation is available.
+    pub async fn rollback_filter(&self) -> Result<(), String> {
+        rollback_filter(&self.service).await
+    }
+
+    /// Refresh due filtering lists and discard stale prefetch candidates when rules change.
+    ///
+    /// # Errors
+    /// Returns a source or validation error while keeping the current rules live.
+    pub async fn refresh_filter_due(&self) -> Result<bool, String> {
+        refresh_filter_due(&self.service).await
+    }
+}
+
+async fn refresh_filter(service: &Service) -> Result<(), String> {
+    service.filter.refresh().await?;
+    service.resolver.clear_prefetch();
+    Ok(())
+}
+
+async fn rollback_filter(service: &Service) -> Result<(), String> {
+    service.filter.rollback().await?;
+    service.resolver.clear_prefetch();
+    Ok(())
+}
+
+async fn refresh_filter_due(service: &Service) -> Result<bool, String> {
+    let changed = service.filter.refresh_due().await?;
+    if changed {
+        service.resolver.clear_prefetch();
+    }
+    Ok(changed)
 }
 
 type Credentials = (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>);
