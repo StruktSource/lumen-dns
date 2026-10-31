@@ -51,15 +51,16 @@ L.loadPage = async page => { await Promise.all((NEEDS[page] ? NEEDS[page]() : []
 
 /* After a config change the daemon restarts listeners; this console may be unreachable for a moment. */
 L.waitForConfig = async revision => {
-  const until = Date.now() + 30000; let lastError = null;
+  const started = Date.now(), until = started + 300000; let lastError = null, told = false;
   while (Date.now() < until) {
     await new Promise(r => setTimeout(r, 800));
+    if (!told && Date.now() - started > 15000) { told = true; L.toast('Still applying. Lumen is downloading and checking your filter lists; DNS keeps working meanwhile. Large lists can take a minute or two.'); }
     try {
       const s = await L.api('GET', '/api/status'); lastError = s.last_error;
       if (s.revision >= revision) return { ok: true };
       if (s.pending_revision == null && s.revision < revision) return { ok: false, error: s.last_error ? `Lumen refused the new settings: ${s.last_error}` : null };
     } catch (e) { if (e.status === 401) return { ok: false, error: 'You were signed out. Sign in again to check the result.' }; }
   }
-  return { ok: false, error: lastError || 'The change is still pending. Check the System page.' };
+  return { ok: false, error: lastError || 'The change is still pending after 5 minutes. Check the System page and the daemon log.' };
 };
 })();

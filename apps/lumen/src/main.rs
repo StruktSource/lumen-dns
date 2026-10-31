@@ -3,8 +3,9 @@
 
 use lumen_api::RunningApi;
 use lumen_config::Config;
-use lumen_core::{ConsoleOptions, RunningServer};
+use lumen_core::{ConsoleOptions, Filter, RunningServer};
 use lumen_store::{Command as ControlCommand, Store};
+use std::sync::Arc;
 use std::{
     io,
     net::SocketAddr,
@@ -143,7 +144,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
             .map_err(io::Error::other)?;
     }
     let mut config = managed_config(&mut store, false)?;
-    let mut server = start_managed(config.clone(), state_path).await?;
+    let mut server = start_managed(config.clone(), state_path, None).await?;
     let mut api = match RunningApi::start(config.management.clone(), state_path).await {
         Ok(api) => api,
         Err(error) => {
@@ -206,19 +207,25 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                         let staged = staged_revision.is_some();
                         match managed_config(&mut store, staged) {
                             Ok(next) => {
-                                if let Err(error) = RunningServer::check(&next).await {
-                                    if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
-                                    store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
-                                    continue;
-                                }
+                                // Download and validate everything while DNS is still up, then hand the
+                                // loaded filter to the new server so DNS is down only for the swap.
+                                let prepared = match RunningServer::prepare(&next).await {
+                                    Ok(filter) => filter,
+                                    Err(error) => {
+                                        if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
+                                        store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
+                                        continue;
+                                    }
+                                };
                                 if let Err(error) = RunningApi::check(&next.management) {
                                     if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
                                     store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
                                     continue;
                                 }
+                                let old_filter = Arc::clone(&server.filter);
                                 server.shutdown().await;
                                 shutdown_api(&mut api).await;
-                                match start_managed(next.clone(), state_path).await {
+                                match start_managed(next.clone(), state_path, Some(prepared)).await {
                                     Ok(mut next_server) => {
                                         match RunningApi::start(next.management.clone(), state_path).await {
                                             Ok(next_api) => {
@@ -233,7 +240,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                             Err(error) => {
                                                 next_server.shutdown().await;
                                                 if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
-                                                server = start_managed(config.clone(), state_path).await.map_err(|rollback| io::Error::other(format!("API reload failed: {error}; DNS rollback failed: {rollback}")))?;
+                                                server = start_managed(config.clone(), state_path, Some(Arc::clone(&old_filter))).await.map_err(|rollback| io::Error::other(format!("API reload failed: {error}; DNS rollback failed: {rollback}")))?;
                                                 api = RunningApi::start(config.management.clone(), state_path).await.map_err(|rollback| io::Error::other(format!("API reload failed: {error}; API rollback failed: {rollback}")))?;
                                                 store.set_status("running", Some(&format!("reload failed; prior config restored: {error}"))).map_err(io::Error::other)?;
                                             }
@@ -241,7 +248,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                     }
                                     Err(error) => {
                                         if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
-                                        server = start_managed(config.clone(), state_path).await.map_err(|rollback| {
+                                        server = start_managed(config.clone(), state_path, Some(old_filter)).await.map_err(|rollback| {
                                             io::Error::other(format!("reload failed: {error}; rollback failed: {rollback}"))
                                         })?;
                                         api = RunningApi::start(config.management.clone(), state_path).await.map_err(|rollback| io::Error::other(format!("reload failed: {error}; API rollback failed: {rollback}")))?;
@@ -280,13 +287,18 @@ async fn shutdown_api(api: &mut Option<RunningApi>) {
     }
 }
 
-async fn start_managed(config: Config, state_path: &Path) -> io::Result<RunningServer> {
-    RunningServer::start_with(
+async fn start_managed(
+    config: Config,
+    state_path: &Path,
+    filter: Option<Arc<Filter>>,
+) -> io::Result<RunningServer> {
+    RunningServer::start_prepared(
         config,
         ConsoleOptions {
             state: Some(state_path.to_owned()),
             version: env!("CARGO_PKG_VERSION"),
         },
+        filter,
     )
     .await
 }

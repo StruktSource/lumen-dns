@@ -84,7 +84,9 @@ Formats:
   accepted. Imports become block rules, not address rewrites.
 - `adblock`: `||domain^` blocks; `@@||domain^` allows. URL, cosmetic, modifier,
   and regex syntax is unsupported and counted, never widened to domain rules.
-  Malformed domain-only rules fail the update. Unsupported-only lists fail.
+  Entries that fail domain validation (for example an invalid punycode label) are
+  skipped and counted as unsupported, so one bad name cannot sink a large public list;
+  skipping can only leave a name unblocked. A list with no usable rule fails.
 
 Comments, blank lines, UTF-8 BOM, and duplicates are handled. The parser API
 returns duplicate and unsupported counts. Hosts files may contain localhost
@@ -97,13 +99,20 @@ pinned to the connection to resist rebinding. Bootstrap uses the host's DNS;
 ensure it works before Lumen starts (do not depend solely on this daemon to
 resolve its own list hosts). URL errors do not print URL credentials or tokens.
 
-Limits: 8 MiB per list, 4096 bytes per line, 250000 rules total across sources
+Limits: 64 MiB per list, 4096 bytes per line, 4,000,000 rules total across sources
 and manual tiers; 4096 manual rules per tier; 64 lists, 128 profiles/groups,
 1024 devices (32 addresses each), 256 subnets, 32 schedule windows per profile.
-Downloads have a 30-second outer deadline, 5-second connect timeout, and a
-25-second HTTP deadline. Config remains bounded to 64 KiB. Active, previous,
-and candidate snapshots coexist during updates; OS memory limits are still
-needed for a hard RSS cap.
+Each downloaded attempt has a 90-second deadline (80 seconds of HTTP time) and a
+5-second connect timeout. Transient transport failures are retried up to three times
+with a short backoff. Config remains bounded to 64 KiB.
+
+**Memory.** List rules are kept as sorted 8-byte keys (a 62-bit keyed hash of the
+domain plus allow/exact flags), not as strings. Hagezi Pro (213,000 rules) needs about
+19 MiB in total; Pro, Ultimate and the full threat-intelligence list together (about
+2.4 million rules) need about 150 MiB. The previous generation stays in memory for
+rollback, but lists that did not change are shared between generations. A rule match is
+still reported by name because Lumen walks the query's own suffixes. OS memory limits
+are still needed for a hard RSS cap.
 
 ## Atomic refresh and rollback
 

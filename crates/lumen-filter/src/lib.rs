@@ -8,7 +8,7 @@ pub mod rules;
 pub use response::response;
 
 use config::{Action, Config, Profile, Rules};
-use rules::{ParsedList, Rule};
+use rules::{ParsedList, Rule, domain_hash};
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -140,10 +140,67 @@ impl Index {
     }
 }
 
+/// A rule that decided a query.
+struct Hit {
+    domain: String,
+    exact: bool,
+    allow: bool,
+    list: Option<usize>,
+}
+
+impl Hit {
+    fn from_entry(entry: &Entry) -> Self {
+        Self {
+            domain: entry.rule.domain.clone(),
+            exact: entry.rule.exact,
+            allow: entry.rule.allow,
+            list: entry.list,
+        }
+    }
+}
+
 struct Snapshot {
     lists: Vec<Arc<ParsedList>>,
-    index: Index,
     generation: u64,
+}
+
+impl Snapshot {
+    /// Most specific suffix first; an allow beats blocks at any suffix reached first,
+    /// otherwise the most specific block wins. Same precedence as manual rules.
+    fn find(&self, name: &str, eligible: impl Fn(usize) -> bool) -> Option<Hit> {
+        let mut suffix = name;
+        let mut blocked = None;
+        loop {
+            let hash = domain_hash(suffix);
+            for (list, parsed) in self.lists.iter().enumerate() {
+                if !eligible(list) {
+                    continue;
+                }
+                for key in parsed.lookup(hash) {
+                    if key.exact() && suffix != name {
+                        continue;
+                    }
+                    let hit = Hit {
+                        domain: suffix.to_owned(),
+                        exact: key.exact(),
+                        allow: key.allow(),
+                        list: Some(list),
+                    };
+                    if key.allow() {
+                        return Some(hit);
+                    }
+                    if blocked.is_none() {
+                        blocked = Some(hit);
+                    }
+                }
+            }
+            let Some((_, next)) = suffix.split_once('.') else {
+                break;
+            };
+            suffix = next;
+        }
+        blocked
+    }
 }
 struct State {
     live: Arc<Snapshot>,
@@ -314,11 +371,11 @@ impl Filter {
             generation: live.generation,
         };
         let found = active
-            .and_then(|(i, _)| self.profiles[i].find(name, |_| true))
-            .or_else(|| self.global.find(name, |_| true))
+            .and_then(|(i, _)| self.profiles[i].find(name, |_| true).map(Hit::from_entry))
+            .or_else(|| self.global.find(name, |_| true).map(Hit::from_entry))
             .or_else(|| {
-                live.index.find(name, |list| {
-                    let list = &self.config.lists[list.expect("list index")];
+                live.find(name, |list| {
+                    let list = &self.config.lists[list];
                     match profile {
                         Some(_) if active.is_none() => false,
                         Some((_, p)) => selected(p, list),
@@ -327,11 +384,11 @@ impl Filter {
                 })
             });
         if let Some(entry) = found {
-            decision.blocked = !entry.rule.allow;
+            decision.blocked = !entry.allow;
             decision.rule = Some(format!(
                 "{}{}",
-                if entry.rule.exact { "=" } else { "" },
-                entry.rule.domain
+                if entry.exact { "=" } else { "" },
+                entry.domain
             ));
             if let Some(i) = entry.list {
                 decision.list = Some(self.config.lists[i].id.clone());
@@ -489,17 +546,7 @@ fn compile(
     generation: u64,
 ) -> Result<Snapshot, String> {
     check_rule_budget(config, &lists)?;
-    let mut index = Index::default();
-    for (i, list) in lists.iter().enumerate() {
-        for rule in &list.rules {
-            index.insert(rule.clone(), Some(i));
-        }
-    }
-    Ok(Snapshot {
-        lists,
-        index,
-        generation,
-    })
+    Ok(Snapshot { lists, generation })
 }
 fn check_rule_budget(config: &Config, lists: &[Arc<ParsedList>]) -> Result<(), String> {
     let manual = config.rules.allow.len()
@@ -510,7 +557,10 @@ fn check_rule_budget(config: &Config, lists: &[Arc<ParsedList>]) -> Result<(), S
             .map(|p| p.rules.allow.len() + p.rules.block.len())
             .sum::<usize>();
     if manual + lists.iter().map(|l| l.rules.len()).sum::<usize>() > rules::MAX_RULES {
-        return Err("all filtering rules together exceed 250000".into());
+        return Err(format!(
+            "all filtering rules together exceed {}",
+            rules::MAX_RULES
+        ));
     }
     Ok(())
 }
