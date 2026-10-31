@@ -4,6 +4,20 @@ schema_version = 1
 # Optional local aggregate metrics. Disabled by default.
 # metrics = "127.0.0.1:9153"
 
+# Optional authenticated management API. Requires `lumen --state FILE`.
+# Keep loopback-only. Store only a SHA-256 hash of a random 32+ byte token.
+# [management]
+# listen = "127.0.0.1:9080"
+# requests_per_minute = 60
+# [[management.tokens]]
+# name = "local-admin"
+# role = "admin"
+# sha256 = "replace-with-64-lowercase-hex-characters"
+# [[management.webhooks]]
+# id = "home-assistant"
+# url = "https://home.example/api/webhook/lumen"
+# secret_file = "secrets/home-assistant-webhook.key"
+
 # Local DNS listeners. Change both addresses and allow_clients for LAN use.
 [listen]
 udp = ["127.0.0.1:5353", "[::1]:5353"]

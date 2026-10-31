@@ -21,6 +21,79 @@ pub struct Config {
     pub limits: Limits,
     pub filtering: lumen_filter::config::Config,
     pub metrics: Option<SocketAddr>,
+    pub management: Management,
+}
+
+/// Opt-in local management API. Bearer-token hashes stay in operator config.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Management {
+    pub listen: Option<SocketAddr>,
+    pub tokens: Vec<ApiToken>,
+    pub requests_per_minute: u16,
+    pub webhooks: Vec<Webhook>,
+}
+
+/// Signed outbound audit-event webhook.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Webhook {
+    pub id: String,
+    pub url: String,
+    pub secret_file: PathBuf,
+}
+
+/// One named API principal with a fixed role and SHA-256 token hash.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiToken {
+    pub name: String,
+    pub role: ApiRole,
+    pub sha256: String,
+}
+
+/// Management scopes. Higher roles include lower-role actions.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiRole {
+    Viewer,
+    Operator,
+    Admin,
+}
+
+impl ApiRole {
+    #[must_use]
+    pub const fn permits(self, needed: Self) -> bool {
+        self.rank() >= needed.rank()
+    }
+
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Viewer => 0,
+            Self::Operator => 1,
+            Self::Admin => 2,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Viewer => "viewer",
+            Self::Operator => "operator",
+            Self::Admin => "admin",
+        }
+    }
+}
+
+impl Default for Management {
+    fn default() -> Self {
+        Self {
+            listen: None,
+            tokens: Vec::new(),
+            requests_per_minute: 60,
+            webhooks: Vec::new(),
+        }
+    }
 }
 
 /// Independently enabled listener addresses. Empty arrays disable a transport.
@@ -279,6 +352,11 @@ impl Config {
                 *path = base.join(&*path);
             }
         }
+        for webhook in &mut config.management.webhooks {
+            if webhook.secret_file.is_relative() {
+                webhook.secret_file = base.join(&webhook.secret_file);
+            }
+        }
         config.expand_provider_selections()?;
         config.validate()?;
         Ok(config)
@@ -385,8 +463,54 @@ impl Config {
         {
             return Err("metrics must bind a nonzero loopback port".into());
         }
+        self.validate_management()?;
         self.filtering.validate()?;
         self.validate_resolver()
+    }
+
+    fn validate_management(&self) -> Result<(), String> {
+        let api = &self.management;
+        if api.listen.is_none() {
+            if !api.tokens.is_empty() || !api.webhooks.is_empty() {
+                return Err("management tokens and webhooks require an enabled listener".into());
+            }
+            return Ok(());
+        }
+        let address = api.listen.expect("checked listener");
+        if !address.ip().is_loopback() || address.port() == 0 {
+            return Err("management API must bind a nonzero loopback port".into());
+        }
+        if api.tokens.is_empty() || api.tokens.len() > 16 {
+            return Err("management API needs 1..16 tokens".into());
+        }
+        if !(1..=600).contains(&api.requests_per_minute) {
+            return Err("management requests_per_minute must be in 1..=600".into());
+        }
+        if api.webhooks.len() > 8 {
+            return Err("at most 8 management webhooks are allowed".into());
+        }
+        let mut names = std::collections::HashSet::new();
+        for token in &api.tokens {
+            if !valid_api_name(&token.name)
+                || !names.insert(&token.name)
+                || token.sha256.len() != 64
+                || !token.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("management tokens need unique names and 64-hex SHA-256 hashes".into());
+            }
+        }
+        let mut webhooks = std::collections::HashSet::new();
+        for webhook in &api.webhooks {
+            if !valid_api_name(&webhook.id)
+                || !webhooks.insert(&webhook.id)
+                || webhook.url.len() > 2048
+                || !webhook.url.starts_with("https://")
+                || webhook.url.contains(['#', '@'])
+            {
+                return Err("management webhooks need unique IDs and HTTPS URLs without credentials or fragments".into());
+            }
+        }
+        Ok(())
     }
 
     fn validate_resolver(&self) -> Result<(), String> {
@@ -550,6 +674,14 @@ impl Config {
     }
 }
 
+fn valid_api_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+}
+
 /// Read an operator file without allocating beyond the declared bound.
 ///
 /// # Errors
@@ -685,6 +817,9 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let config = Config::load(&root.join("config/lumen.toml")).unwrap();
         assert!(config.metrics.is_none());
+        assert!(config.management.listen.is_none());
+        assert!(config.management.tokens.is_empty());
+        assert!(config.management.webhooks.is_empty());
         assert_eq!(config.resolver.mode, Mode::Recursive);
         assert!(config.resolver.dnssec);
         assert!(config.resolver.upstreams.is_empty());
@@ -774,5 +909,23 @@ mod tests {
         )
         .unwrap();
         assert!(Config::load(&path).is_err());
+    }
+
+    #[test]
+    fn management_api_is_explicit_local_and_bounded() {
+        let base = Path::new("/operator");
+        let source = "schema_version = 1\n[management]\nlisten = '127.0.0.1:9080'\nrequests_per_minute = 60\n[[management.tokens]]\nname = 'admin'\nrole = 'admin'\nsha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n[[management.webhooks]]\nid = 'home'\nurl = 'https://home.example/hook'\nsecret_file = 'webhook.key'\n";
+        let config = Config::parse(source, base).unwrap();
+        assert_eq!(config.management.tokens.len(), 1);
+        assert_eq!(
+            config.management.webhooks[0].secret_file,
+            base.join("webhook.key")
+        );
+
+        assert!(Config::parse(&source.replace("127.0.0.1", "0.0.0.0"), base).is_err());
+        assert!(
+            Config::parse(&source.replace("[[management.tokens]]", "# no token"), base).is_err()
+        );
+        assert!(Config::parse(&source.replace("https://", "http://"), base).is_err());
     }
 }

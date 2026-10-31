@@ -7,7 +7,8 @@ in a local SQLite database:
 lumen --config /etc/lumen/lumen.toml --state /var/lib/lumen/state.db
 ```
 
-The daemon creates schema 1 and migrates it transactionally to current schema 2.
+The daemon creates schema 1 and migrates it transactionally to current schema 3.
+Schema 3 adds the bounded management audit log.
 It rejects a database created by a newer Lumen version. On Unix, opening the
 database restricts its mode to `0600`. The service account needs read/write
 access to the database directory. Do not share one database between daemon

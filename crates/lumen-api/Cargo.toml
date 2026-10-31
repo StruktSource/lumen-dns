@@ -8,3 +8,19 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+lumen-config = { path = "../lumen-config" }
+lumen-filter = { path = "../lumen-filter" }
+lumen-store = { path = "../lumen-store" }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
+ring = "0.17"
+rustls.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+webpki-roots = "1"
+
+[dev-dependencies]
+tempfile = "3"

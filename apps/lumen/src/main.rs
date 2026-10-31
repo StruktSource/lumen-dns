@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Lumen DNS daemon. Startup is explicit and fails on unknown arguments.
 
+use lumen_api::RunningApi;
 use lumen_config::Config;
 use lumen_core::RunningServer;
 use lumen_store::{Command as ControlCommand, Store};
@@ -105,8 +106,14 @@ async fn main() -> io::Result<()> {
             }
             if check {
                 RunningServer::check(&config).await?;
+                RunningApi::check(&config.management)?;
                 println!("Lumen configuration valid");
                 return Ok(());
+            }
+            if state.is_none() && config.management.listen.is_some() {
+                return Err(io::Error::other(
+                    "management API requires managed mode with --state",
+                ));
             }
             if let (Some(config_path), Some(state_path)) = (path.as_deref(), state.as_deref()) {
                 return run_managed(config_path, state_path).await;
@@ -123,6 +130,7 @@ async fn main() -> io::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Keep managed DNS/API rollback in one state machine.
 async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
     let mut store = Store::open(state_path).map_err(io::Error::other)?;
     if store.config().map_err(io::Error::other)?.is_none() {
@@ -138,10 +146,18 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
     }
     let mut config = managed_config(&mut store, false)?;
     let mut server = RunningServer::start(config.clone()).await?;
+    let mut api = match RunningApi::start(config.management.clone(), state_path).await {
+        Ok(api) => api,
+        Err(error) => {
+            server.shutdown().await;
+            return Err(error);
+        }
+    };
     store
         .set_status("running", None)
         .map_err(io::Error::other)?;
     print_endpoints(&server);
+    print_api(api.as_ref());
     let mut controls = tokio::time::interval(Duration::from_millis(500));
     controls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let shutdown = shutdown_signal();
@@ -152,12 +168,21 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                 let message = result.as_ref().err().map(ToString::to_string);
                 store.set_status("failed", message.as_deref()).map_err(io::Error::other)?;
                 server.shutdown().await;
+                shutdown_api(&mut api).await;
+                return result;
+            }
+            result = wait_api(&mut api) => {
+                let message = result.as_ref().err().map(ToString::to_string);
+                store.set_status("failed", message.as_deref()).map_err(io::Error::other)?;
+                server.shutdown().await;
+                shutdown_api(&mut api).await;
                 return result;
             }
             result = &mut shutdown => {
                 result?;
                 store.set_status("stopped", None).map_err(io::Error::other)?;
                 server.shutdown().await;
+                shutdown_api(&mut api).await;
                 return Ok(());
             }
             _ = controls.tick() => {
@@ -188,20 +213,40 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                     store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
                                     continue;
                                 }
+                                if let Err(error) = RunningApi::check(&next.management) {
+                                    if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
+                                    store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
+                                    continue;
+                                }
                                 server.shutdown().await;
+                                shutdown_api(&mut api).await;
                                 match RunningServer::start(next.clone()).await {
-                                    Ok(next_server) => {
-                                        server = next_server;
-                                        config = next;
-                                        if let Some(revision) = staged_revision { let _ = store.promote_staged_config(revision).map_err(io::Error::other)?; }
-                                        store.set_status("running", None).map_err(io::Error::other)?;
-                                        print_endpoints(&server);
+                                    Ok(mut next_server) => {
+                                        match RunningApi::start(next.management.clone(), state_path).await {
+                                            Ok(next_api) => {
+                                                server = next_server;
+                                                api = next_api;
+                                                config = next;
+                                                if let Some(revision) = staged_revision { let _ = store.promote_staged_config(revision).map_err(io::Error::other)?; }
+                                                store.set_status("running", None).map_err(io::Error::other)?;
+                                                print_endpoints(&server);
+                                                print_api(api.as_ref());
+                                            }
+                                            Err(error) => {
+                                                next_server.shutdown().await;
+                                                if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
+                                                server = RunningServer::start(config.clone()).await.map_err(|rollback| io::Error::other(format!("API reload failed: {error}; DNS rollback failed: {rollback}")))?;
+                                                api = RunningApi::start(config.management.clone(), state_path).await.map_err(|rollback| io::Error::other(format!("API reload failed: {error}; API rollback failed: {rollback}")))?;
+                                                store.set_status("running", Some(&format!("reload failed; prior config restored: {error}"))).map_err(io::Error::other)?;
+                                            }
+                                        }
                                     }
                                     Err(error) => {
                                         if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
                                         server = RunningServer::start(config.clone()).await.map_err(|rollback| {
                                             io::Error::other(format!("reload failed: {error}; rollback failed: {rollback}"))
                                         })?;
+                                        api = RunningApi::start(config.management.clone(), state_path).await.map_err(|rollback| io::Error::other(format!("reload failed: {error}; API rollback failed: {rollback}")))?;
                                         store.set_status("running", Some(&format!("reload failed; prior config restored: {error}"))).map_err(io::Error::other)?;
                                     }
                                 }
@@ -215,11 +260,31 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                     ControlCommand::Shutdown => {
                         store.set_status("stopped", None).map_err(io::Error::other)?;
                         server.shutdown().await;
+                        shutdown_api(&mut api).await;
                         return Ok(());
                     }
                 }
             }
         }
+    }
+}
+
+async fn wait_api(api: &mut Option<RunningApi>) -> io::Result<()> {
+    match api {
+        Some(api) => api.wait().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn shutdown_api(api: &mut Option<RunningApi>) {
+    if let Some(api) = api {
+        api.shutdown().await;
+    }
+}
+
+fn print_api(api: Option<&RunningApi>) {
+    if let Some(api) = api {
+        println!("Lumen management API listening on {}", api.address);
     }
 }
 

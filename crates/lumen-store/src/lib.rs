@@ -9,7 +9,20 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
+
+/// Durable management action without secrets or request bodies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditEvent {
+    pub id: i64,
+    pub created_at: u64,
+    pub actor: String,
+    pub role: String,
+    pub action: String,
+    pub target: String,
+    pub outcome: String,
+    pub peer: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredConfig {
@@ -136,6 +149,24 @@ impl Store {
                     payload INTEGER
                 );
                 PRAGMA user_version = 2;",
+                )
+                .map_err(database_error)?;
+        }
+        if version < 3 {
+            transaction
+                .execute_batch(
+                    "CREATE TABLE audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at INTEGER NOT NULL,
+                    actor TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    peer TEXT NOT NULL
+                );
+                CREATE INDEX audit_events_created_at ON audit_events(created_at);
+                PRAGMA user_version = 3;",
                 )
                 .map_err(database_error)?;
         }
@@ -446,6 +477,80 @@ impl Store {
         Ok((status, error))
     }
 
+    /// Append one bounded management audit event.
+    ///
+    /// # Errors
+    /// Returns an error for invalid fields or failed database access.
+    pub fn append_audit(
+        &mut self,
+        actor: &str,
+        role: &str,
+        action: &str,
+        target: &str,
+        outcome: &str,
+        peer: &str,
+    ) -> Result<i64, String> {
+        if !valid_audit_field(actor, 64)
+            || !valid_audit_field(role, 16)
+            || !valid_audit_field(action, 64)
+            || !valid_audit_field(target, 256)
+            || !valid_audit_field(outcome, 32)
+            || !valid_audit_field(peer, 64)
+        {
+            return Err("invalid audit event".into());
+        }
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        transaction
+            .execute(
+                "INSERT INTO audit_events(created_at, actor, role, action, target, outcome, peer)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![now()?, actor, role, action, target, outcome, peer],
+            )
+            .map_err(database_error)?;
+        let id = transaction.last_insert_rowid();
+        transaction
+            .execute(
+                "DELETE FROM audit_events WHERE id NOT IN
+                 (SELECT id FROM audit_events ORDER BY id DESC LIMIT 10000)",
+                [],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+        Ok(id)
+    }
+
+    /// Read newest audit events first with a hard result cap.
+    ///
+    /// # Errors
+    /// Returns an error for invalid limits or failed database access.
+    pub fn audit_events(&self, limit: u16) -> Result<Vec<AuditEvent>, String> {
+        if !(1..=1000).contains(&limit) {
+            return Err("audit limit must be in 1..=1000".into());
+        }
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, created_at, actor, role, action, target, outcome, peer
+                 FROM audit_events ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([limit], |row| {
+                Ok(AuditEvent {
+                    id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    actor: row.get(2)?,
+                    role: row.get(3)?,
+                    action: row.get(4)?,
+                    target: row.get(5)?,
+                    outcome: row.get(6)?,
+                    peer: row.get(7)?,
+                })
+            })
+            .map_err(database_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
+    }
+
     fn metadata(&self, key: &str) -> Result<Option<String>, String> {
         self.connection
             .query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| {
@@ -513,6 +618,14 @@ fn valid_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+}
+
+fn valid_audit_field(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value
+            .bytes()
+            .all(|byte| byte == b' ' || (0x21..=0x7e).contains(&byte))
 }
 
 fn now() -> Result<u64, String> {
@@ -592,6 +705,20 @@ mod tests {
             Command::ConfigReload(6)
         );
         assert!(store.next_command().unwrap().is_none());
+        store
+            .append_audit(
+                "admin",
+                "admin",
+                "post",
+                "/v1/reload",
+                "accepted",
+                "127.0.0.1",
+            )
+            .unwrap();
+        let audit = store.audit_events(10).unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].target, "/v1/reload");
+        assert!(store.audit_events(0).is_err());
 
         #[cfg(unix)]
         {
