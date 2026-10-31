@@ -5,7 +5,7 @@ checks in [verification](verification.md). It does not mean production-ready.
 
 ## Foundation
 
-- [x] Lumen by Strukt, Apache-2.0, Rust workspace, SemVer `0.1.0`
+- [x] Lumen by Strukt, Apache-2.0, Rust workspace, SemVer `0.1.1`
 - [x] README, contributor guide, security policy, code of conduct
 - [x] Architecture, threat model, privacy defaults, and protocol scope
 - [x] CI definitions for Linux, macOS, Windows, lint, tests, and MSRV
@@ -65,6 +65,7 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [ ] Local UI prototype with mock data after the first filtering slice
 - [ ] Functional web UI after config persistence/reload and API security
 - [ ] Opt-in anonymous/full query history
+- [x] Shared in-flight recursion, startup priming, opt-in expiry refresh and hedging, recursion latency metrics (Issue #9); cold single-query gain not statistically significant
 
 ## Phase 4 — Deployment
 

@@ -52,7 +52,7 @@ mode = "recursive"
 dnssec = true
 # Bounded response, delegation, and validation caches.
 cache_entries = 4096
-nameserver_cache_entries = 256
+nameserver_cache_entries = 1024
 validation_cache_entries = 4096
 # Cached data never lives longer than these TTL ceilings.
 positive_ttl_secs = 86400
@@ -62,6 +62,21 @@ recursion_depth = 24
 # Optional overrides: BIND-format root hints and DNSKEY-format trust anchors.
 # root_hints = "root.hints"
 # trust_anchor = "root.key"
+
+# Prime the root and common top-level zones once at startup so the first lookups skip the
+# slowest delegation and DNSSEC-key fetches. Queries name only these zones, never clients.
+[resolver.warm]
+enabled = true
+zones = ["com", "net", "org", "info", "de", "uk", "eu", "nl", "fr", "ch", "io", "us"]
+
+# Optional: refresh names that were looked up repeatedly just after their answer expires.
+# Names stay in memory only, bounded by max_tracked, and are never logged or exported.
+[resolver.prefetch]
+enabled = false
+min_hits = 2
+max_tracked = 1024
+max_concurrent = 4
+budget_per_minute = 240
 
 # Optional timeout-only fallback. No endpoint is selected or contacted by default.
 [resolver.fallback]

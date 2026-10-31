@@ -183,6 +183,10 @@ pub struct Resolver {
     pub attempts: u8,
     pub upstream_timeout_ms: u32,
     pub fallback: Fallback,
+    pub warm: Warm,
+    pub prefetch: Prefetch,
+    /// Start a second recursion for a lookup still unanswered after this many ms; 0 is off.
+    pub hedge_ms: u32,
 }
 
 impl Default for Resolver {
@@ -197,7 +201,7 @@ impl Default for Resolver {
             providers: vec![],
             automatic_transport: false,
             cache_entries: 4096,
-            nameserver_cache_entries: 256,
+            nameserver_cache_entries: 1024,
             validation_cache_entries: 4096,
             positive_ttl_secs: 86400,
             negative_ttl_secs: 3600,
@@ -205,6 +209,63 @@ impl Default for Resolver {
             attempts: 2,
             upstream_timeout_ms: 2000,
             fallback: Fallback::default(),
+            warm: Warm::default(),
+            prefetch: Prefetch::default(),
+            hedge_ms: 0,
+        }
+    }
+}
+
+/// Startup priming of root and top-level-zone delegations and DNSSEC keys.
+///
+/// Queries name only zones listed here, never client data, and run with fixed low
+/// concurrency in the background. Disabled by default.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Warm {
+    pub enabled: bool,
+    /// Zones to prime in addition to the root, without a trailing dot.
+    pub zones: Vec<String>,
+}
+
+impl Default for Warm {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            zones: [
+                "com", "net", "org", "info", "de", "uk", "eu", "nl", "fr", "ch", "io", "us",
+            ]
+            .map(String::from)
+            .to_vec(),
+        }
+    }
+}
+
+/// Bounded refresh of frequently requested names when their cached answer expires.
+///
+/// Names are held in memory only, never logged or exported. Disabled by default.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Prefetch {
+    pub enabled: bool,
+    /// Lookups needed within one cache lifetime before the answer is refreshed.
+    pub min_hits: u8,
+    /// Maximum number of names tracked at once.
+    pub max_tracked: u16,
+    /// Maximum refreshes running at the same time.
+    pub max_concurrent: u8,
+    /// Maximum refreshes started in any minute.
+    pub budget_per_minute: u16,
+}
+
+impl Default for Prefetch {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_hits: 2,
+            max_tracked: 1024,
+            max_concurrent: 4,
+            budget_per_minute: 240,
         }
     }
 }
@@ -601,6 +662,7 @@ impl Config {
             return Err("trust_anchor requires DNSSEC validation".into());
         }
         self.validate_fallback()?;
+        self.validate_acceleration()?;
         if r.upstream_ca.is_some()
             && !r
                 .upstreams
@@ -649,6 +711,62 @@ impl Config {
         }
         if self.limits.max_message_bytes < 512 {
             return Err("max_message_bytes must be at least 512".into());
+        }
+        Ok(())
+    }
+
+    fn validate_acceleration(&self) -> Result<(), String> {
+        let (warm, prefetch) = (&self.resolver.warm, &self.resolver.prefetch);
+        let hedge = self.resolver.hedge_ms;
+        if hedge != 0 && !(100..=5000).contains(&hedge) {
+            return Err("hedge_ms must be 0 or in 100..=5000".into());
+        }
+        if hedge != 0 && self.resolver.mode != Mode::Recursive {
+            return Err("hedge_ms is only available in recursive mode".into());
+        }
+        if (warm.enabled || prefetch.enabled) && self.resolver.mode != Mode::Recursive {
+            return Err("warm and prefetch are only available in recursive mode".into());
+        }
+        if warm.zones.len() > 64 {
+            return Err("at most 64 warm zones are allowed".into());
+        }
+        for zone in &warm.zones {
+            let valid = !zone.is_empty()
+                && zone.len() <= 253
+                && zone.split('.').all(|label| {
+                    (1..=63).contains(&label.len())
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                });
+            if !valid {
+                return Err("warm zones must be ASCII DNS names without a trailing dot".into());
+            }
+        }
+        for (name, value, minimum, maximum) in [
+            ("prefetch.min_hits", u32::from(prefetch.min_hits), 1, 100),
+            (
+                "prefetch.max_tracked",
+                u32::from(prefetch.max_tracked),
+                16,
+                8192,
+            ),
+            (
+                "prefetch.max_concurrent",
+                u32::from(prefetch.max_concurrent),
+                1,
+                16,
+            ),
+            (
+                "prefetch.budget_per_minute",
+                u32::from(prefetch.budget_per_minute),
+                1,
+                6000,
+            ),
+        ] {
+            if value < minimum || value > maximum {
+                return Err(format!("{name} must be in {minimum}..={maximum}"));
+            }
         }
         Ok(())
     }
@@ -836,6 +954,59 @@ mod tests {
         config.resolver.upstreams[0].doh_path = Some("/dns-query".into());
         config.resolver.upstreams[0].protocol = UpstreamProtocol::Tls;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn warm_and_prefetch_are_off_by_default_and_bounded() {
+        let mut config: Config = toml::from_str("schema_version = 1").unwrap();
+        assert!(!config.resolver.warm.enabled && !config.resolver.prefetch.enabled);
+        assert_eq!(config.resolver.nameserver_cache_entries, 1024);
+        config.validate().unwrap();
+        let parsed: Config = toml::from_str(
+            "schema_version = 1\n[resolver.warm]\nenabled = true\nzones = [\"com\", \"co.uk\"]\n\
+             [resolver.prefetch]\nenabled = true\nmin_hits = 3\n",
+        )
+        .unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.resolver.prefetch.min_hits, 3);
+        config.resolver.warm.enabled = true;
+        config.resolver.warm.zones = vec!["bad zone".into()];
+        assert!(config.validate().is_err());
+        config.resolver.warm.zones = vec!["a.".into()];
+        assert!(config.validate().is_err(), "trailing dot is rejected");
+        config.resolver.warm.zones = vec!["com".into(); 65];
+        assert!(config.validate().is_err());
+        config.resolver.warm.zones = vec!["com".into()];
+        config.validate().unwrap();
+        for bad in [0, 101] {
+            config.resolver.prefetch.min_hits = bad;
+            assert!(config.validate().is_err());
+        }
+        config.resolver.prefetch.min_hits = 2;
+        for bad in [50, 5001] {
+            config.resolver.hedge_ms = bad;
+            assert!(config.validate().is_err());
+        }
+        config.resolver.hedge_ms = 1200;
+        config.validate().unwrap();
+        config.resolver.hedge_ms = 0;
+        config.resolver.prefetch.max_concurrent = 17;
+        assert!(config.validate().is_err());
+        config.resolver.prefetch.max_concurrent = 4;
+        config.resolver.mode = Mode::Forward;
+        config.resolver.upstreams.push(Upstream {
+            address: "127.0.0.1:5353".parse().unwrap(),
+            protocol: UpstreamProtocol::Udp,
+            server_name: None,
+            doh_path: None,
+        });
+        assert!(
+            config.validate().is_err(),
+            "warm and prefetch need recursive mode"
+        );
+        assert!(
+            toml::from_str::<Config>("schema_version = 1\n[resolver.warm]\nbogus = 1").is_err()
+        );
     }
 
     #[test]

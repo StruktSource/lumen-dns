@@ -155,6 +155,8 @@ impl RunningServer {
                 }
             }
         });
+        // Every bind succeeded; only now may priming and refresh touch the network.
+        service.resolver.start_background();
         if let Some(listener) = metrics_listener {
             tasks.spawn(serve_metrics(listener, service));
         }

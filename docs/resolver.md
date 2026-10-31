@@ -45,6 +45,42 @@ chosen operator. Plain recursive DNS normally discloses parts of the lookup to
 root, TLD, and authoritative servers over UDP/TCP. Encrypted fallback protocols
 verify certificate identity and never downgrade to plaintext.
 
+## Cold-cache speed
+
+Recursive mode keeps one validating recursor. Three bounded mechanisms reduce the
+time to answer names that are not cached yet, without any forwarding resolver and
+without relaxing DNSSEC validation, TTLs, or filtering:
+
+- **Shared recursion (always on).** Identical in-flight queries (same name, type,
+  and DNSSEC-OK flag) wait for one recursion instead of each walking the tree.
+  Waiters receive the leader's validated answer; a failed or cancelled leader never
+  strands them. At most 4096 groups are in flight; beyond that queries recurse
+  alone. `lumen_dns_recursive_coalesced_total` counts the saved recursions.
+- **Startup priming (`[resolver.warm]`).** Fetches root and top-level-zone
+  delegations and DNSKEY/DS data once, in the background, after every listener is
+  bound. See [configuration](configuration.md#resolver).
+- **Expiry refresh (`[resolver.prefetch]`, off by default).** Names looked up at
+  least `min_hits` times in one cache lifetime are re-resolved right after they
+  expire, within a concurrency and per-minute budget.
+
+- **Hedged recursion (`hedge_ms`, off by default).** A lookup still unanswered after
+  the delay starts one second recursion; the first usable answer wins.
+  `lumen_dns_recursive_hedged_total` counts them. Measurements were inconclusive.
+
+Filtering runs before any of this, so a blocked name is never resolved, primed, or
+refreshed, and a refreshed answer is still filtered when served.
+
+Evaluated and not shipped: serve-stale (RFC 8767) and delegation-cache persistence.
+Hickory drops expired entries and keeps its caches private, so both would need a
+second Lumen-owned cache of validated messages with its own expiry, revalidation
+and memory bounds. Persisting delegations would also have to revalidate every
+record on load. Priming recovers most of the restart cost without that surface.
+Nameserver selection already uses Hickory's smoothed round-trip statistics; the
+recursor fixes one outstanding request per nameserver pool and a 5 second
+per-attempt timeout, which sets the slow tail on unresponsive authorities and
+cannot be changed from Lumen. Measurements are in
+[performance](performance.md).
+
 ## Encrypted listeners
 
 Set `listen.certificate` and `listen.private_key`, then replace the empty
@@ -129,7 +165,17 @@ DNS reachability or a DNSSEC guarantee. No management operations are exposed.
 | `lumen_dns_fallback_successes_total` | counter |
 | `lumen_dns_fallback_failures_total` | counter |
 | `lumen_dns_fallback_trigger_recursion_timeout_total` | counter |
+| `lumen_dns_recursive_lookup_duration_seconds` | histogram |
+| `lumen_dns_recursive_coalesced_total` | counter |
+| `lumen_dns_recursive_hedged_total` | counter |
+| `lumen_dns_warm_queries_total` | counter |
+| `lumen_dns_warm_failures_total` | counter |
+| `lumen_dns_prefetch_refreshes_total` | counter |
+| `lumen_dns_prefetch_failures_total` | counter |
+| `lumen_dns_prefetch_skipped_total` | counter |
 
+The recursive lookup histogram has 11 fixed buckets (1 ms to 5 s) and includes
+cache hits, so the sub-millisecond bucket approximates the cache hit ratio.
 These have no client/domain labels. Query names and history are not stored or
 logged. Transport totals and query latency use fixed-cardinality series. Full
 query logs remain disabled. A ready Grafana dashboard is under
