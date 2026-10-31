@@ -205,9 +205,17 @@ async fn fixture() -> Fixture {
                         return;
                     }
                     count.fetch_add(1, Ordering::Relaxed);
-                    let response = mock_response(Message::from_vec(&bytes).unwrap(), true)
-                        .to_vec()
-                        .unwrap();
+                    let request = Message::from_vec(&bytes).unwrap();
+                    if request.queries[0]
+                        .name()
+                        .to_ascii()
+                        .to_lowercase()
+                        .starts_with("slow.")
+                    {
+                        // Never answer "slow" names, so a TCP retry cannot rescue them.
+                        continue;
+                    }
+                    let response = mock_response(request, true).to_vec().unwrap();
                     if stream
                         .write_u16(u16::try_from(response.len()).unwrap())
                         .await
