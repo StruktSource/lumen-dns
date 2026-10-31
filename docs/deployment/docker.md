@@ -13,7 +13,7 @@ docker run --name lumen --read-only --user 65532:65532 \
   --tmpfs /tmp:size=16m -p 53:5353/udp -p 53:5353/tcp \
   -p 127.0.0.1:8080:8080/tcp \
   -v "$PWD/deploy/lumen.toml:/etc/lumen/lumen.toml:ro" \
-  ghcr.io/struktsource/lumen-dns:0.1.2
+  ghcr.io/struktsource/lumen-dns:0.1.3
 ```
 
 Review `allow_clients` first. The example accepts only private IPv4 and ULA IPv6
