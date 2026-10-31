@@ -20,7 +20,7 @@ review remain before production readiness.
 | --- | --- |
 | UDP, TCP, DoH, DoT, DoQ on IPv4/IPv6 | Authenticated management API |
 | Filtering, device policies, bounded list imports and atomic refresh/rollback | Functional web UI |
-| Recursive resolution, delegation checks, DNSSEC | Authenticated management API |
+| Recursive resolution, delegation checks, DNSSEC | Extended metrics and integrations |
 | SQLite config/device state, migrations, reload, and local CLI | Functional web UI |
 | Explicit forwarding and encrypted-only provider failover | Deployment guides, signed images, external review |
 | Startup config, client ACLs, resource limits, aggregate metrics | Extended interoperability and performance validation |

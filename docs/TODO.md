@@ -18,13 +18,17 @@ Phases 1 and 2 resolver/filtering implementation are complete. See the detailed
 - [x] Add staged config apply, runtime validation, reload, and rollback.
 - [x] Add cross-platform local CLI config, device, filter, status, and shutdown controls.
 
-## UI timing and recommended order
+## Phase 3 next work
 
-1. Build Phase 3 persistence, config reload/migrations, and authenticated control.
-2. Begin UI design/prototyping alongside Phase 3 work. Use mock
+1. Build the authenticated `/v1` management API on the completed persistence,
+   reload, migration, and local-control base. Add scoped roles, bounded tokens,
+   request limits, and durable audit events before any remote exposure.
+2. Add extended privacy-safe Prometheus metrics, a ready Grafana dashboard,
+   bounded signed webhooks, and Home Assistant examples.
+3. Begin UI design/prototyping alongside this work. Use mock
    data for an overview, list management, and settings; keep the prototype local
    and management API access disabled.
-3. Build the functional UI during Phase 3, once configuration persistence/reload
+4. Build the functional UI during Phase 3, once configuration persistence/reload
    and an authenticated, scoped management API are ready. Start with aggregate
    status, then settings and filtering controls. Keep query history off by default.
 
@@ -37,7 +41,7 @@ first-release commitment remains a blank UI shell; a functional UI is later scop
 - [ ] Extended DNS interoperability, DNSSEC conformance, and long-running soak tests.
 - [ ] Independent security review and production memory/performance measurements.
 - [ ] Trust-anchor rollover automation and certificate lifecycle tooling.
-- [ ] Authenticated API, scoped audit events, and optional UI.
+- [ ] Authenticated API, scoped audit events, extended metrics, integrations, and optional UI.
 - [ ] Record passing native multi-OS/architecture and multi-arch OCI release runs.
 - [ ] Add keyless image signing and reproducible-build comparison; SBOM/provenance is configured.
 - [ ] Run real Proxmox, Unraid, Raspberry Pi, Podman ARM64, and dual-stack Kubernetes tests.
