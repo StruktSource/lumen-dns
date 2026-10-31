@@ -33,9 +33,28 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 
+/// Picks a port that is free for both TCP and UDP and was not handed out earlier in this
+/// process. The servers under test take fixed addresses, so the probe sockets must be dropped
+/// before use; checking both protocols and remembering past picks narrows that race, and
+/// `encrypted_forwarding_checks_upstream_certificates` additionally retries on `AddrInUse`.
 fn address(ip: &str) -> SocketAddr {
-    let listener = std::net::TcpListener::bind(format!("{ip}:0")).unwrap();
-    listener.local_addr().unwrap()
+    static HANDED_OUT: std::sync::Mutex<Vec<(String, u16)>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let listener = std::net::TcpListener::bind(format!("{ip}:0")).unwrap();
+        let address = listener.local_addr().unwrap();
+        if std::net::UdpSocket::bind(address).is_err() {
+            continue;
+        }
+        let mut handed_out = HANDED_OUT.lock().unwrap();
+        if handed_out
+            .iter()
+            .any(|(i, port)| i == ip && *port == address.port())
+        {
+            continue;
+        }
+        handed_out.push((ip.to_string(), address.port()));
+        return address;
+    }
 }
 
 fn query(name: &str, kind: RecordType) -> Vec<u8> {
@@ -133,9 +152,17 @@ impl Drop for Fixture {
 }
 
 async fn fixture() -> Fixture {
-    let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = tcp.local_addr().unwrap();
-    let udp = UdpSocket::bind(address).await.unwrap();
+    // The UDP port with the same number as a fresh TCP port can already be taken by another
+    // test's socket, so retry with a new TCP port until both protocols bind.
+    let (tcp, udp, address) = loop {
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = tcp.local_addr().unwrap();
+        match UdpSocket::bind(address).await {
+            Ok(udp) => break (tcp, udp, address),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+            Err(error) => panic!("fixture UDP bind failed: {error}"),
+        }
+    };
     let queries = Arc::new(AtomicUsize::new(0));
     let mut tasks = JoinSet::new();
     let count = Arc::clone(&queries);
