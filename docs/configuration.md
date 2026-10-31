@@ -38,6 +38,10 @@ See [state and control](state-and-control.md).
 | --- | --- |
 | `schema_version` | Required; must be `1` |
 | `metrics` | Disabled; optional nonzero loopback socket address for HTTP `/metrics` and `/healthz` |
+| `management.listen` | Disabled; optional nonzero loopback address, managed mode only |
+| `management.requests_per_minute` | `60`; per-token bound, 1–600 |
+| `management.tokens` | 1–16 named SHA-256 token hashes with viewer/operator/admin role when API enabled |
+| `management.webhooks` | Up to 8 signed HTTPS audit webhooks with secret files |
 | `listen` | Listener and client-access settings |
 | `resolver` | Selected mode, cache, DNSSEC, and upstream settings |
 | `limits` | Shared admission and IO bounds |

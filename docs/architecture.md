@@ -12,7 +12,7 @@ UDP / TCP / TLS / HTTPS / QUIC
                        -> local DNSSEC verification -> bounded DNS encoding
     -> client reply
 
-TOML / SQLite / CLI -> schema, trust, and filter-source validation -> bind all sockets -> serve
+TOML / SQLite / CLI / authenticated API -> schema and trust validation -> bind -> serve
 Counters -> optional loopback /metrics and /healthz
 ```
 
@@ -40,7 +40,7 @@ limited to OS signal handling and does not change DNS results.
 | `lumen-store` | SQLite migrations, config revisions, devices, control queue, daemon status |
 | `apps/lumenctl` | Local config, device, reload, filter, status, shutdown, and decision controls |
 | `lumen-core` | Transport tasks, shared admission, metrics, service lifecycle |
-| `lumen-api` | Reserved authenticated API boundary; no network routes |
+| `lumen-api` | Loopback `/v1` auth, roles, rate limits, audit, control queue, signed webhooks |
 | `apps/lumen` | Strict startup arguments and OS signals |
 
 Hickory 0.26.3 provides full DNS records, iterative resolution, referral/glue
@@ -58,9 +58,9 @@ special-use address ranges are denied by Hickory's recommended filters.
 
 Filtering sits before cache lookup and resolution. Managed config reload stages
 a SQLite revision, validates it, restarts runtime state, and restores the prior
-server on bind failure. Query history remains planned. The web shell and future
-scoped API cannot affect parser ownership
-or bypass resolver limits. Future plugins need explicit permissions.
+server on bind failure. Query history remains planned. The blank web shell and
+scoped API cannot affect parser ownership or bypass resolver limits. Future
+plugins need explicit permissions.
 
 See [configuration](configuration.md), [resolver behavior](resolver.md), and
 [threat model](threat-model.md) for operational contracts. The

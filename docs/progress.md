@@ -57,9 +57,9 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [x] Validated reload and explicit SQLite schema migrations
 - [x] Cross-platform local `lumenctl` config/device/filter/status controls
 - [x] SQLite configuration and device storage
-- [ ] Extended Prometheus metrics and Grafana dashboard
-- [ ] Authenticated `/v1` API, scoped roles, audit events
-- [ ] Webhooks and Home Assistant examples
+- [x] Extended privacy-safe Prometheus metrics and ready Grafana dashboard
+- [x] Loopback authenticated `/v1` API, scoped roles, rate limits, audit events
+- [x] Signed HTTPS audit webhooks and Home Assistant examples
 - [ ] Local UI prototype with mock data after the first filtering slice
 - [ ] Functional web UI after config persistence/reload and API security
 - [ ] Opt-in anonymous/full query history
@@ -89,9 +89,9 @@ checks in [verification](verification.md). It does not mean production-ready.
 
 ## Next technical slice
 
-1. Build authenticated management API with scoped roles and audit events.
-2. Add extended metrics, Grafana, webhooks, and Home Assistant examples.
-3. Build the functional web UI after API security is complete.
+1. Build the functional web UI on the scoped management API.
+2. Add opt-in anonymous/full query history with retention and redaction controls.
+3. Continue release validation, soak tests, and external review.
 
 Filtering usage and bounds: [guide](filtering.md).
 

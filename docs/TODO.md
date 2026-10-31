@@ -20,12 +20,12 @@ Phases 1 and 2 resolver/filtering implementation are complete. See the detailed
 
 ## Phase 3 next work
 
-1. Build the authenticated `/v1` management API on the completed persistence,
-   reload, migration, and local-control base. Add scoped roles, bounded tokens,
-   request limits, and durable audit events before any remote exposure.
-2. Add extended privacy-safe Prometheus metrics, a ready Grafana dashboard,
-   bounded signed webhooks, and Home Assistant examples.
-3. Begin UI design/prototyping alongside this work. Use mock
+1. [x] Build the loopback authenticated `/v1` management API on the completed
+   persistence, reload, migration, and local-control base. Add scoped roles,
+   bounded tokens, request limits, and durable audit events.
+2. [x] Add extended privacy-safe Prometheus metrics, a ready Grafana dashboard,
+   bounded signed HTTPS webhooks, and Home Assistant examples.
+3. Begin UI design/prototyping. Use mock
    data for an overview, list management, and settings; keep the prototype local
    and management API access disabled.
 4. Build the functional UI during Phase 3, once configuration persistence/reload
@@ -41,7 +41,8 @@ first-release commitment remains a blank UI shell; a functional UI is later scop
 - [ ] Extended DNS interoperability, DNSSEC conformance, and long-running soak tests.
 - [ ] Independent security review and production memory/performance measurements.
 - [ ] Trust-anchor rollover automation and certificate lifecycle tooling.
-- [ ] Authenticated API, scoped audit events, extended metrics, integrations, and optional UI.
+- [ ] Optional functional UI and opt-in query history. Authenticated API, scoped
+  audit events, extended metrics, and integration examples are implemented.
 - [ ] Record passing native multi-OS/architecture and multi-arch OCI release runs.
 - [ ] Add keyless image signing and reproducible-build comparison; SBOM/provenance is configured.
 - [ ] Run real Proxmox, Unraid, Raspberry Pi, Podman ARM64, and dual-stack Kubernetes tests.

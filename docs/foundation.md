@@ -4,8 +4,8 @@
 
 Lumen is private, self-hosted DNS software by Strukt. Rust, Apache-2.0, workspace
 version `0.1.0`. Phases 1 and 2 implement the resolver core and filtering. Phase 3
-local persistence and control are implemented; authenticated remote management
-remains planned. See [progress](progress.md) for exact shipped scope.
+local persistence, control, authenticated loopback management, and observability
+are implemented. Remote management remains out of scope. See [progress](progress.md).
 
 ## Workspace
 
@@ -18,7 +18,7 @@ crates/lumen-resolver/ recursive/forward modes, DNSSEC, cache and trust setup
 crates/lumen-filter/ rules, policies, imports, snapshots, schedules and responses
 crates/lumen-core/   client transports, limits, lifecycle and aggregate metrics
 crates/lumen-store/  SQLite migrations, config/device state and local controls
-crates/lumen-api/    reserved /v1 boundary; no API listener
+crates/lumen-api/    opt-in loopback /v1 management, roles, audit, webhooks
 config/             safe release default and opt-in feature examples
 web/                blank optional UI shell
 fuzz/               DNS/config/filter fuzz targets; separate Cargo workspace
@@ -49,9 +49,9 @@ must be backed by the [verification record](verification.md).
   dump configuration, keys, query packets, or query names.
 - [Metrics](resolver.md#metrics-and-health) have stable `lumen_dns_` names with
   no client/domain labels. Liveness has a separate loopback endpoint.
-- Future API starts at `/v1`; authentication, authorization, and audit must be
-  complete before API routes can be exposed. DNS-over-HTTPS is a DNS transport,
-  not a management API.
+- Management API starts at `/v1`; authentication, scoped authorization, rate
+  limits, and durable audit apply before dispatch. DNS-over-HTTPS is a DNS
+  transport, not a management API.
 - SQLite stores config revisions and devices when `--state` is enabled. Hot DNS
   caches remain bounded in memory. Query history and external telemetry are off.
 - Operators opt into each encrypted listener and each upstream; recursive mode

@@ -2,7 +2,7 @@
 
 Phase 1 provides DNS transport, iterative recursion, forwarding, caches, local
 DNSSEC validation, admission control, and aggregate metrics. Filtering, storage,
-management API access, and a functional UI are not implemented yet.
+an opt-in management API, and a functional UI are separate Phase 3 surfaces.
 
 ## Start and query
 
@@ -123,14 +123,17 @@ DNS reachability or a DNSSEC guarantee. No management operations are exposed.
 | `lumen_dns_timeouts_total` | counter |
 | `lumen_dns_failures_total` | counter |
 | `lumen_dns_active_queries` | gauge |
+| `lumen_dns_transport_queries_total{transport}` | counter |
+| `lumen_dns_query_duration_seconds` | histogram |
 | `lumen_dns_fallback_attempts_total` | counter |
 | `lumen_dns_fallback_successes_total` | counter |
 | `lumen_dns_fallback_failures_total` | counter |
 | `lumen_dns_fallback_trigger_recursion_timeout_total` | counter |
 
 These have no client/domain labels. Query names and history are not stored or
-logged. Full query logs, cache-hit metrics, latency histograms, and Grafana
-panels remain later observability work. See
+logged. Transport totals and query latency use fixed-cardinality series. Full
+query logs remain disabled. A ready Grafana dashboard is under
+`deploy/observability/`. See
 [configuration](configuration.md) for admission/drop semantics.
 
 ## Shutdown and failure

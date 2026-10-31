@@ -18,7 +18,7 @@
 | Query floods / many client IPs | Global query slots, per-IP one-second rate windows, bounded client table, bounded UDP workers |
 | Listener silently fails | Daemon observes background task errors; startup binds all sockets before serving |
 | Query privacy | No query history, domain/client metric labels, or external telemetry; startup logs show only listener addresses |
-| Management exposure | No management API routes; metrics/liveness bind only loopback |
+| Management exposure | API and metrics bind loopback only; API requires hashed bearer tokens, scoped roles, per-token rate limits, bounded parsing, and durable audit |
 | Container impact | Non-root UID 65532, no runtime key generation/download, minimal Debian runtime |
 | CI/release compromise | Read-only PR permissions, no persisted checkout credentials, locked Rust dependencies, release publish only on version tags after required gates |
 | Artifact substitution | Per-archive SHA-256, GitHub artifact provenance, OCI provenance and SBOM; image signing remains pending |
@@ -63,8 +63,9 @@ are administrator inputs. Schedules rely on the host UTC clock. Query-name
 filtering is not CNAME-chain inspection or a network firewall. Optional decision
 logs disclose names and client IPs only when explicitly enabled.
 
-Future management requires auth, scoped roles, audit,
-rate limits, and explicit remote exposure. Optional query history needs retention,
-redaction, and access controls. These features remain disabled/unimplemented.
+Management API has bearer auth, scoped roles, audit, and rate limits. It has no
+browser session or cookie auth, so CSRF is not an API credential path. Remote
+exposure and UI security remain out of scope. Optional query history still needs
+retention, redaction, and access controls and remains disabled.
 
 See [security policy](../SECURITY.md) and [verification](verification.md).

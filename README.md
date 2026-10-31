@@ -18,15 +18,15 @@ review remain before production readiness.
 
 | Available | Next |
 | --- | --- |
-| UDP, TCP, DoH, DoT, DoQ on IPv4/IPv6 | Authenticated management API |
+| UDP, TCP, DoH, DoT, DoQ on IPv4/IPv6 | Functional web UI |
 | Filtering, device policies, bounded list imports and atomic refresh/rollback | Functional web UI |
-| Recursive resolution, delegation checks, DNSSEC | Extended metrics and integrations |
+| Recursive resolution, delegation checks, DNSSEC | Extended interoperability and soak tests |
 | SQLite config/device state, migrations, reload, and local CLI | Functional web UI |
 | Explicit forwarding and encrypted-only provider failover | Deployment guides, signed images, external review |
-| Startup config, client ACLs, resource limits, aggregate metrics | Extended interoperability and performance validation |
+| Authenticated local API, audit, metrics, Grafana, webhooks | External review and release validation |
 
 Defaults: loopback clients only, recursive resolution, DNSSEC on, no query
-history, no telemetry, and no management API. Encrypted listeners require
+history, no telemetry, and management API disabled. Encrypted listeners require
 operator-supplied certificates and keys. Filtering is opt-in through config;
 no third-party blocklists or external DNS providers are enabled by default.
 
@@ -57,6 +57,7 @@ loopback `metrics` line is uncommented. `config/forward.example.toml` is an
 encrypted provider failover example; running it sends DNS to its configured upstream.
 
 See [filtering guide](docs/filtering.md), [resolver guide](docs/resolver.md), [configuration reference](docs/configuration.md),
+[management API](docs/management-api.md), [observability and integrations](docs/observability.md),
 [upstream provider presets](docs/upstream-providers.md),
 [security boundaries](docs/threat-model.md), [verification](docs/verification.md),
 and [performance snapshots](docs/performance.md).

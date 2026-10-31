@@ -1,9 +1,26 @@
 # Verification
 
+## Phase 3 management and observability — 2026-10-31
+
+Native validation: macOS ARM64. The full locked workspace test run passed 57
+tests plus doc tests. This includes an authenticated loopback API request,
+constant-time token hash matching, role routing, per-token rate bounds, schema-3
+audit migration/round-trip, management config rejection cases, and extended
+metric output. Format, Clippy with warnings denied, Grafana JSON parsing, and
+`git diff --check` pass.
+
+The API is disabled by default, managed-mode-only, and loopback-only. Headers,
+bodies, connections, rates, tokens, webhooks, and audit retention are bounded.
+Audit records omit tokens and bodies. Webhook configuration enforces HTTPS port
+443, no credentials/fragments, public WebPKI roots, no redirects/proxy, a short
+deadline, HMAC-SHA256 bodies, and a bounded best-effort queue. No live external
+webhook or Home Assistant instance was contacted. Grafana and Home Assistant
+files were validated as local examples only. Remote API exposure is not supported.
+
 ## Phase 3 local state and control — 2026-10-31
 
 Native validation: macOS ARM64. `lumen-store` migration tests create a schema-1
-database, migrate it to schema 2, preserve active config, stage/promote a new
+database, migrate it through schema 3, preserve active config, stage/promote a new
 revision, round-trip IPv4/IPv6 devices, consume commands once, and verify Unix
 mode `0600`. Strict CLI parsing covers config, device, reload, status, filter,
 and shutdown commands.
