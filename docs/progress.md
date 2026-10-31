@@ -60,6 +60,8 @@ checks in [verification](verification.md). It does not mean production-ready.
 - [x] Extended privacy-safe Prometheus metrics and ready Grafana dashboard
 - [x] Loopback authenticated `/v1` API, scoped roles, rate limits, audit events
 - [x] Signed HTTPS audit webhooks and Home Assistant examples
+- [x] Embedded blank UI hosting over HTTP and direct TLS HTTP/2
+- [x] Vendor-neutral HTTP/3 reverse-proxy contract
 - [ ] Local UI prototype with mock data after the first filtering slice
 - [ ] Functional web UI after config persistence/reload and API security
 - [ ] Opt-in anonymous/full query history
@@ -89,7 +91,7 @@ checks in [verification](verification.md). It does not mean production-ready.
 
 ## Next technical slice
 
-1. Build the functional web UI on the scoped management API.
+1. Add the first small UI screen on the embedded hosting base.
 2. Add opt-in anonymous/full query history with retention and redaction controls.
 3. Continue release validation, soak tests, and external review.
 

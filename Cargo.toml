@@ -9,6 +9,7 @@ members = [
   "crates/lumen-proto",
   "crates/lumen-resolver",
   "crates/lumen-store",
+  "crates/lumen-web",
 ]
 resolver = "3"
 

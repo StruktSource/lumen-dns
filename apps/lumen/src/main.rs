@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Lumen — private DNS, in your control.\n\nUsage: lumen --config FILE [--state FILE] [--check]\n       lumen --bind ADDRESS\n       lumen --version\n\n--config FILE   Load schema-versioned TOML configuration.\n--state FILE    Enable SQLite config/device storage and cross-platform control.\n--bind ADDRESS  Run UDP/TCP recursive DNS (loopback clients by default).\n--check         Validate config, filter sources, root hints, trust anchors, and TLS keys, then exit.\n--help          Show help.\n--version       Show version.\n\nEncrypted listeners require explicit config and certificate/key files.";
+const HELP: &str = "Lumen — private DNS, in your control.\n\nUsage: lumen --config FILE [--state FILE] [--check]\n       lumen --bind ADDRESS\n       lumen --version\n\n--config FILE   Load schema-versioned TOML configuration.\n--state FILE    Enable SQLite config/device storage and cross-platform control.\n--bind ADDRESS  Run UDP/TCP recursive DNS (loopback clients by default).\n--check         Validate config, filter sources, root hints, trust anchors, and TLS keys, then exit.\n--help          Show help.\n--version       Show version.\n\nEncrypted DNS and web listeners require explicit config and certificate/key files.";
 
 enum Command {
     Help,
@@ -119,9 +119,7 @@ async fn main() -> io::Result<()> {
                 return run_managed(config_path, state_path).await;
             }
             let mut server = RunningServer::start(config).await?;
-            for (protocol, address) in &server.endpoints {
-                println!("Lumen {protocol:?} listening on {address}");
-            }
+            print_endpoints(&server);
             let result = tokio::select! { result = server.wait() => result, result = shutdown_signal() => result };
             server.shutdown().await;
             result?;
@@ -327,6 +325,10 @@ fn record_control(store: &Store, result: Result<(), String>, success: &str) -> i
 fn print_endpoints(server: &RunningServer) {
     for (protocol, address) in &server.endpoints {
         println!("Lumen {protocol:?} listening on {address}");
+    }
+    for (tls, address) in &server.web_endpoints {
+        let protocol = if *tls { "HTTPS" } else { "HTTP" };
+        println!("Lumen web {protocol} listening on {address}");
     }
 }
 

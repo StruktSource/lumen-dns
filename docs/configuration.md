@@ -42,6 +42,10 @@ See [state and control](state-and-control.md).
 | `management.requests_per_minute` | `60`; per-token bound, 1–600 |
 | `management.tokens` | 1–16 named SHA-256 token hashes with viewer/operator/admin role when API enabled |
 | `management.webhooks` | Up to 8 signed HTTPS audit webhooks with secret files |
+| `web.http` | Loopback `127.0.0.1:8080` and `[::1]:8080` in release config; empty disables HTTP |
+| `web.https` | Empty; direct TLS 1.3 with HTTP/2 and HTTP/1.1 when configured |
+| `web.certificate`, `web.private_key` | Required together when `web.https` is enabled |
+| `web.max_connections` | `64`; shared web connection bound, 1–1024 |
 | `listen` | Listener and client-access settings |
 | `resolver` | Selected mode, cache, DNSSEC, and upstream settings |
 | `limits` | Shared admission and IO bounds |

@@ -77,10 +77,13 @@ async fn release_default_is_private_and_starts() {
     assert!(config.filtering.rules.allow.is_empty());
     assert!(config.filtering.rules.block.is_empty());
     let bind = address("127.0.0.1");
+    let web = address("127.0.0.1");
     config.listen.udp = vec![bind];
     config.listen.tcp = vec![bind];
+    config.web.http = vec![web];
     let mut server = RunningServer::start(config).await.unwrap();
     assert_eq!(server.endpoints.len(), 2);
+    assert_eq!(server.web_endpoints, [(false, web)]);
     server.shutdown().await;
 }
 

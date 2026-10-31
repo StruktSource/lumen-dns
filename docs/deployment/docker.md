@@ -11,12 +11,15 @@ mount an explicit config such as `deploy/lumen.toml` and publish both UDP and TC
 docker run --name lumen --read-only --user 65532:65532 \
   --cap-drop ALL --security-opt no-new-privileges \
   --tmpfs /tmp:size=16m -p 53:5353/udp -p 53:5353/tcp \
+  -p 127.0.0.1:8080:8080/tcp \
   -v "$PWD/deploy/lumen.toml:/etc/lumen/lumen.toml:ro" \
   ghcr.io/struktsource/lumen-dns:0.1.0
 ```
 
 Review `allow_clients` first. The example accepts only private IPv4 and ULA IPv6
-ranges. Do not expose port 53 to the internet. The current core keeps caches and
+ranges. Do not expose port 53 to the internet. Port 8080 serves only the embedded
+blank UI and is published on host loopback. Any chosen reverse proxy can use that
+upstream and terminate HTTPS or HTTP/3. The current core keeps caches and
 filter snapshots in memory, so restarts discard them. Managed config/device
 state is opt-in: mount a UID 65532-writable directory and add
 `--state /var/lib/lumen/state.db` to the container command. Keep the root

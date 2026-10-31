@@ -19,7 +19,7 @@ review remain before production readiness.
 | Available | Next |
 | --- | --- |
 | UDP, TCP, DoH, DoT, DoQ on IPv4/IPv6 | Functional web UI |
-| Filtering, device policies, bounded list imports and atomic refresh/rollback | Functional web UI |
+| Embedded blank UI hosting over HTTP and direct HTTPS | Functional web UI |
 | Recursive resolution, delegation checks, DNSSEC | Extended interoperability and soak tests |
 | SQLite config/device state, migrations, reload, and local CLI | Functional web UI |
 | Explicit forwarding and encrypted-only provider failover | Deployment guides, signed images, external review |
@@ -58,6 +58,7 @@ encrypted provider failover example; running it sends DNS to its configured upst
 
 See [filtering guide](docs/filtering.md), [resolver guide](docs/resolver.md), [configuration reference](docs/configuration.md),
 [management API](docs/management-api.md), [observability and integrations](docs/observability.md),
+[web UI hosting](docs/web-hosting.md),
 [upstream provider presets](docs/upstream-providers.md),
 [security boundaries](docs/threat-model.md), [verification](docs/verification.md),
 and [performance snapshots](docs/performance.md).

@@ -1,5 +1,20 @@
 # Verification
 
+## Embedded web hosting — 2026-10-31
+
+Native validation: macOS ARM64. The locked workspace run passes 61 tests plus
+doc tests. Coverage includes strict fixed routes, response security headers,
+an actual loopback HTTP request for the embedded shell, release-config web
+startup, listener collision checks, bounded connection config, and TLS 1.3
+credential/HTTP/2 ALPN setup. Direct HTTPS was configuration-tested with a local
+self-signed certificate; no browser or external reverse proxy was contacted.
+
+Format and Clippy with warnings denied pass. Both `config/lumen.toml` and
+`deploy/lumen.toml` pass daemon checks. Compose YAML and diff whitespace checks
+pass. No container image was built in this slice. Direct HTTP/3 is not claimed;
+the documented contract uses any HTTP/3-capable reverse proxy over a private
+Lumen HTTP upstream.
+
 ## Phase 3 management and observability — 2026-10-31
 
 Native validation: macOS ARM64. The full locked workspace test run passed 57

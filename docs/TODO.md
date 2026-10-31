@@ -25,10 +25,12 @@ Phases 1 and 2 resolver/filtering implementation are complete. See the detailed
    bounded tokens, request limits, and durable audit events.
 2. [x] Add extended privacy-safe Prometheus metrics, a ready Grafana dashboard,
    bounded signed HTTPS webhooks, and Home Assistant examples.
-3. Begin UI design/prototyping. Use mock
+3. [x] Add embedded blank-shell hosting over HTTP and direct TLS HTTP/2, with a
+   vendor-neutral reverse-proxy contract for HTTP/3.
+4. Begin UI design/prototyping. Use mock
    data for an overview, list management, and settings; keep the prototype local
    and management API access disabled.
-4. Build the functional UI during Phase 3, once configuration persistence/reload
+5. Build the functional UI during Phase 3, once configuration persistence/reload
    and an authenticated, scoped management API are ready. Start with aggregate
    status, then settings and filtering controls. Keep query history off by default.
 

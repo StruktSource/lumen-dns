@@ -1,8 +1,14 @@
-# Lumen release defaults. Safe local recursive DNS with no optional features.
+# Lumen deployment defaults. Private-network DNS with blank UI hosting.
 # Full reference: ../docs/configuration.md
 schema_version = 1
 # Optional local aggregate metrics. Disabled by default.
 # metrics = "127.0.0.1:9153"
+
+# Blank embedded UI. Compose publishes it on host loopback only.
+[web]
+http = ["0.0.0.0:8080"]
+https = []
+max_connections = 64
 
 # Local DNS listeners. Change both addresses and allow_clients for LAN use.
 [listen]

@@ -28,6 +28,7 @@ pub struct RunningServer {
     pub endpoints: Vec<(Transport, SocketAddr)>,
     pub metrics: Arc<Metrics>,
     pub filter: Arc<lumen_filter::Filter>,
+    pub web_endpoints: Vec<(bool, SocketAddr)>,
 }
 
 impl RunningServer {
@@ -114,6 +115,10 @@ impl RunningServer {
             quic.push(endpoint);
         }
         let metrics_listener = config.metrics.map(tcp_listener).transpose()?;
+        let web = lumen_web::BoundWeb::bind(&config.web).await?;
+        let web_endpoints = web
+            .as_ref()
+            .map_or_else(Vec::new, |web| web.endpoints.clone());
         let mut tasks = JoinSet::new();
         for socket in datagrams {
             tasks.spawn(serve_udp(socket, Arc::clone(&service)));
@@ -153,11 +158,15 @@ impl RunningServer {
         if let Some(listener) = metrics_listener {
             tasks.spawn(serve_metrics(listener, service));
         }
+        if let Some(web) = web {
+            tasks.spawn(web.serve());
+        }
         Ok(Self {
             tasks,
             endpoints,
             metrics,
             filter,
+            web_endpoints,
         })
     }
 
@@ -177,6 +186,7 @@ impl RunningServer {
         {
             let _ = credentials(config)?;
         }
+        lumen_web::BoundWeb::check(&config.web)?;
         Ok(())
     }
 

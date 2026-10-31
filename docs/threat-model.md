@@ -19,6 +19,7 @@
 | Listener silently fails | Daemon observes background task errors; startup binds all sockets before serving |
 | Query privacy | No query history, domain/client metric labels, or external telemetry; startup logs show only listener addresses |
 | Management exposure | API and metrics bind loopback only; API requires hashed bearer tokens, scoped roles, per-token rate limits, bounded parsing, and durable audit |
+| Static UI hosting | Embedded fixed routes, no filesystem paths or templates, bounded connections, strict response headers; release HTTP binds loopback |
 | Container impact | Non-root UID 65532, no runtime key generation/download, minimal Debian runtime |
 | CI/release compromise | Read-only PR permissions, no persisted checkout credentials, locked Rust dependencies, release publish only on version tags after required gates |
 | Artifact substitution | Per-archive SHA-256, GitHub artifact provenance, OCI provenance and SBOM; image signing remains pending |

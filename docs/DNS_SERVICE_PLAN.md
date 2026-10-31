@@ -47,7 +47,8 @@ Product name: **Lumen**. Organization: **Strukt**.
 - Plain readable config file with safe privacy defaults.
 - Full CLI for config, health, cache, list, device, profile, and service actions.
 - Optional web UI for setup, activity, devices, policies, and diagnostics.
-- First release includes CLI, config, and a blank UI shell. API routes and access stay disabled until API security work is complete.
+- First release includes CLI, config, and an embedded blank UI shell. Scoped API
+  routes are now opt-in and loopback-only; functional UI work remains later.
 - Secure local API by default. Strong auth, authorization, rate limits, and audit records when exposed.
 - Stable API with webhooks and integrations for Home Assistant, scripts, and user tooling.
 - Hot reload for safe config and list changes with no resolver downtime.

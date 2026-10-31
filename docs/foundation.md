@@ -20,7 +20,7 @@ crates/lumen-core/   client transports, limits, lifecycle and aggregate metrics
 crates/lumen-store/  SQLite migrations, config/device state and local controls
 crates/lumen-api/    opt-in loopback /v1 management, roles, audit, webhooks
 config/             safe release default and opt-in feature examples
-web/                blank optional UI shell
+web/                blank UI shell embedded by lumen-web at compile time
 fuzz/               DNS/config/filter fuzz targets; separate Cargo workspace
 scripts/            local checks, builds, packaging
 .agent/             concise project continuity notes
@@ -54,6 +54,8 @@ must be backed by the [verification record](verification.md).
   transport, not a management API.
 - SQLite stores config revisions and devices when `--state` is enabled. Hot DNS
   caches remain bounded in memory. Query history and external telemetry are off.
+- Blank UI hosting is static and unauthenticated. It contains no management data;
+  `/v1` remains a separate authenticated listener.
 - Operators opt into each encrypted listener and each upstream; recursive mode
   has no implicit upstream fallback.
 

@@ -22,6 +22,30 @@ pub struct Config {
     pub filtering: lumen_filter::config::Config,
     pub metrics: Option<SocketAddr>,
     pub management: Management,
+    pub web: Web,
+}
+
+/// Embedded static UI listeners. Empty address lists disable hosting.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Web {
+    pub http: Vec<SocketAddr>,
+    pub https: Vec<SocketAddr>,
+    pub certificate: Option<PathBuf>,
+    pub private_key: Option<PathBuf>,
+    pub max_connections: u16,
+}
+
+impl Default for Web {
+    fn default() -> Self {
+        Self {
+            http: Vec::new(),
+            https: Vec::new(),
+            certificate: None,
+            private_key: None,
+            max_connections: 64,
+        }
+    }
 }
 
 /// Opt-in local management API. Bearer-token hashes stay in operator config.
@@ -337,6 +361,8 @@ impl Config {
             &mut config.resolver.root_hints,
             &mut config.resolver.trust_anchor,
             &mut config.resolver.upstream_ca,
+            &mut config.web.certificate,
+            &mut config.web.private_key,
         ]
         .into_iter()
         .flatten()
@@ -464,6 +490,7 @@ impl Config {
             return Err("metrics must bind a nonzero loopback port".into());
         }
         self.validate_management()?;
+        self.validate_web()?;
         self.filtering.validate()?;
         self.validate_resolver()
     }
@@ -509,6 +536,49 @@ impl Config {
             {
                 return Err("management webhooks need unique IDs and HTTPS URLs without credentials or fragments".into());
             }
+        }
+        Ok(())
+    }
+
+    fn validate_web(&self) -> Result<(), String> {
+        let web = &self.web;
+        let addresses = web.http.iter().chain(&web.https).collect::<Vec<_>>();
+        if addresses.len() > 8 {
+            return Err("at most 8 web listeners are allowed".into());
+        }
+        if !(1..=1024).contains(&web.max_connections) {
+            return Err("web max_connections must be in 1..=1024".into());
+        }
+        for (index, address) in addresses.iter().enumerate() {
+            if address.port() == 0
+                || addresses[..index]
+                    .iter()
+                    .any(|other| socket_conflicts(address, other))
+            {
+                return Err("web listener ports must be nonzero and unique".into());
+            }
+        }
+        if web.https.is_empty() {
+            if web.certificate.is_some() || web.private_key.is_some() {
+                return Err("web certificate and private_key require HTTPS listeners".into());
+            }
+        } else if web.certificate.is_none() || web.private_key.is_none() {
+            return Err("web HTTPS requires certificate and private_key".into());
+        }
+        let occupied = self
+            .listen
+            .tcp
+            .iter()
+            .chain(&self.listen.dot)
+            .chain(&self.listen.doh)
+            .chain(self.metrics.iter())
+            .chain(self.management.listen.iter());
+        if addresses.iter().any(|address| {
+            occupied
+                .clone()
+                .any(|other| socket_conflicts(address, other))
+        }) {
+            return Err("web listener conflicts with another TCP listener".into());
         }
         Ok(())
     }
@@ -682,6 +752,12 @@ fn valid_api_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
 }
 
+fn socket_conflicts(left: &SocketAddr, right: &SocketAddr) -> bool {
+    left.port() == right.port()
+        && left.is_ipv4() == right.is_ipv4()
+        && (left.ip() == right.ip() || left.ip().is_unspecified() || right.ip().is_unspecified())
+}
+
 /// Read an operator file without allocating beyond the declared bound.
 ///
 /// # Errors
@@ -820,6 +896,15 @@ mod tests {
         assert!(config.management.listen.is_none());
         assert!(config.management.tokens.is_empty());
         assert!(config.management.webhooks.is_empty());
+        assert!(!config.web.http.is_empty());
+        assert!(
+            config
+                .web
+                .http
+                .iter()
+                .all(|address| address.ip().is_loopback())
+        );
+        assert!(config.web.https.is_empty());
         assert_eq!(config.resolver.mode, Mode::Recursive);
         assert!(config.resolver.dnssec);
         assert!(config.resolver.upstreams.is_empty());
@@ -927,5 +1012,31 @@ mod tests {
             Config::parse(&source.replace("[[management.tokens]]", "# no token"), base).is_err()
         );
         assert!(Config::parse(&source.replace("https://", "http://"), base).is_err());
+    }
+
+    #[test]
+    fn web_listeners_are_bounded_and_do_not_overlap() {
+        let config = Config::parse(
+            "schema_version = 1\n[web]\nhttp = ['127.0.0.1:8080']\nmax_connections = 32\n",
+            Path::new("/operator"),
+        )
+        .unwrap();
+        assert_eq!(config.web.max_connections, 32);
+        assert!(config.web.certificate.is_none());
+
+        assert!(
+            Config::parse(
+                "schema_version = 1\n[web]\nhttp = ['127.0.0.1:5353']\n",
+                Path::new("/operator"),
+            )
+            .is_err()
+        );
+        assert!(
+            Config::parse(
+                "schema_version = 1\n[web]\nhttps = ['127.0.0.1:8443']\n",
+                Path::new("/operator"),
+            )
+            .is_err()
+        );
     }
 }
