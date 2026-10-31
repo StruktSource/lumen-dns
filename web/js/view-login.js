@@ -4,7 +4,7 @@
 const L = window.L, h = L.h;
 const art = (kicker, line1, line2) => h('section', { class: 'login-art' }, h('div', { class: 'mono k' }, kicker),
   h('div', {}, h('div', { style: 'font-size:clamp(40px,5vw,72px);color:var(--acid);margin-bottom:12px' }, '✦'), h('h1', {}, 'LUMEN.'), h('p', {}, line1, h('br'), h('span', {}, line2))),
-  h('div', { class: 'meta mono' }, h('span', {}, 'SELF-HOSTED'), h('span', {}, 'NO TELEMETRY'), h('span', {}, 'YOUR NETWORK')));
+  h('div', { class: 'meta mono' }, h('span', {}, 'SELF-HOSTED'), h('span', {}, 'NO TELEMETRY'), h('span', {}, 'YOUR NETWORK'), h('span', { class: 'sp' }), h('span', { class: 'ver' }, 'v' + (L.meta?.version || ''))));
 
 L.views.unavailable = message => h('div', { class: 'login' }, art('STRUKT / LUMEN', 'The console', 'is not reachable.'),
   h('div', { class: 'login-form' }, h('h2', {}, 'Console unavailable'), h('p', { class: 'muted', style: 'margin:0' }, message || 'Lumen did not answer.'),

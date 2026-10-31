@@ -8,7 +8,7 @@ podman run --name lumen --read-only --user 65532:65532 \
   --cap-drop ALL --security-opt no-new-privileges \
   -p 5353:5353/udp -p 5353:5353/tcp \
   -v "$PWD/deploy/lumen.toml:/etc/lumen/lumen.toml:ro,Z" \
-  ghcr.io/struktsource/lumen-dns:0.2.1
+  ghcr.io/struktsource/lumen-dns:0.2.2
 ```
 
 Port 5353 keeps rootless operation simple. Redirect or forward host port 53 with
