@@ -57,7 +57,7 @@ L.render = async () => {
 L.rerender = () => { if (!L.session) return; const y = scrollY; draw(); scrollTo(0, y); };
 /* Reload this page's data from the server, then redraw (after a successful change). */
 L.refreshPage = async () => { const { def } = current(); try { await L.loadPage(def[0]); } catch (e) { L.toast(e.message, 'bad'); } L.rerender(); };
-L.paintMain = () => { const m = L.$('#view'); if (!m || !L.session) return; const { def, sub } = current(); const y = scrollY; m.replaceChildren(...[].concat(L.views[def[0]](sub))); scrollTo(0, y); };
+L.paintMain = () => { const m = L.$('#view'); if (!m || !L.session) return; const { def, sub } = current(); const y = scrollY; m.replaceChildren(...[].concat(L.views[def[0]](sub)).flat(9).filter(c => c != null && c !== false)); scrollTo(0, y); };
 
 addEventListener('hashchange', () => { L.render(); scrollTo(0, 0); });
 
