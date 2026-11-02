@@ -87,7 +87,7 @@ and restart after rotation. Lumen does not create or download certificates.
 | `trust_anchor` | Hickory bundled root DNSKEYs | Optional DNSKEY-format file; 64 KiB; at least one key; DNSSEC must be enabled |
 | `upstream_ca` | Public WebPKI roots | Optional PEM CA bundle, 1 MiB; replaces public roots for encrypted forwarding |
 | `upstreams` | `[]` | 1–8 custom endpoints in forward mode; rejected in recursive mode |
-| `providers` | `[]` | Bundled provider selections; cannot be mixed with custom upstreams |
+| `providers` | `[]` | Bundled provider selections; may be combined with custom upstreams (at most 8 addresses in total) |
 | `cache_entries` | `4096` | 1–65536 response entries |
 | `nameserver_cache_entries` | `1024` | 1–4096; recursive delegation cache (raised from 256 so busy networks stop re-walking delegations) |
 | `validation_cache_entries` | `4096` | 1–65536; recursive DNSSEC validation cache |

@@ -20,8 +20,9 @@ transport_priority = ["quic", "https", "tls"]
 
 `address_family` accepts `any`, `ipv4`, or `ipv6`. Multiple selections are
 allowed when they expand to at most eight endpoints. Protocols are accepted only
-when marked supported by the catalog. Presets cannot be mixed with custom
-`[[resolver.upstreams]]` entries. Custom upstreams remain supported.
+when marked supported by the catalog. Presets can be combined with custom
+`[[resolver.upstreams]]` entries. The custom entries are appended after the preset
+endpoints, in the order written, and the total stays at most eight.
 
 `protocol = "auto"` builds an encrypted-only list from the transports that the
 catalog marks supported. Its default order is QUIC, HTTPS, then TLS. Set

@@ -29,7 +29,64 @@ function listModal(item) {
       for (const k of ['url', 'path', 'text']) if (k !== kind.v) l[k] = '';
       const i = D.lists.findIndex(x => x.id === l.id); if (i < 0) D.lists.push(l); else D.lists[i] = l; L.touch(); L.rerender(); } }] });
 }
+
+/* ---------- one-click catalog ---------- */
+const HZ = 'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/';
+const CATALOG = [
+  { group: 'Ads, trackers and telemetry', note: 'Choose one level of the same family. Higher levels contain the lower ones and block more, with more risk of broken sites.', items: [
+    { id: 'hagezi-light', name: 'Hagezi Light', info: 'Gentle. Ads, trackers and malware with almost no breakage.', rules: 78000, format: 'adblock', url: HZ + 'light.txt' },
+    { id: 'hagezi-normal', name: 'Hagezi Normal', info: 'Balanced all-rounder.', rules: 175000, format: 'adblock', url: HZ + 'multi.txt' },
+    { id: 'hagezi-pro', name: 'Hagezi Pro', info: 'Recommended. Strong blocking, still safe for daily use.', rules: 213000, format: 'adblock', url: HZ + 'pro.txt', star: true },
+    { id: 'hagezi-pro-plus', name: 'Hagezi Pro++', info: 'Aggressive. Occasionally breaks a site.', rules: 225000, format: 'adblock', url: HZ + 'pro.plus.txt' },
+    { id: 'hagezi-ultimate', name: 'Hagezi Ultimate', info: 'Maximum. Expect to allow some domains yourself.', rules: 283000, format: 'adblock', url: HZ + 'ultimate.txt' },
+    { id: 'oisd-small', name: 'OISD Small', info: 'Light, built to never break sites.', rules: 59000, format: 'adblock', url: 'https://small.oisd.nl' },
+    { id: 'oisd-big', name: 'OISD Big', info: 'Large and well maintained.', rules: 232000, format: 'adblock', url: 'https://big.oisd.nl', star: true },
+    { id: 'adguard-dns', name: 'AdGuard DNS filter', info: 'AdGuard’s default DNS list.', rules: 186000, format: 'adblock', url: 'https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt' },
+    { id: 'stevenblack', name: 'StevenBlack Unified', info: 'The classic hosts list: ads and malware.', rules: 79000, format: 'hosts', url: 'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts' },
+    { id: '1hosts-lite', name: '1Hosts Lite', info: 'Compact ads and tracking list.', rules: 102000, format: 'adblock', url: 'https://raw.githubusercontent.com/badmojr/1Hosts/master/Lite/adblock.txt' }] },
+  { group: 'Security: malware, phishing and scams', note: 'Safe for everyone. Add one of these next to your ad list.', items: [
+    { id: 'hagezi-tif', name: 'Hagezi Threat Intelligence', info: 'Recommended. Malware, phishing, scams and C2 servers. Large.', rules: 1170000, format: 'adblock', url: HZ + 'tif.txt', star: true },
+    { id: 'hagezi-tif-medium', name: 'Hagezi Threat Intelligence Medium', info: 'The same feeds, trimmed.', rules: 326000, format: 'adblock', url: HZ + 'tif.medium.txt' },
+    { id: 'hagezi-tif-mini', name: 'Hagezi Threat Intelligence Mini', info: 'Smallest threat list, for small devices.', rules: 194000, format: 'adblock', url: HZ + 'tif.mini.txt' },
+    { id: 'phishing-army', name: 'Phishing Army', info: 'Phishing domains.', rules: 152000, format: 'domains', url: 'https://phishing.army/download/phishing_army_blocklist.txt' },
+    { id: 'hagezi-fake', name: 'Hagezi Fake shops and scams', info: 'Fake stores, scams and fraud.', rules: 18000, format: 'adblock', url: HZ + 'fake.txt' }] },
+  { group: 'Extras', note: 'Applied to every device. To limit one to certain devices, restrict it in a profile.', items: [
+    { id: 'hagezi-popupads', name: 'Hagezi Pop-up ads', info: 'Pop-ups, redirects and aggressive ad networks.', rules: 51000, format: 'adblock', url: HZ + 'popupads.txt' },
+    { id: 'hagezi-nsfw', name: 'Hagezi Adult content', info: 'Pornography.', rules: 92000, format: 'adblock', url: HZ + 'nsfw.txt' },
+    { id: 'hagezi-gambling', name: 'Hagezi Gambling', info: 'Betting and casino sites.', rules: 627000, format: 'adblock', url: HZ + 'gambling.txt' },
+    { id: 'hagezi-bypass', name: 'Hagezi DoH/VPN/Proxy bypass', info: 'Stops devices from sidestepping Lumen with their own DNS-over-HTTPS or VPN.', rules: 17000, format: 'adblock', url: HZ + 'doh-vpn-proxy-bypass.txt' },
+    { id: 'hagezi-apple', name: 'Hagezi Apple telemetry', info: 'Apple tracking endpoints. May affect some Apple services.', rules: 110, format: 'adblock', url: HZ + 'native.apple.txt' },
+    { id: 'hagezi-windows', name: 'Hagezi Windows/Office telemetry', info: 'Microsoft telemetry endpoints.', rules: 384, format: 'adblock', url: HZ + 'native.winoffice.txt' }] }];
+const BUNDLES = [
+  { key: 'recommended', name: 'Recommended', info: 'Hagezi Pro and Threat Intelligence', ids: ['hagezi-pro', 'hagezi-tif'] },
+  { key: 'light', name: 'Light', info: 'Hagezi Light and Threat Intelligence Mini', ids: ['hagezi-light', 'hagezi-tif-mini'] },
+  { key: 'strict', name: 'Strict', info: 'Hagezi Ultimate, Threat Intelligence and OISD Big', ids: ['hagezi-ultimate', 'hagezi-tif', 'oisd-big'] }];
+const CATALOG_ITEMS = CATALOG.flatMap(g => g.items), BUDGET = 4000000;
+L.catalog = { items: CATALOG_ITEMS, bundles: BUNDLES };
+const rulesLabel = n => n >= 1e6 ? (n / 1e6).toFixed(1) + ' M' : n >= 1e3 ? Math.round(n / 1e3) + ' k' : String(n);
+/* Install catalog entries. Profiles that restrict themselves to named lists get the new ones too, otherwise the list would silently never apply. */
+function installLists(ids) {
+  const D = L.D().filtering; const add = CATALOG_ITEMS.filter(c => ids.includes(c.id) && !D.lists.some(l => l.id === c.id));
+  if (!add.length) return L.toast('Already installed.');
+  if (D.lists.length + add.length > 64) return L.toast('At most 64 lists.', 'bad');
+  const est = CATALOG_ITEMS.filter(c => D.lists.some(l => l.id === c.id) || add.includes(c)).reduce((a, c) => a + c.rules, 0);
+  if (est > BUDGET) return L.toast(`That would be about ${rulesLabel(est)} rules, over the ${rulesLabel(BUDGET)} limit. Remove a list first.`, 'bad');
+  for (const c of add) D.lists.push({ id: c.id, format: c.format, url: c.url, path: '', text: '', category: '', refresh_secs: 86400 });
+  let widened = 0; for (const p of D.profiles) if (p.lists.length) { p.lists = [...p.lists, ...add.map(c => c.id)]; widened++; }
+  L.touch(); L.rerender(); L.toast(`${add.length === 1 ? add[0].name : add.length + ' lists'} added${widened ? ` and enabled in ${widened} restricted profile${widened > 1 ? 's' : ''}` : ''}. Apply to download and start blocking.`, 'ok');
+}
+function catalogCard() {
+  const D = L.D().filtering, have = id => D.lists.some(l => l.id === id);
+  return h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h3', {}, 'Quick install'), h('span', { class: 'mono muted' }, 'one click, then Apply')),
+    h('div', { class: 'card-b stack' },
+      h('div', { class: 'grid g3' }, BUNDLES.map(b => { const done = b.ids.every(have); return h('div', { class: 'card' }, h('div', { class: 'card-b stack' }, h('div', {}, h('strong', {}, b.name), h('div', { class: 'hint' }, b.info)), done ? h('span', { class: 'pill ok' }, 'Installed') : h('button', { class: 'btn primary sm', onclick: () => installLists(b.ids) }, L.ic('plus'), 'Install ' + b.name.toLowerCase()))); })),
+      CATALOG.map(g => h('div', { class: 'stack' }, h('div', { class: 'sec-title' }, h('h2', {}, g.group)), h('p', { class: 'hint', style: 'margin:0' }, g.note),
+        h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('tbody', {}, g.items.map(c => h('tr', {}, h('td', {}, h('strong', {}, c.name), c.star ? h('span', { class: 'chip', style: 'margin-left:8px' }, 'recommended') : null, h('div', { class: 'hint' }, c.info)), h('td', { class: 'mono-c' }, '≈ ' + rulesLabel(c.rules)), h('td', { class: 'act' }, have(c.id) ? h('span', { class: 'pill ok' }, 'Installed') : h('button', { class: 'btn sm', onclick: () => installLists([c.id]) }, L.ic('plus'), 'Install'))))))))),
+      h('p', { class: 'hint', style: 'margin:0' }, 'Lists are fetched over HTTPS from their publishers when you apply, then refreshed daily. Rule counts are approximate.')));
+}
 const sourceText = l => l.url ? l.url.replace('https://', '') : l.path ? l.path : l.text ? `typed in · ${l.text.split('\n').filter(Boolean).length} lines` : '—';
+/* Why a list might not block for the default profile. */
+const skipped = l => { const D = L.D().filtering, p = D.profiles.find(x => x.id === D.default_profile); if (!p) return ''; if (p.lists.length && !p.lists.includes(l.id)) return `Not enabled in profile ${p.id}`; if (l.category && !p.categories.includes(l.category)) return `Needs category ${l.category} in profile ${p.id}`; return ''; };
 function listsTab() {
   const D = L.D().filtering, live = L.S.status.filter.lists; const total = live.reduce((a, x) => a + x.rules, 0) + D.rules.allow.length + D.rules.block.length;
   return h('div', { class: 'stack' },
@@ -37,9 +94,10 @@ function listsTab() {
       D.lists.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['List', 'Format', 'Category', 'Refresh', 'Rules', 'Status', ''].map(x => h('th', {}, x)))), h('tbody', {}, D.lists.map(l => { const rt = live.find(x => x.id === l.id);
         return h('tr', {}, h('td', {}, h('strong', {}, l.id), h('div', { class: 'hint mono' }, sourceText(l))), h('td', { class: 'mono-c' }, l.format), h('td', {}, l.category ? h('span', { class: 'chip' }, l.category) : h('span', { class: 'muted' }, 'none')), h('td', {}, refreshLabel(l.refresh_secs)),
           h('td', { class: 'mono-c' }, rt ? F.n(rt.rules) : '—', rt && rt.unsupported ? h('div', { class: 'hint' }, rt.unsupported + ' unsupported') : null, rt && rt.duplicates ? h('div', { class: 'hint' }, rt.duplicates + ' duplicates') : null),
-          h('td', {}, rt ? h('span', { class: 'pill ok' }, 'Loaded') : h('span', { class: 'pill off' }, 'Pending apply')),
+          h('td', {}, rt ? h('span', { class: 'pill ok' }, 'Loaded') : h('span', { class: 'pill off' }, 'Pending apply'), skipped(l) ? h('div', { class: 'hint' }, skipped(l)) : null),
           h('td', { class: 'act' }, h('button', { class: 'btn sm flat', 'aria-label': 'Edit ' + l.id, onclick: () => listModal(l) }, L.ic('pencil')), h('button', { class: 'btn sm flat danger', 'aria-label': 'Delete ' + l.id, onclick: () => { const used = D.profiles.filter(p => p.lists.includes(l.id)); if (used.length) return L.toast(`Used by profile ${used[0].id}. Remove it there first.`, 'bad'); D.lists = D.lists.filter(x => x.id !== l.id); L.touch(); L.rerender(); } }, L.ic('trash'))));
       })))) : L.empty('No lists', 'No third-party list is enabled by default. Add a source you trust.')),
+    catalogCard(),
     h('div', { class: 'note' }, L.ic('info'), h('p', {}, 'Refresh is atomic: Lumen builds a whole new generation and swaps it in only if every due source parses and the rule budget holds. A failed download keeps the live generation.')));
 }
 

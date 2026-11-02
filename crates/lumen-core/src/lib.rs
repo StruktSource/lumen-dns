@@ -2,7 +2,7 @@
 //! Service lifecycle, resource admission, and aggregate metrics.
 
 mod transport;
-pub use lumen_filter::Filter;
+pub use lumen_filter::{Filter, activity};
 pub use lumen_resolver::Transport;
 pub use transport::{ConsoleOptions, RunningServer};
 
@@ -339,7 +339,11 @@ impl Service {
             unix_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
-            domain: question.name().to_ascii().trim_end_matches('.').to_owned(),
+            domain: question
+                .name()
+                .to_ascii()
+                .trim_end_matches('.')
+                .to_ascii_lowercase(),
             qtype: question.query_type().to_string(),
             client,
             device: self.filter.device_of(client),

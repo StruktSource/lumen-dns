@@ -11,8 +11,9 @@ use hickory_server::{
         xfer::Protocol,
     },
     proto::{
-        dnssec::TrustAnchors,
-        rr::{LowerName, Name, Record, RecordSet, RecordType, TSigResponseContext},
+        dnssec::{DnssecSummary, TrustAnchors},
+        op::{Message, Query as DnsQuery},
+        rr::{LowerName, Name, RData, Record, RecordSet, RecordType, TSigResponseContext},
         serialize::{binary::BinEncoder, txt::Parser},
     },
     resolver::{
@@ -38,7 +39,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::time::timeout;
 
@@ -451,24 +452,32 @@ fn recursive_zone(
     } else {
         DnssecPolicy::ValidationDisabled
     };
-    let recursor = Recursor::new(
-        &addresses,
-        policy,
-        None,
-        RecursorOptions {
-            ns_cache_size: settings.nameserver_cache_entries as usize,
-            response_cache_size: u64::from(settings.cache_entries),
-            recursion_limit: settings.recursion_depth,
-            ns_recursion_limit: settings.recursion_depth,
-            cache_policy: TtlConfig::from_opts(options),
-            case_randomization: true,
-            edns_payload_len: 1232,
-            ..RecursorOptions::default()
-        },
-        TokioRuntimeProvider::default(),
-    )
-    .map_err(|_| "cannot build recursive resolver")?;
-    let recursor = Arc::new(recursor);
+    let build = |policy: DnssecPolicy, divisor: usize| {
+        Recursor::new(
+            &addresses,
+            policy,
+            None,
+            RecursorOptions {
+                ns_cache_size: (settings.nameserver_cache_entries as usize / divisor).max(64),
+                response_cache_size: (u64::from(settings.cache_entries) / divisor as u64).max(64),
+                recursion_limit: settings.recursion_depth,
+                ns_recursion_limit: settings.recursion_depth,
+                cache_policy: TtlConfig::from_opts(options),
+                case_randomization: true,
+                edns_payload_len: 1232,
+                ..RecursorOptions::default()
+            },
+            TokioRuntimeProvider::default(),
+        )
+        .map_err(|_| "cannot build recursive resolver")
+    };
+    // A small second recursor without validation, used only below zones already proven unsigned.
+    let insecure = if settings.dnssec {
+        Some(Arc::new(build(DnssecPolicy::ValidationDisabled, 8)?))
+    } else {
+        None
+    };
+    let recursor = Arc::new(build(policy, 1)?);
     let accel = Arc::new(
         Accel::new(Arc::clone(&metrics), settings.prefetch.clone()).with_hedge(settings.hedge_ms),
     );
@@ -504,6 +513,7 @@ fn recursive_zone(
         origin: Name::root().into(),
         backend: Backend::Recursive {
             recursor,
+            insecure,
             fallback,
             accel: Arc::clone(&accel),
         },
@@ -545,6 +555,7 @@ impl ResponseHandler for Capture {
 enum Backend<P: hickory_server::net::runtime::RuntimeProvider> {
     Recursive {
         recursor: Arc<Recursor<P>>,
+        insecure: Option<Arc<Recursor<P>>>,
         fallback: Option<FallbackBackend<P>>,
         accel: Arc<Accel>,
     },
@@ -581,6 +592,7 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
     fn nx_proof_kind(&self) -> Option<&NxProofKind> {
         None
     }
+    #[allow(clippy::too_many_lines)] // One match over every backend and fallback path.
     async fn lookup(
         &self,
         name: &LowerName,
@@ -591,6 +603,7 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
         let result = match &self.backend {
             Backend::Recursive {
                 recursor,
+                insecure,
                 fallback,
                 accel,
             } => match fallback {
@@ -601,9 +614,33 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
                     )
                     .await;
                     match recursive {
-                        Ok(Ok(message)) => Ok(AuthLookup::Response(message)),
+                        Ok(Ok(message)) => Ok(AuthLookup::Response(
+                            recover_bogus(
+                                recursor,
+                                insecure.as_deref(),
+                                accel,
+                                name,
+                                rtype,
+                                options.dnssec_ok,
+                                message,
+                            )
+                            .await,
+                        )),
                         Ok(Err(error)) if !recursion_timed_out(&error) => {
-                            Err(LookupError::from(error))
+                            match insecure_retry(
+                                recursor,
+                                insecure.as_deref(),
+                                accel,
+                                name,
+                                rtype,
+                                options.dnssec_ok,
+                                Some(&error),
+                            )
+                            .await
+                            {
+                                Some(message) => Ok(AuthLookup::Response(message)),
+                                None => Err(LookupError::from(error)),
+                            }
                         }
                         Ok(Err(_)) | Err(_) => {
                             fallback.metrics.attempts.fetch_add(1, Ordering::Relaxed);
@@ -637,11 +674,37 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
                         }
                     }
                 }
-                None => accel
+                None => match accel
                     .resolve(recursor, name, rtype, options.dnssec_ok, false)
                     .await
-                    .map(AuthLookup::Response)
-                    .map_err(LookupError::from),
+                {
+                    Ok(message) => Ok(AuthLookup::Response(
+                        recover_bogus(
+                            recursor,
+                            insecure.as_deref(),
+                            accel,
+                            name,
+                            rtype,
+                            options.dnssec_ok,
+                            message,
+                        )
+                        .await,
+                    )),
+                    Err(error) => match insecure_retry(
+                        recursor,
+                        insecure.as_deref(),
+                        accel,
+                        name,
+                        rtype,
+                        options.dnssec_ok,
+                        Some(&error),
+                    )
+                    .await
+                    {
+                        Some(message) => Ok(AuthLookup::Response(message)),
+                        None => Err(LookupError::from(error)),
+                    },
+                },
             },
             Backend::Forward(resolver) => resolver
                 .lookup(Name::from(name), rtype)
@@ -679,6 +742,98 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
         _: LookupOptions,
     ) -> LookupControlFlow<AuthLookup> {
         unsupported()
+    }
+}
+
+/// Some operators answer DS queries for a child zone from the child itself, which strict
+/// validation reads as bogus (Google's `l.google.com` is one). DNSSEC cannot make a name secure
+/// below a zone that is provably unsigned, so when an ancestor was validated as insecure the
+/// lookup is repeated without validation. Anything below a signed or bogus ancestor still fails.
+async fn insecure_retry<P: hickory_server::net::runtime::RuntimeProvider>(
+    validating: &Recursor<P>,
+    plain: Option<&Recursor<P>>,
+    accel: &Accel,
+    name: &LowerName,
+    rtype: RecordType,
+    dnssec_ok: bool,
+    error: Option<&hickory_server::resolver::recursor::RecursorError>,
+) -> Option<Message> {
+    let plain = plain?;
+    if error.is_some_and(|e| e.is_no_records_found() || e.is_nx_domain() || recursion_timed_out(e))
+    {
+        return None;
+    }
+    let mut chain = Vec::new();
+    let mut current = Name::from(name.clone()).base_name();
+    while !current.is_root() {
+        chain.push(current.clone());
+        current = current.base_name();
+    }
+    chain.reverse(); // from the top-level domain downwards
+    for ancestor in chain {
+        let ancestor = LowerName::from(ancestor);
+        // Which name server answers can vary between attempts, so look at the apex more than once.
+        for probe in [RecordType::SOA, RecordType::NS] {
+            let result = accel
+                .resolve(validating, &ancestor, probe, true, false)
+                .await;
+            let Ok(message) = result else { continue };
+            match DnssecSummary::from_records(
+                message.answers.iter().chain(message.authorities.iter()),
+            ) {
+                DnssecSummary::Insecure => {
+                    let query = DnsQuery::query(Name::from(name.clone()), rtype);
+                    return plain
+                        .resolve(query, Instant::now(), dnssec_ok)
+                        .await
+                        .ok()
+                        .map(|mut message| {
+                            message.metadata.authentic_data = false;
+                            message
+                        });
+                }
+                DnssecSummary::Secure => break, // a signed zone: look one level down
+                DnssecSummary::Bogus => {}
+            }
+        }
+    }
+    None
+}
+
+/// The recursor returns data it could not validate as an answer whose records are tagged
+/// bogus, and the server then answers SERVFAIL. Give such an answer the same second look.
+async fn recover_bogus<P: hickory_server::net::runtime::RuntimeProvider>(
+    validating: &Recursor<P>,
+    plain: Option<&Recursor<P>>,
+    accel: &Accel,
+    name: &LowerName,
+    rtype: RecordType,
+    dnssec_ok: bool,
+    message: Message,
+) -> Message {
+    let bogus = matches!(
+        DnssecSummary::from_records(message.answers.iter().chain(message.authorities.iter())),
+        DnssecSummary::Bogus
+    );
+    let mut message = if bogus {
+        insecure_retry(validating, plain, accel, name, rtype, dnssec_ok, None)
+            .await
+            .unwrap_or(message)
+    } else {
+        message
+    };
+    lowercase_names(&mut message);
+    message
+}
+
+/// Case randomization protects the upstream exchange; clients must not see the random case.
+/// DNSSEC canonical form is lowercase, so signatures stay valid.
+fn lowercase_names(message: &mut Message) {
+    for record in &mut message.answers {
+        record.name = record.name.to_lowercase();
+        if let RData::CNAME(target) = &mut record.data {
+            target.0 = target.0.to_lowercase();
+        }
     }
 }
 

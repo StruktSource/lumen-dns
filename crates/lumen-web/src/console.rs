@@ -254,6 +254,7 @@ impl Console {
         match (method.as_str(), parts.as_slice()) {
             ("GET", ["state"]) => return self.public_state(&store, request),
             ("POST", ["setup"]) => return self.setup(&mut store, request),
+            ("POST", ["setup", "code"]) => return self.setup_code(&store, request),
             ("POST", ["login"]) => return self.login(&mut store, request),
             ("POST", ["login", "2fa"]) => return self.login_second_step(&mut store, request),
             _ => {}
@@ -432,22 +433,23 @@ impl Console {
         )
     }
 
-    fn setup(&self, store: &mut Store, request: &Request) -> Reply {
-        if !json_content(&request.headers) {
-            return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "use application/json");
-        }
-        let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
-            return bad("invalid JSON");
-        };
+    /// Shared by the code page and the final setup call: throttle, first-run check, code check.
+    #[allow(clippy::result_large_err)] // The error is the ready-made HTTP reply.
+    fn check_setup_code(
+        &self,
+        store: &Store,
+        request: &Request,
+        body: &Value,
+    ) -> Result<(), Reply> {
         let key = vec![format!("setup:{}", request.peer.ip())];
         if let Some(wait) = self.throttle.lock().expect("throttle").locked(&key) {
-            return error(
+            return Err(error(
                 StatusCode::TOO_MANY_REQUESTS,
                 &format!("too many attempts, wait {wait} s"),
-            );
+            ));
         }
         if store.user_count().unwrap_or(1) != 0 {
-            return error(StatusCode::CONFLICT, "setup is already complete");
+            return Err(error(StatusCode::CONFLICT, "setup is already complete"));
         }
         if !request.peer.ip().to_canonical().is_loopback() {
             let expected = store
@@ -455,14 +457,41 @@ impl Console {
                 .ok()
                 .flatten()
                 .unwrap_or_default();
-            let given = text(&body, "code").unwrap_or("").trim().to_uppercase();
+            let given = text(body, "code").unwrap_or("").trim().to_uppercase();
             if expected.is_empty() || !same(&given, &expected) {
                 self.throttle.lock().expect("throttle").fail(&key);
-                return error(
+                return Err(error(
                     StatusCode::FORBIDDEN,
                     "wrong setup code. It is printed in the daemon log when Lumen starts",
-                );
+                ));
             }
+        }
+        Ok(())
+    }
+
+    /// Lets the console check the setup code on its own page before asking for an account.
+    fn setup_code(&self, store: &Store, request: &Request) -> Reply {
+        if !json_content(&request.headers) {
+            return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "use application/json");
+        }
+        let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+            return bad("invalid JSON");
+        };
+        match self.check_setup_code(store, request, &body) {
+            Ok(()) => reply(StatusCode::OK, &json!({ "ok": true })),
+            Err(reply) => reply,
+        }
+    }
+
+    fn setup(&self, store: &mut Store, request: &Request) -> Reply {
+        if !json_content(&request.headers) {
+            return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "use application/json");
+        }
+        let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+            return bad("invalid JSON");
+        };
+        if let Err(reply) = self.check_setup_code(store, request, &body) {
+            return reply;
         }
         let name = text(&body, "username").unwrap_or("").trim().to_lowercase();
         let pw = text(&body, "password").unwrap_or("");
@@ -1007,6 +1036,7 @@ impl Console {
                 "pending_revision": store.staged_config().ok().flatten().map(|c| c.revision),
                 "history_enabled": self.host.history_enabled(),
                 "rss_bytes": rss_bytes(),
+                "activity": activity_json(),
                 "counters": {
                     "queries": c.queries, "responses": c.responses, "malformed": c.malformed,
                     "refused": c.refused, "timeouts": c.timeouts, "failures": c.failures,
@@ -1420,6 +1450,15 @@ fn config_json(store: &Store) -> Reply {
     let Ok(mut config) = serde_json::to_value(&effective) else {
         return unavailable();
     };
+    // Provider presets expand into upstream addresses; the form edits the presets and
+    // only the custom extras, so hide the derived entries.
+    if effective.resolver.provider_upstreams > 0
+        && let Some(upstreams) = config
+            .pointer_mut("/resolver/upstreams")
+            .and_then(Value::as_array_mut)
+    {
+        upstreams.drain(..effective.resolver.provider_upstreams.min(upstreams.len()));
+    }
     if let Some(filtering) = config.get_mut("filtering").and_then(Value::as_object_mut) {
         filtering.remove("devices");
     }
@@ -1464,6 +1503,13 @@ fn config_source(store: &Store, body: &[u8]) -> Result<String, Reply> {
     let Some(toml::Value::Table(mut table)) = json_to_toml(&config) else {
         return Err(bad("config must be an object"));
     };
+    // Recursive mode takes no forwarding upstreams; drop leftovers from forward mode.
+    if let Some(toml::Value::Table(resolver)) = table.get_mut("resolver")
+        && resolver.get("mode").and_then(toml::Value::as_str) == Some("recursive")
+    {
+        resolver.remove("providers");
+        resolver.remove("upstreams");
+    }
     table.insert("schema_version".into(), toml::Value::Integer(1));
     if let Some(toml::Value::Table(filtering)) = table.get_mut("filtering") {
         filtering.remove("devices");
@@ -1563,6 +1609,17 @@ fn snake(debug: &str) -> String {
         out.extend(ch.to_lowercase());
     }
     out
+}
+
+/// Live download and apply progress for the console's activity bar.
+fn activity_json() -> Value {
+    let (job, lists) = lumen_filter::activity::snapshot();
+    json!({
+        "phase": job.phase, "message": job.message, "since": job.since,
+        "lists": lists.into_iter().map(|l| json!({
+            "id": l.id, "state": l.state, "bytes": l.bytes, "total": l.total, "rules": l.rules, "error": l.error,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn providers_json() -> Reply {
@@ -1987,6 +2044,24 @@ mod tests {
                 from,
             ))
         };
+        let check = |from: &str, code: &str| {
+            body(call(
+                &f,
+                Method::POST,
+                "/api/setup/code",
+                None,
+                &json!({ "code": code }).to_string(),
+                from,
+            ))
+            .0
+        };
+        assert_eq!(check("192.168.1.9", "WRONG-CODE"), StatusCode::FORBIDDEN);
+        assert_eq!(check("192.168.1.9", &code.to_lowercase()), StatusCode::OK);
+        assert_eq!(
+            check("127.0.0.1", ""),
+            StatusCode::OK,
+            "loopback needs no code"
+        );
         assert_eq!(
             attempt("192.168.1.9", "WRONG-CODE", "correct horse battery").0,
             StatusCode::FORBIDDEN
@@ -2003,6 +2078,11 @@ mod tests {
         assert_eq!(
             attempt("127.0.0.1", "", "another passphrase!").0,
             StatusCode::CONFLICT
+        );
+        assert_eq!(
+            check("127.0.0.1", ""),
+            StatusCode::CONFLICT,
+            "closed after setup"
         );
         assert!(f.console.prepare().unwrap().is_none());
         assert!(

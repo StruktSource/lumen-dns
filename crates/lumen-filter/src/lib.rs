@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Client-aware filtering before DNS cache lookup. Updates are transactional.
 
+pub mod activity;
 pub mod config;
 mod fetch;
 mod response;
@@ -230,6 +231,7 @@ impl Filter {
     pub async fn load(config: Config) -> Result<Self, String> {
         config.validate()?;
         let mut lists = Vec::new();
+        activity::begin_lists(config.lists.iter().map(|l| l.id.as_str()));
         for source in &config.lists {
             lists.push(Arc::new(load_list(source).await?));
             check_rule_budget(&config, &lists)?;
@@ -481,6 +483,7 @@ impl Filter {
             .live
             .lists
             .clone();
+        activity::begin_lists(due.iter().map(|i| self.config.lists[*i].id.as_str()));
         let result = async {
             for i in due {
                 lists[i] = Arc::new(load_list(&self.config.lists[i]).await?);
@@ -565,6 +568,16 @@ fn check_rule_budget(config: &Config, lists: &[Arc<ParsedList>]) -> Result<(), S
     Ok(())
 }
 async fn load_list(source: &config::List) -> Result<ParsedList, String> {
+    let id = source.id.clone();
+    activity::state(&id, "downloading");
+    let result = activity::scope(&id, load_list_inner(source)).await;
+    match &result {
+        Ok(parsed) => activity::ready(&id, parsed.rules.len()),
+        Err(error) => activity::failed(&id, error),
+    }
+    result
+}
+async fn load_list_inner(source: &config::List) -> Result<ParsedList, String> {
     let source = source.clone();
     let bytes = if let Some(url) = &source.url {
         fetch::download(url).await?
@@ -593,6 +606,7 @@ async fn load_list(source: &config::List) -> Result<ParsedList, String> {
         .await
         .map_err(|_| "filter file reader stopped")??
     };
+    activity::state(&source.id, "parsing");
     tokio::task::spawn_blocking(move || rules::parse(&bytes, source.format))
         .await
         .map_err(|_| "filter parser stopped")?

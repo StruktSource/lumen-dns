@@ -146,7 +146,9 @@ pub(crate) async fn read_response(client: &Client, url: Url) -> Result<Vec<u8>, 
     {
         return Err("compressed lists are not supported".into());
     }
+    let total = response.content_length();
     let mut bytes = Vec::new();
+    crate::activity::bytes(0, total);
     while let Some(chunk) = response
         .chunk()
         .await
@@ -156,6 +158,7 @@ pub(crate) async fn read_response(client: &Client, url: Url) -> Result<Vec<u8>, 
             return Err("list body exceeds the 64 MiB size limit".into());
         }
         bytes.extend_from_slice(&chunk);
+        crate::activity::bytes(bytes.len() as u64, total);
     }
     Ok(bytes)
 }

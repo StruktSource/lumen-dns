@@ -21,7 +21,7 @@ encryption = "required"
 address_family = "ipv4"
 transport_priority = ["quic", "https", "tls"]
 
-# Custom upstreams remain supported, but cannot be mixed with provider presets.
+# Custom upstreams can be added next to provider presets (at most 8 addresses in total).
 # [[resolver.upstreams]]
 # address = "1.1.1.1:853"
 # protocol = "tls"

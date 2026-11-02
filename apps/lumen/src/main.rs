@@ -3,7 +3,7 @@
 
 use lumen_api::RunningApi;
 use lumen_config::Config;
-use lumen_core::{ConsoleOptions, Filter, RunningServer};
+use lumen_core::{ConsoleOptions, Filter, RunningServer, activity};
 use lumen_store::{Command as ControlCommand, Store};
 use std::sync::Arc;
 use std::{
@@ -188,7 +188,13 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                 let Some((_id, command)) = store.next_command().map_err(io::Error::other)? else { continue };
                 match command {
                     ControlCommand::FilterRefresh => {
-                        record_control(&store, server.refresh_filter().await, "filter refreshed")?;
+                        activity::set_job("downloading", "Refreshing block lists");
+                        let refreshed = server.refresh_filter().await;
+                        match &refreshed {
+                            Ok(()) => activity::set_job("done", "Block lists refreshed"),
+                            Err(error) => activity::set_job("failed", format!("Refresh failed: {error}. The previous lists stay active.")),
+                        }
+                        record_control(&store, refreshed, "filter refreshed")?;
                     }
                     ControlCommand::FilterRollback => {
                         record_control(&store, server.rollback_filter().await, "filter rolled back")?;
@@ -205,20 +211,25 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                             _ => None,
                         };
                         let staged = staged_revision.is_some();
+                        activity::set_job("checking", "Checking the new configuration");
                         match managed_config(&mut store, staged) {
                             Ok(next) => {
+                                activity::set_job("downloading", "Downloading and checking block lists");
                                 // Download and validate everything while DNS is still up, then hand the
                                 // loaded filter to the new server so DNS is down only for the swap.
                                 let prepared = match RunningServer::prepare(&next).await {
                                     Ok(filter) => filter,
                                     Err(error) => {
                                         if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
+                                        activity::set_job("failed", format!("Not applied: {error}. The previous settings are still running."));
                                         store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
                                         continue;
                                     }
                                 };
+                                activity::set_job("starting", "Restarting DNS with the new settings");
                                 if let Err(error) = RunningApi::check(&next.management) {
                                     if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
+                                    activity::set_job("failed", format!("Not applied: {error}. The previous settings are still running."));
                                     store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
                                     continue;
                                 }
@@ -234,6 +245,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                                 config = next;
                                                 if let Some(revision) = staged_revision { let _ = store.promote_staged_config(revision).map_err(io::Error::other)?; }
                                                 store.set_status("running", None).map_err(io::Error::other)?;
+                                                activity::set_job("done", "The new settings are live");
                                                 print_endpoints(&server);
                                                 print_api(api.as_ref());
                                             }
@@ -242,6 +254,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                                 if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
                                                 server = start_managed(config.clone(), state_path, Some(Arc::clone(&old_filter))).await.map_err(|rollback| io::Error::other(format!("API reload failed: {error}; DNS rollback failed: {rollback}")))?;
                                                 api = RunningApi::start(config.management.clone(), state_path).await.map_err(|rollback| io::Error::other(format!("API reload failed: {error}; API rollback failed: {rollback}")))?;
+                                                activity::set_job("failed", format!("Not applied: {error}. The previous settings were restored."));
                                                 store.set_status("running", Some(&format!("reload failed; prior config restored: {error}"))).map_err(io::Error::other)?;
                                             }
                                         }
@@ -252,12 +265,14 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                             io::Error::other(format!("reload failed: {error}; rollback failed: {rollback}"))
                                         })?;
                                         api = RunningApi::start(config.management.clone(), state_path).await.map_err(|rollback| io::Error::other(format!("reload failed: {error}; API rollback failed: {rollback}")))?;
+                                        activity::set_job("failed", format!("Not applied: {error}. The previous settings were restored."));
                                         store.set_status("running", Some(&format!("reload failed; prior config restored: {error}"))).map_err(io::Error::other)?;
                                     }
                                 }
                             }
                             Err(error) => {
                                 if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
+                                activity::set_job("failed", format!("Not applied: {error}"));
                                 store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
                             }
                         }

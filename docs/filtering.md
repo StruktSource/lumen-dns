@@ -69,6 +69,18 @@ all imported lists for that client are inactive. For always-on parental blocks,
 put them in global manual rules or use an always-active profile. UTC has no DST
 adjustment; local timezone schedules are not implemented.
 
+## One-click lists in the console
+
+The console's Filtering → Lists page has a Quick install section with the large
+public lists, checked against their publishers: Hagezi (Light, Normal, Pro,
+Pro++, Ultimate, Threat Intelligence in three sizes, fake shops, pop-up ads,
+adult, gambling, DoH/VPN bypass, Apple and Windows telemetry), OISD small and big,
+AdGuard DNS filter, StevenBlack, 1Hosts Lite and Phishing Army. Three bundles
+(Recommended, Light, Strict) install a sensible combination in one click. A list
+installs as an ordinary list with a daily refresh; nothing downloads until you
+apply. Profiles that restrict themselves to named lists get the new lists added so
+they take effect. The page also flags a list that the default profile does not use.
+
 ## Sources and parsers
 
 Each `[[filtering.lists]]` needs a unique `id`, `format`, and exactly one of:
