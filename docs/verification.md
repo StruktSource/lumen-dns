@@ -71,7 +71,7 @@ Issue #7 provider presets were validated on macOS ARM64 on 2026-10-31. The full
 local check passed 48 tests, format, and Clippy. The preset forwarding example
 also passed daemon config validation. Coverage includes stable-ID expansion,
 address-family selection, TLS identity mapping, unknown-ID rejection, and
-rejection of mixed preset and custom upstream configuration. Public provider
+combining presets with custom upstreams (custom entries follow the presets). Public provider
 reachability was not tested.
 
 Issue #8 automatic encrypted transport selection was validated on macOS ARM64

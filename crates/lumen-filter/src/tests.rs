@@ -49,7 +49,10 @@ fn domain_normalization_and_strict_parsers() {
     .unwrap();
     assert_eq!(parsed.rules.len(), 2);
     assert_eq!(parsed.duplicates, 1);
-    assert!(parsed.rules[1].exact);
+    assert!(
+        parsed.rules.iter().any(|rule| rule.exact())
+            && parsed.rules.iter().any(|rule| !rule.exact())
+    );
     assert_eq!(
         parse(
             b"0.0.0.0 a.example b.example # comment\n::1 ipv6.example",
@@ -60,11 +63,22 @@ fn domain_normalization_and_strict_parsers() {
         .len(),
         3
     );
+    // One malformed name must not sink a whole public list; it is skipped and counted.
+    let tolerant = parse(
+        b"good.example\nxn--29s7inly9ib.ub66.com\nbad name\nalso-good.example",
+        Format::Domains,
+    )
+    .unwrap();
+    assert_eq!((tolerant.rules.len(), tolerant.unsupported), (2, 2));
+    assert!(parse(b"bad name\nxn--29s7inly9ib.ub66.com", Format::Domains).is_err());
     assert!(parse(b"192.0.2.1 real.example", Format::Hosts).is_err());
     assert!(parse(b"0.0.0.0", Format::Hosts).is_err());
     let parsed = parse(b"[Adblock Plus 2.0]\n! title\n||ads.example^\n@@||ok.ads.example^\n||ads.example^$script\nexample##.ad\n/regex/", Format::Adblock).unwrap();
     assert_eq!(parsed.rules.len(), 2);
-    assert!(parsed.rules[1].allow);
+    assert!(
+        parsed.rules.iter().any(|rule| rule.allow())
+            && parsed.rules.iter().any(|rule| !rule.allow())
+    );
     assert_eq!(parsed.unsupported, 3);
     for bytes in [&b""[..], &b"# empty"[..], &b"\xff"[..]] {
         assert!(parse(bytes, Format::Domains).is_err());
@@ -596,4 +610,57 @@ fn long_cname_uses_transport_response_budget() {
     let large = Message::from_vec(&response(&query, &action, 4096)).unwrap();
     assert!(!large.metadata.truncation);
     assert_eq!(large.answers.len(), 1);
+}
+
+#[tokio::test]
+async fn lists_beyond_the_old_limit_use_eight_bytes_per_rule_and_keep_precedence() {
+    assert_eq!(std::mem::size_of::<crate::rules::RuleKey>(), 8);
+    // Two lists (320k rules in total, more than the former 250k limit) that overlap.
+    let big = |prefix: &str, from: usize, to: usize| {
+        (from..to).fold(String::new(), |mut text, n| {
+            use std::fmt::Write;
+            let _ = writeln!(text, "{prefix}{n}.big.example");
+            text
+        })
+    };
+    let first = big("a", 0, 160_000);
+    let mut second = big("a", 150_000, 310_000); // 10k overlap with the first list
+    second.push_str("blocked-by-two.example\n");
+    let config = Config {
+        rules: Rules {
+            allow: vec!["a10.big.example".into()],
+            block: Vec::new(),
+        },
+        lists: vec![list("one", &first, None), list("two", &second, None)],
+        ..Config::default()
+    };
+    let filter = Filter::load(config).await.unwrap();
+    let (_, status) = filter.status();
+    assert_eq!(status[0].rules, 160_000);
+    assert_eq!(status[1].rules, 160_001);
+    // Hits are named from the query itself, attributed to the first matching list.
+    let hit = filter.explain("www.a159999.big.example", ip(), 0);
+    assert!(hit.blocked);
+    assert_eq!(hit.rule.as_deref(), Some("a159999.big.example"));
+    assert_eq!(hit.list.as_deref(), Some("one"));
+    assert_eq!(
+        filter
+            .explain("a300000.big.example", ip(), 0)
+            .list
+            .as_deref(),
+        Some("two")
+    );
+    assert!(filter.explain("blocked-by-two.example", ip(), 0).blocked);
+    // Neighbours are not collateral damage: no hash or suffix confusion.
+    for name in [
+        "a310000.big.example",
+        "big.example",
+        "xa1.big.example",
+        "a1.big.example.evil.test",
+        "example",
+    ] {
+        assert!(!filter.explain(name, ip(), 0).blocked, "{name}");
+    }
+    // A manual allow still beats a list block.
+    assert!(!filter.explain("a10.big.example", ip(), 0).blocked);
 }

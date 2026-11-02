@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Client-aware filtering before DNS cache lookup. Updates are transactional.
 
+pub mod activity;
 pub mod config;
 mod fetch;
 mod response;
@@ -8,7 +9,7 @@ pub mod rules;
 pub use response::response;
 
 use config::{Action, Config, Profile, Rules};
-use rules::{ParsedList, Rule};
+use rules::{ParsedList, Rule, domain_hash};
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -140,10 +141,67 @@ impl Index {
     }
 }
 
+/// A rule that decided a query.
+struct Hit {
+    domain: String,
+    exact: bool,
+    allow: bool,
+    list: Option<usize>,
+}
+
+impl Hit {
+    fn from_entry(entry: &Entry) -> Self {
+        Self {
+            domain: entry.rule.domain.clone(),
+            exact: entry.rule.exact,
+            allow: entry.rule.allow,
+            list: entry.list,
+        }
+    }
+}
+
 struct Snapshot {
     lists: Vec<Arc<ParsedList>>,
-    index: Index,
     generation: u64,
+}
+
+impl Snapshot {
+    /// Most specific suffix first; an allow beats blocks at any suffix reached first,
+    /// otherwise the most specific block wins. Same precedence as manual rules.
+    fn find(&self, name: &str, eligible: impl Fn(usize) -> bool) -> Option<Hit> {
+        let mut suffix = name;
+        let mut blocked = None;
+        loop {
+            let hash = domain_hash(suffix);
+            for (list, parsed) in self.lists.iter().enumerate() {
+                if !eligible(list) {
+                    continue;
+                }
+                for key in parsed.lookup(hash) {
+                    if key.exact() && suffix != name {
+                        continue;
+                    }
+                    let hit = Hit {
+                        domain: suffix.to_owned(),
+                        exact: key.exact(),
+                        allow: key.allow(),
+                        list: Some(list),
+                    };
+                    if key.allow() {
+                        return Some(hit);
+                    }
+                    if blocked.is_none() {
+                        blocked = Some(hit);
+                    }
+                }
+            }
+            let Some((_, next)) = suffix.split_once('.') else {
+                break;
+            };
+            suffix = next;
+        }
+        blocked
+    }
 }
 struct State {
     live: Arc<Snapshot>,
@@ -173,6 +231,7 @@ impl Filter {
     pub async fn load(config: Config) -> Result<Self, String> {
         config.validate()?;
         let mut lists = Vec::new();
+        activity::begin_lists(config.lists.iter().map(|l| l.id.as_str()));
         for source in &config.lists {
             lists.push(Arc::new(load_list(source).await?));
             check_rule_budget(&config, &lists)?;
@@ -314,11 +373,11 @@ impl Filter {
             generation: live.generation,
         };
         let found = active
-            .and_then(|(i, _)| self.profiles[i].find(name, |_| true))
-            .or_else(|| self.global.find(name, |_| true))
+            .and_then(|(i, _)| self.profiles[i].find(name, |_| true).map(Hit::from_entry))
+            .or_else(|| self.global.find(name, |_| true).map(Hit::from_entry))
             .or_else(|| {
-                live.index.find(name, |list| {
-                    let list = &self.config.lists[list.expect("list index")];
+                live.find(name, |list| {
+                    let list = &self.config.lists[list];
                     match profile {
                         Some(_) if active.is_none() => false,
                         Some((_, p)) => selected(p, list),
@@ -327,11 +386,11 @@ impl Filter {
                 })
             });
         if let Some(entry) = found {
-            decision.blocked = !entry.rule.allow;
+            decision.blocked = !entry.allow;
             decision.rule = Some(format!(
                 "{}{}",
-                if entry.rule.exact { "=" } else { "" },
-                entry.rule.domain
+                if entry.exact { "=" } else { "" },
+                entry.domain
             ));
             if let Some(i) = entry.list {
                 decision.list = Some(self.config.lists[i].id.clone());
@@ -424,6 +483,7 @@ impl Filter {
             .live
             .lists
             .clone();
+        activity::begin_lists(due.iter().map(|i| self.config.lists[*i].id.as_str()));
         let result = async {
             for i in due {
                 lists[i] = Arc::new(load_list(&self.config.lists[i]).await?);
@@ -489,17 +549,7 @@ fn compile(
     generation: u64,
 ) -> Result<Snapshot, String> {
     check_rule_budget(config, &lists)?;
-    let mut index = Index::default();
-    for (i, list) in lists.iter().enumerate() {
-        for rule in &list.rules {
-            index.insert(rule.clone(), Some(i));
-        }
-    }
-    Ok(Snapshot {
-        lists,
-        index,
-        generation,
-    })
+    Ok(Snapshot { lists, generation })
 }
 fn check_rule_budget(config: &Config, lists: &[Arc<ParsedList>]) -> Result<(), String> {
     let manual = config.rules.allow.len()
@@ -510,11 +560,24 @@ fn check_rule_budget(config: &Config, lists: &[Arc<ParsedList>]) -> Result<(), S
             .map(|p| p.rules.allow.len() + p.rules.block.len())
             .sum::<usize>();
     if manual + lists.iter().map(|l| l.rules.len()).sum::<usize>() > rules::MAX_RULES {
-        return Err("all filtering rules together exceed 250000".into());
+        return Err(format!(
+            "all filtering rules together exceed {}",
+            rules::MAX_RULES
+        ));
     }
     Ok(())
 }
 async fn load_list(source: &config::List) -> Result<ParsedList, String> {
+    let id = source.id.clone();
+    activity::state(&id, "downloading");
+    let result = activity::scope(&id, load_list_inner(source)).await;
+    match &result {
+        Ok(parsed) => activity::ready(&id, parsed.rules.len()),
+        Err(error) => activity::failed(&id, error),
+    }
+    result
+}
+async fn load_list_inner(source: &config::List) -> Result<ParsedList, String> {
     let source = source.clone();
     let bytes = if let Some(url) = &source.url {
         fetch::download(url).await?
@@ -543,6 +606,7 @@ async fn load_list(source: &config::List) -> Result<ParsedList, String> {
         .await
         .map_err(|_| "filter file reader stopped")??
     };
+    activity::state(&source.id, "parsing");
     tokio::task::spawn_blocking(move || rules::parse(&bytes, source.format))
         .await
         .map_err(|_| "filter parser stopped")?

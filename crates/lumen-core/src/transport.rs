@@ -56,8 +56,21 @@ impl RunningServer {
     ///
     /// # Errors
     /// Same as [`Self::start`], plus an unusable state database.
-    #[allow(clippy::too_many_lines)] // Bind all resources before starting workers.
     pub async fn start_with(config: Config, console: ConsoleOptions) -> io::Result<Self> {
+        Self::start_prepared(config, console, None).await
+    }
+
+    /// Start, reusing a filter already loaded by [`Self::prepare`]. A reload then does not
+    /// download large lists a second time while DNS is down.
+    ///
+    /// # Errors
+    /// Same as [`Self::start_with`].
+    #[allow(clippy::too_many_lines)] // Bind all resources before starting workers.
+    pub async fn start_prepared(
+        config: Config,
+        console: ConsoleOptions,
+        preloaded: Option<Arc<lumen_filter::Filter>>,
+    ) -> io::Result<Self> {
         tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         config.validate().map_err(io::Error::other)?;
         let resolver = lumen_resolver::Resolver::new(&config).map_err(io::Error::other)?;
@@ -69,11 +82,14 @@ impl RunningServer {
         } else {
             Some(credentials(&config)?)
         };
-        let filter = Arc::new(
-            lumen_filter::Filter::load(config.filtering.clone())
-                .await
-                .map_err(io::Error::other)?,
-        );
+        let filter = match preloaded {
+            Some(filter) => filter,
+            None => Arc::new(
+                lumen_filter::Filter::load(config.filtering.clone())
+                    .await
+                    .map_err(io::Error::other)?,
+            ),
+        };
         #[cfg(unix)]
         let mut refresh_signal =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())?;
@@ -213,11 +229,22 @@ impl RunningServer {
     /// # Errors
     /// Same configuration and credential failures as startup.
     pub async fn check(config: &Config) -> io::Result<()> {
+        Self::prepare(config).await.map(|_| ())
+    }
+
+    /// Everything [`Self::check`] verifies, returning the loaded filter so the caller can
+    /// start without downloading the lists again.
+    ///
+    /// # Errors
+    /// Same configuration and credential failures as startup.
+    pub async fn prepare(config: &Config) -> io::Result<Arc<lumen_filter::Filter>> {
         config.validate().map_err(io::Error::other)?;
         let _ = lumen_resolver::Resolver::new(config).map_err(io::Error::other)?;
-        let _ = lumen_filter::Filter::load(config.filtering.clone())
-            .await
-            .map_err(io::Error::other)?;
+        let filter = Arc::new(
+            lumen_filter::Filter::load(config.filtering.clone())
+                .await
+                .map_err(io::Error::other)?,
+        );
         if !config.listen.dot.is_empty()
             || !config.listen.doh.is_empty()
             || !config.listen.doq.is_empty()
@@ -225,7 +252,7 @@ impl RunningServer {
             let _ = credentials(config)?;
         }
         lumen_web::BoundWeb::check(&config.web)?;
-        Ok(())
+        Ok(filter)
     }
 
     /// Wait for a listener failure so background failures cannot go unnoticed.

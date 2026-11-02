@@ -225,6 +225,7 @@ async fn iterative_delegations_cache_and_depth_limit() {
         vec![Arc::new(ResolutionZone {
             origin: Name::root().into(),
             backend: Backend::Recursive {
+                insecure: None,
                 recursor: Arc::new(recursor),
                 fallback: None,
                 accel: Arc::new(Accel::new(Arc::default(), Prefetch::default())),
@@ -413,6 +414,7 @@ async fn recursion_timeout_invokes_fallback_once() {
         vec![Arc::new(ResolutionZone {
             origin: Name::root().into(),
             backend: Backend::Recursive {
+                insecure: None,
                 recursor: Arc::new(recursor),
                 accel: Arc::new(Accel::new(Arc::clone(&metrics), Prefetch::default())),
                 fallback: Some(FallbackBackend {
@@ -898,4 +900,30 @@ async fn slow_lookup_starts_one_hedge_and_fast_lookup_does_not() {
         .unwrap();
     assert_eq!(metrics.hedged.load(Ordering::Relaxed), 1);
     tasks.abort_all();
+}
+
+#[test]
+fn answers_never_show_the_random_case_used_upstream() {
+    use hickory_server::proto::rr::{
+        RData, Record,
+        rdata::{A, CNAME},
+    };
+    use std::{net::Ipv4Addr, str::FromStr};
+    let mut message = hickory_server::proto::op::Message::query();
+    message.answers.push(Record::from_rdata(
+        Name::from_str("WwW.ExAmPlE.cOm.").unwrap(),
+        60,
+        RData::CNAME(CNAME(Name::from_str("tArGeT.eXaMpLe.NeT.").unwrap())),
+    ));
+    message.answers.push(Record::from_rdata(
+        Name::from_str("tArGeT.eXaMpLe.NeT.").unwrap(),
+        60,
+        RData::A(A(Ipv4Addr::new(192, 0, 2, 1))),
+    ));
+    crate::lowercase_names(&mut message);
+    assert_eq!(message.answers[0].name.to_ascii(), "www.example.com.");
+    assert!(
+        matches!(&message.answers[0].data, RData::CNAME(t) if t.0.to_ascii() == "target.example.net.")
+    );
+    assert_eq!(message.answers[1].name.to_ascii(), "target.example.net.");
 }

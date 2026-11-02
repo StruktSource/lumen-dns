@@ -174,6 +174,9 @@ pub struct Resolver {
     pub providers: Vec<ProviderSelection>,
     #[serde(skip)]
     pub automatic_transport: bool,
+    /// Leading entries of `upstreams` that came from provider presets.
+    #[serde(skip)]
+    pub provider_upstreams: usize,
     pub cache_entries: u32,
     pub nameserver_cache_entries: u32,
     pub validation_cache_entries: u32,
@@ -200,6 +203,7 @@ impl Default for Resolver {
             upstreams: vec![],
             providers: vec![],
             automatic_transport: false,
+            provider_upstreams: 0,
             cache_entries: 4096,
             nameserver_cache_entries: 1024,
             validation_cache_entries: 4096,
@@ -456,9 +460,6 @@ impl Config {
         if self.resolver.mode != Mode::Forward {
             return Err("provider presets are only available in forward mode".into());
         }
-        if !self.resolver.upstreams.is_empty() {
-            return Err("provider presets cannot be mixed with custom upstreams".into());
-        }
         let catalog = providers::Catalog::bundled()?;
         let automatic = self
             .resolver
@@ -501,9 +502,16 @@ impl Config {
                 );
             }
         }
-        if upstreams.len() > 8 {
+        // Custom upstreams follow the provider addresses, so they act as ordered extras.
+        let provided = upstreams.len();
+        upstreams.append(&mut self.resolver.upstreams);
+        if provided > 8 {
             return Err("provider presets resolve to more than 8 upstreams".into());
         }
+        if upstreams.len() > 8 {
+            return Err("providers plus custom upstreams exceed 8 upstreams".into());
+        }
+        self.resolver.provider_upstreams = provided;
         self.resolver.upstreams = upstreams;
         self.resolver.automatic_transport = automatic != 0;
         Ok(())
@@ -1164,7 +1172,16 @@ mod tests {
             "schema_version = 1\n[resolver]\nmode = 'forward'\n[[resolver.providers]]\nid = 'cloudflare-unfiltered'\nprotocol = 'tls'\n[[resolver.upstreams]]\naddress = '1.1.1.1:853'\nprotocol = 'tls'\nserver_name = 'cloudflare-dns.com'\n",
         )
         .unwrap();
-        assert!(Config::load(&path).is_err());
+        let mixed = Config::load(&path).unwrap();
+        assert!(mixed.resolver.provider_upstreams > 0);
+        assert_eq!(
+            mixed.resolver.upstreams.len(),
+            mixed.resolver.provider_upstreams + 1
+        );
+        assert_eq!(
+            mixed.resolver.upstreams.last().unwrap().address.to_string(),
+            "1.1.1.1:853"
+        );
     }
 
     #[test]

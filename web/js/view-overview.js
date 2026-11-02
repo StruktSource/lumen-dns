@@ -4,6 +4,22 @@ const L = window.L, h = L.h, F = L.fmt;
 const NS = 'http://www.w3.org/2000/svg';
 const sv = (tag, a = {}, ...k) => { const e = document.createElementNS(NS, tag); for (const [x, y] of Object.entries(a)) e.setAttribute(x, y); k.forEach(c => e.append(c)); return e; };
 
+
+/* First-run checklist. Shown until dismissed; steps tick themselves from live state. */
+function gettingStarted(cfg, st, f, c) {
+  if (localStorage.getItem('lumen.welcome.done:' + L.session.name) || !L.session) return null;
+  const listen = cfg ? [...cfg.listen.udp, ...cfg.listen.tcp][0] : null; const addr = listen ? listen.replace(/^0\.0\.0\.0/, '<this machine’s IP>') : 'this machine';
+  const hasLists = f.lists.length > 0 || (cfg && cfg.filtering.lists.length > 0), traffic = c.queries > 0;
+  const items = [
+    [traffic, 'Point a device at Lumen', `Set the DNS server of a device or your router to ${addr}${listen && /:(?!53$)\d+$/.test(listen) ? ' (non-standard port: most routers need port 53, see Listeners)' : ''}. This ticks when the first query arrives.`, null],
+    [hasLists, 'Install block lists', 'One click installs Hagezi, OISD and more.', ['Open lists', () => L.go('filtering', 'lists')]],
+    [!!L.session.totp_enabled, 'Protect your account with two-step verification', 'An authenticator app makes a stolen password useless.', ['Set up', () => L.go('account')]],
+    [L.S.devices.length > 0, 'Name your devices', 'Optional. Named devices get their own profile and readable stats.', ['Devices', () => L.go('devices')]]];
+  const done = items.filter(i => i[0]).length;
+  return h('div', { class: 'welcome', role: 'region', 'aria-label': 'Getting started' }, h('div', { class: 'welcome-h' }, h('h2', {}, 'Getting started'), h('span', { class: 'mono' }, `${done} of ${items.length}`), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { localStorage.setItem('lumen.welcome.done:' + L.session.name, '1'); L.paintMain(); } }, 'Dismiss')),
+    h('ol', {}, items.map(([ok, t, d, act], k) => h('li', { class: ok ? 'done' : '' }, h('i', {}, ok ? '✓' : String(k + 1)), h('div', {}, h('b', {}, t), h('span', {}, d)), !ok && act ? h('button', { class: 'btn sm', onclick: act[1] }, act[0]) : null))));
+}
+
 function spark(vals, color) {
   if (vals.length < 2) return null;
   const w = 120, hh = 46, mx = Math.max(...vals), mn = Math.min(...vals), r = mx - mn || 1;
@@ -59,9 +75,10 @@ L.views.overview = () => {
   return [
     L.pageHead('Overview', 'Live totals since Lumen started. Domains and devices are never part of these numbers.', [
       h('span', { class: 'pill ' + (s.daemon === 'running' ? 'ok' : 'bad') }, s.daemon === 'running' ? 'Running' : s.daemon), h('span', { class: 'pill plain' }, 'Uptime ' + F.dur(s.uptime_secs)), h('span', { class: 'pill plain' }, 'Revision ' + s.revision)]),
+    admin ? gettingStarted(cfg, s, f, c) : null,
     alerts.length ? h('div', { class: 'stack', style: 'margin-bottom:16px' }, alerts.map(([k, t, label, fn]) => h('div', { class: 'note ' + k }, L.ic('alert'), h('p', {}, t), label ? h('button', { class: 'btn sm', style: 'margin-left:auto', onclick: fn }, label) : null))) : null,
     h('div', { class: 'grid g4' },
-      h('div', { class: 'kpi hot' }, h('span', { class: 'mono' }, last ? 'Queries · last minute' : 'Queries · total'), h('strong', {}, F.n(last ? last.queries : c.queries), last ? h('small', {}, '/min') : null), h('span', { class: 'sub' }, `${F.n(c.queries)} since start`), spark(pts.map(p => p.queries), '#d8ff36')),
+      h('div', { class: 'kpi' }, h('span', { class: 'mono' }, last ? 'Queries · last minute' : 'Queries · total'), h('strong', {}, F.n(last ? last.queries : c.queries), last ? h('small', {}, '/min') : null), h('span', { class: 'sub' }, `${F.n(c.queries)} since start`), spark(pts.map(p => p.queries), 'var(--text)')),
       h('div', { class: 'kpi' }, h('span', { class: 'mono' }, 'Blocked'), h('strong', {}, decided ? blockedPct.toFixed(1) : '0', h('small', {}, '%')), h('span', { class: 'sub' }, `${F.n(f.blocked)} of ${F.n(decided)} lookups`), spark(pts.map(p => p.blocked), 'var(--text)')),
       h('div', { class: 'kpi' }, h('span', { class: 'mono' }, 'Failed answers'), h('strong', {}, c.responses ? servfailPct.toFixed(2) : '0', h('small', {}, '%')), h('span', { class: 'sub' }, `${F.n(c.rcodes.servfail)} SERVFAIL · ${F.n(c.timeouts)} timeouts`)),
       h('div', { class: 'kpi' }, h('span', { class: 'mono' }, 'Latency p50 / p95'), h('strong', {}, ln ? lbl(pc(.5)).replace('≤', '<') : '—', ln ? h('small', {}, ' / ' + lbl(pc(.95)).replace('≤', '<')) : null), h('span', { class: 'sub' }, 'End to end, all transports'))),

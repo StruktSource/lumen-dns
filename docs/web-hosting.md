@@ -29,18 +29,35 @@ Without `--state` the static files are still served, but every `/api` call answe
 ## First run
 
 1. Open `http://127.0.0.1:8080` on the machine that runs Lumen.
-2. Create the administrator account (username, password, resolution mode, allowed
-   networks).
+2. A guided setup walks through: welcome, setup code (only off the local machine),
+   your account, how answers are found (private recursion or a forwarding provider),
+   which networks may use the server, and a starting set of block lists
+   (Recommended, Light, Strict, or none).
+   The block lists you pick are installed right after sign-in through the normal
+   apply flow, so the progress is visible and a failure can be retried.
+3. After sign-in the Overview shows a Getting started checklist (point a device at
+   Lumen, install lists, enable two-step verification, name devices) that ticks
+   itself off and can be dismissed.
 
 If you browse from another machine, setup also asks for a **setup code**. Lumen prints
 it at startup (`docker logs lumen` for containers) and keeps it until an account
-exists. Anyone who can reach the port before setup finishes could otherwise claim the
+exists. The setup wizard asks for it on its own page and checks it before anything
+else (`POST /api/setup/code`, throttled like sign-in). Anyone who can reach the port before setup finishes could otherwise claim the
 console, so the code is mandatory off the local machine. Loopback visitors do not need
 it. Headless alternative:
 
 ```sh
 printf '%s' "$PASSWORD" | lumenctl user add --state state.db --name admin --role admin --password stdin
 ```
+
+## Activity panel
+
+Whenever Lumen applies a change or downloads block lists, a panel in the corner of every
+page shows what it is doing: checking, downloading (per list, with bytes received),
+reading rules, restarting DNS. When it finishes you get a notification. If a change is
+not applied, the panel stays with the reason (for example `list address answered HTTP
+404`) and says that the previous settings are still running. The data comes from
+`activity` in `GET /api/status` and holds only list names, byte counts and error text.
 
 ## Accounts and sessions
 

@@ -127,6 +127,26 @@ validation, and authenticated denial. Lumen owns mode selection, trust material,
 client access, wire admission, task/connection budgets, deadlines, and metrics.
 NSEC3 soft/hard iteration ceilings are 100/500 in recursive mode.
 
+## DNSSEC edge cases and answer case
+
+Some operators serve a parent zone and its child from the same name servers (Google's
+`google.com` and `l.google.com`, behind `safebrowsing.google.com`). A DS question about the
+child then comes back from the child, carrying the child's own SOA. The stock validator tried
+to prove that SOA through the DS record being asked for, looped until its depth limit, and
+failed unrelated validations with it, so `safebrowsing.google.com` and, in about half of
+fresh processes, `google.com` returned SERVFAIL. Lumen vendors `hickory-net` with a fix
+(`vendor/README.md`): such an SOA is no longer validated through itself, and the delegation is
+judged from the parent side, as unbound does.
+
+As a second layer, if validation still fails for a name and an ancestor was validated as
+insecure (an unsigned delegation proven by its parent), the lookup is repeated once without
+validation. Signed or bogus chains still return SERVFAIL (`dnssec-failed.org` and
+`sigfail.verteiltesysteme.net` are the regression checks).
+
+Case randomization (0x20) is used for upstream queries only. Owner names in answers are
+lowercased before they reach the client, so the random case never leaks. Authority and
+additional sections are left untouched because validation proofs compare them exactly.
+
 ## Root hints and trust anchors
 
 The binary bundles [`data/root.hints`](../crates/lumen-resolver/data/root.hints)

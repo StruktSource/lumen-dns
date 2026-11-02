@@ -63,3 +63,9 @@ console is part of the current build; persistent query history is still later sc
 
 Keep checkbox detail in `progress.md`; do not mark unrun platform checks or
 planned features as shipped.
+
+## Upstream: hickory DNSSEC validation loop on shared parent/child servers
+
+`vendor/hickory-net` carries a one-line fix (see `vendor/README.md`). Report it to the hickory
+project with the reproduction (`safebrowsing.google.com` then `google.com` on a fresh process,
+validation enabled) and drop the vendored copy once a release contains it.
