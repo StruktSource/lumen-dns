@@ -933,6 +933,13 @@ async fn startup_is_atomic_and_load_stays_bounded() {
                 ResponseCode::NoError
             );
         }
+        // The counter drops just after the reply is sent, so give the last task a moment.
+        for _ in 0..200 {
+            if server.metrics.active.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
         assert_eq!(server.metrics.active.load(Ordering::Relaxed), 0);
     }
     assert_eq!(server.metrics.queries.load(Ordering::Relaxed), 256);
