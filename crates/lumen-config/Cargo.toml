@@ -10,7 +10,7 @@ repository.workspace = true
 lumen-filter = { path = "../lumen-filter" }
 serde.workspace = true
 ipnet.workspace = true
-toml = "0.9"
+toml = "1.1"
 
 [dev-dependencies]
 tempfile = "3"
