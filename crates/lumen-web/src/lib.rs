@@ -558,7 +558,8 @@ mod tests {
 
         let mut catalogs: Vec<(&str, BTreeMap<String, String>)> = Vec::new();
         for code in &console::LANGUAGES[1..] {
-            let body = asset(&format!("/assets/js/lang-{code}.js"));
+            // Windows checkouts may use CRLF line endings; the catalogs do not care.
+            let body = asset(&format!("/assets/js/lang-{code}.js")).replace("\r\n", "\n");
             assert!(body.contains(&format!("L.i18n.add('{code}', {{")), "{code}");
             let json = &body[body.find("{\n").unwrap()..body.rfind("\n}").unwrap() + 2];
             let catalog: BTreeMap<String, String> =
