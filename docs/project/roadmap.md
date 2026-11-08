@@ -15,14 +15,14 @@ _Last updated 2026-11-08 for version 0.5.7._
 - Local DNSSEC validation, bounded caches, and rate and resource limits
 - Filtering with lists, per-device profiles, categories, and UTC schedules
 - Managed mode with SQLite state, safe reloads, and `lumenctl`
-- The built-in web console with accounts, roles, and optional two-step verification
+- The built-in web console with accounts, roles, and optional two-step verification, in English, German, Italian, Spanish, and Dutch
+- Opt-in query history: recent lookups in memory, or saved for 1 to 90 days, anonymous or with the device
 - An optional authenticated loopback management API with signed webhooks
 - Privacy-safe Prometheus metrics, a Grafana dashboard, and Home Assistant examples
 - Native packages for six platforms and container images for `linux/amd64` and `linux/arm64`
 
 **Still ahead**
 
-- Opt-in persistent query history
 - Certificate automation and automatic trust-anchor rollover
 - Split DNS, local records, and conditional forwarding
 - High availability and cluster configuration replication
@@ -30,7 +30,7 @@ _Last updated 2026-11-08 for version 0.5.7._
 - Real-hardware validation for Proxmox, Unraid, Raspberry Pi, and dual-stack Kubernetes
 - Image signing, reproducible builds, and backup, restore, and upgrade tests
 - A customizable console UI through CSS themes
-- Localization of the console (English, German, Italian, Spanish, Dutch, and more)
+- More console languages, and translating the remaining long help texts
 - **Independent security review before a stable release**
 
 Parked ideas that are **not planned yet** (such as community plugins and a store) are listed at the end under [Ideas, not now](#ideas-not-now).
@@ -106,10 +106,10 @@ Principles that shape every decision:
 - [x] Loopback authenticated `/v1` API with scoped roles, rate limits, and audit events
 - [x] Signed HTTPS audit webhooks and Home Assistant examples
 - [x] Embedded web hosting over HTTP and direct TLS HTTP/2, with a vendor-neutral HTTP/3 reverse-proxy contract
-- [x] Functional web console: aggregate status, settings, filtering, devices, users, audit log, and opt-in in-memory recent queries (off by default)
+- [x] Functional web console: aggregate status, settings, filtering, devices, users, and audit log
 - [x] Optional TOTP two-step verification with recovery codes and admin reset
 - [x] Shared in-flight recursion, startup priming, opt-in expiry refresh and hedging, and recursion latency metrics (Issue #9)
-- [ ] Opt-in anonymous or full **persistent** query history, with retention and redaction controls
+- [x] Opt-in query history: off by default, recent-only (memory) or saved (SQLite), anonymous or with device and address, 1-90 days retention (default 7), a 500,000-row cap, search, paging, deletion, and `lumenctl history` (0.5.7)
 
 ### Phase 4: Deployment
 
@@ -135,20 +135,23 @@ Principles that shape every decision:
 - [ ] Extended DNS and DNSSEC conformance and long-running soak tests
 - [ ] **External security review before stable release**
 
-### Phase 6: Customization (planned)
+### Phase 6: Customization
 
-Nothing here is built yet. Each item has to keep Lumen's defaults intact: private, bounded, and explicit opt-in.
+Each item has to keep Lumen's defaults intact: private, bounded, and explicit opt-in.
 
-**Customizable UI via CSS**
+**Customizable UI via CSS** (planned)
 
 - [ ] A **theme file in plain CSS**. Users open it, edit the colors, and apply it in the console, for example for a dark or high-contrast look and their own accent colors
 - [ ] A design that fits the console's strict Content-Security-Policy (no inline styles or scripts, same-origin assets only), such as a theme file served by Lumen itself. A theme changes appearance only, and must not be able to read or send data
 
-**Localization**
+**Localization** (0.5.7)
 
-- [ ] Translate the web console into English (default), German, Italian, Spanish, and Dutch, with more languages to follow
-- [ ] A translation framework: message catalogs, a per-user language setting with a sensible default from the browser, and locale-aware dates and numbers
-- [ ] A documented way for contributors to add or improve a translation (a normal pull request)
+- [x] The web console in English (default), German, Italian, Spanish, and Dutch
+- [x] A translation framework: message catalogs keyed by the English text, a per-browser choice, a console default for administrators, a browser-language fallback, and locale-aware numbers
+- [x] A language step in the setup wizard, and language settings under My account and Users & access
+- [x] A documented way to add or improve a translation, with tests that keep the catalogs complete and current ([Languages and translations](../guides/translations.md))
+- [ ] Translate the remaining long help texts on the DNS settings and Filtering pages
+- [ ] More languages
 - [ ] Localize the documentation where practical. Technical terms such as DoH, DoT, and DNSSEC stay recognizable
 
 ## What is planned next
@@ -157,31 +160,28 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### High priority: do next
 
-1. **Publish release 0.5.7.** Tag `v0.5.7` to run the release pipeline.
-2. **Opt-in query history**, anonymous or full, with retention and redaction. When built, default retention is seven days, with detail level and retention configurable.
+1. **Publish release 0.5.7.** It carries opt-in query history and the localized console. Tag `v0.5.7` to run the release pipeline.
 
 ### Medium priority: soon
 
-3. **Localization** of the console (EN, DE, IT, ES, NL, and more).
-4. **CSS themes** for the console.
+2. **CSS themes** for the console.
+3. **Finish the translations:** the remaining long help texts, and more languages.
 
 ### Lower priority: later
 
-5. **Trust-anchor rollover automation and certificate lifecycle tooling.**
-6. **Split DNS, local records, and conditional forwarding.**
-7. **Recursion speed evidence:** a statistically significant cold-query result and an expiry-refresh benchmark (see [Recursion speed](#recursion-speed-issue-9)).
+4. **Trust-anchor rollover automation and certificate lifecycle tooling.**
+5. **Split DNS, local records, and conditional forwarding.**
+6. **Recursion speed evidence:** a statistically significant cold-query result and an expiry-refresh benchmark (see [Recursion speed](#recursion-speed-issue-9)).
 
 ### Large efforts, before or after 1.0
 
-8. **Independent security review.** Required before a stable release.
-9. **High availability and cluster configuration replication.**
-10. **Optional DNS threat feeds and enterprise policy features.**
+7. **Independent security review.** Required before a stable release.
+8. **High availability and cluster configuration replication.**
+9. **Optional DNS threat feeds and enterprise policy features.**
 
 ### Not now
 
-11. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
-
-Small cleanup: the comment in `deploy/lumen.toml` that says "Only this host may query Lumen by default" is wrong for that file, whose allow-list includes the private network ranges.
+10. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
 
 ## Side projects
 

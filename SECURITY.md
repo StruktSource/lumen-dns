@@ -21,7 +21,7 @@ Please include:
 
 DNS packets, filter lists, configuration, network clients, API requests, and imports are all untrusted. Lumen must bound parsing, CPU, memory, disk, and network work for all of them.
 
-By default no telemetry or query history is enabled, the management API is disabled, and metrics and liveness endpoints are loopback-only.
+By default no telemetry is sent and query history is off (an administrator can opt in), the management API is disabled, and metrics and liveness endpoints are loopback-only.
 
 ## Learn more
 

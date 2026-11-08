@@ -42,7 +42,7 @@ Lumen is a Rust workspace. Each crate owns one concern:
 | `lumen-config` | Startup schema, safe defaults, access-list and limit validation, bounded config reads |
 | `lumen-resolver` | Mode, hints, anchors, verified upstream config, Hickory catalog adapter |
 | `lumen-filter` | Rule normalization, policy selection, bounded imports, snapshots, schedules, synthetic replies |
-| `lumen-store` | SQLite migrations, config revisions, devices, control queue, daemon status |
+| `lumen-store` | SQLite migrations, config revisions, devices, control queue, daemon status, accounts, console settings, and opt-in saved query history |
 | `lumen-core` | Transport tasks, shared admission, metrics, service lifecycle |
 | `lumen-api` | Loopback `/v1` auth, roles, rate limits, audit, control queue, signed webhooks |
 | `lumen-web` | Embedded console UI, session-authenticated `/api`, strict routes and headers, HTTP/1.1, HTTP/2, direct TLS |
@@ -87,7 +87,7 @@ Transport admission bounds live tasks, message allocations, HTTP and QUIC stream
 - **Protocol errors stay protocol errors.** DNS errors use DNS response codes. Startup errors are local and never dump configuration, keys, query packets, or query names.
 - **Stable metrics.** Names start with `lumen_dns_` and carry no client or domain labels. See [Monitoring](../guides/monitoring.md).
 - **A separate, authenticated API.** The management API starts at `/v1`, with authentication, scoped authorization, rate limits, and durable audit applied before dispatch. DNS-over-HTTPS is a DNS transport, not a management API.
-- **State is opt-in and local.** SQLite holds config revisions and devices only with `--state`. Hot DNS caches remain bounded in memory. Query history and external telemetry are off.
+- **State is opt-in and local.** SQLite holds config revisions and devices only with `--state`. Hot DNS caches remain bounded in memory. Query history is off unless an administrator turns it on, and external telemetry does not exist.
 - **Nothing implicit.** Operators opt into each encrypted listener and each upstream, and recursive mode has no implicit upstream fallback.
 
 ## Extension points
@@ -95,7 +95,7 @@ Transport admission bounds live tasks, message allocations, HTTP and QUIC stream
 - Filtering sits before cache lookup and resolution.
 - A managed config reload stages a SQLite revision, validates it, restarts runtime state, and restores the prior server on bind failure.
 - The web console and scoped API cannot affect parser ownership or bypass resolver limits.
-- Query history is planned. Future plugins would need explicit permissions.
+- Query history is written off the query path: the daemon only appends to a bounded in-memory buffer, and the console's writer task saves it to SQLite in batches. Future plugins would need explicit permissions.
 
 ## Runtime and compatibility
 

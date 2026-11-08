@@ -29,6 +29,8 @@ lumen --config FILE --check
 
 **Managed mode.** With `--state FILE`, the first start stores your TOML as revision 1 and later changes come from the database. See [Managed mode](../guides/managed-mode.md).
 
+**Not in the TOML.** Some console settings live in the state database, not in this file: the console [language](../guides/translations.md), the [query history](../guides/query-history.md) mode, detail, and retention, the session timeout, and the accounts. Change them in the console or with `lumenctl`.
+
 ## Top-level settings
 
 | Field | Default and meaning |

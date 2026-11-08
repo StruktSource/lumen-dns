@@ -59,6 +59,16 @@ Commands are queued and normally applied within 500 ms. Queuing does not prove a
 | `lumenctl device set --state FILE --id ID --address IP [--address IP] [--profile ID] [--group ID]` | Add or update a device (needs at least one address, and a profile, a group, or both) |
 | `lumenctl device remove --state FILE --id ID` | Remove a device |
 
+### Query history
+
+| Command | Meaning |
+| :--- | :--- |
+| `lumenctl history status --state FILE` | Show the mode, detail, retention, and how many lookups are saved |
+| `lumenctl history set --state FILE --mode off\|memory\|saved [--detail anonymous\|full] [--days 1-90]` | Choose what is recorded. `--detail` and `--days` keep their current value when left out |
+| `lumenctl history clear --state FILE` | Permanently delete every saved lookup |
+
+A running Lumen picks up `history set` within a few seconds. See [Query history](../guides/query-history.md).
+
 ### Filter explanation
 
 ```sh

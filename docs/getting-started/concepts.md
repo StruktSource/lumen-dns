@@ -10,7 +10,7 @@ A **DNS resolver** is the service that answers those questions for your devices.
 
 ## Why run your own
 
-- **Privacy:** you decide who sees your DNS questions. Lumen keeps no query history and sends no telemetry by default.
+- **Privacy:** you decide who sees your DNS questions. Lumen keeps no query history unless you turn it on, and it sends no telemetry.
 - **Control:** block ads, trackers, or unwanted categories for the whole network, with different rules per device.
 - **Visibility:** see what the resolver is doing through aggregate metrics and a built-in web console.
 
@@ -69,7 +69,7 @@ Out of the box, Lumen:
 
 - listens on **loopback only** (your own computer), so nobody else on the network can use it;
 - resolves **recursively** with **DNSSEC** enabled and no outside provider;
-- keeps **no query history** and sends **no telemetry**;
+- keeps **no query history** (you can opt in) and sends **no telemetry**;
 - ships with **no block lists**, **no management API**, and **no metrics**.
 
 You opt in to each feature deliberately.

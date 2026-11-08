@@ -41,7 +41,8 @@ For reporting a vulnerability, see the [security policy](../../SECURITY.md).
 
 | Threat | Control |
 | :--- | :--- |
-| Query privacy | No query history, no domain or client metric labels, no external telemetry. Startup logs show only listener addresses |
+| Query privacy | Query history is off by default. Metrics have no domain or client labels, and there is no external telemetry. Startup logs show only listener addresses |
+| Saved query history (opt-in) | Administrator-only switch, with an anonymous mode that never stores the client, a 1-90 day retention (default 7), a 500,000-row cap, automatic deletion, an explicit delete action, and audit entries that never contain domains. It lives only in the state database (mode `0600`), and is not served by the management API, metrics, or webhooks |
 | Management exposure | API and metrics bind loopback only. The API requires hashed bearer tokens, scoped roles, per-token rate limits, bounded parsing, and durable audit |
 | Static UI hosting | Embedded fixed routes, no filesystem paths or templates, bounded connections, strict response headers. Release HTTP binds loopback |
 
@@ -65,7 +66,7 @@ Filtering implements bounded parsers, verified HTTPS with public-IP pinning, ato
 
 ## Management and the console
 
-The management API uses bearer tokens, scoped roles, audit, and rate limits. It has no browser session or cookie authentication, so CSRF is not an API credential path. The web console has its own sessions, CSRF protection, lockouts, and optional two-step verification, described in the [web console guide](../guides/web-console.md). Remote exposure of either is outside the supported boundary, so keep them on loopback or behind HTTPS. Optional query history, when built, will need retention, redaction, and access controls, and will stay disabled by default.
+The management API uses bearer tokens, scoped roles, audit, and rate limits. It has no browser session or cookie authentication, so CSRF is not an API credential path. The web console has its own sessions, CSRF protection, lockouts, and optional two-step verification, described in the [web console guide](../guides/web-console.md). Remote exposure of either is outside the supported boundary, so keep them on loopback or behind HTTPS. Query history is optional and disabled by default. When an administrator enables it, the retention, the anonymous mode, and deletion are described in [Query history](../guides/query-history.md). Any signed-in console user can *read* the history that exists, because the Activity page is shared by design, so enable the detailed *device and address* mode only if that is acceptable for every account.
 
 ## Limits of these guarantees
 

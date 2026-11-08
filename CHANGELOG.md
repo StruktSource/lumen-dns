@@ -4,16 +4,18 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ## [0.5.7] - 2026-11-08
 
-### Changed
-
-- Documentation was rewritten for newcomers and reorganized into `getting-started`, `guides`, `deployment`, `reference`, `design`, and `project` folders, with a new index at `docs/README.md`.
-- The roadmap, progress checklist, and product plan are now one page, and several short deployment pages were merged.
-- The application is unchanged.
-
 ### Added
 
-- New guides: quick start, concepts, serving your network, encrypted DNS, and resolver modes.
-- New references for the `lumen` and `lumenctl` commands and for DNSSEC and trust anchors.
+- **Opt-in query history.** Off by default. Administrators can choose *recent only* (the last 1,000 lookups, in memory) or *saved* (kept in the state database for 1 to 90 days, 7 by default, at most 500,000 lookups), either anonymous or with the device and address. The Activity page has search, filters, paging, and a delete button, and `lumenctl history status|set|clear` does the same from the command line. Saving never slows DNS answers down.
+- **Console languages.** The web console is available in English, German, Italian, Spanish, and Dutch. The setup wizard starts with a language picker, each person can choose their own under *My account*, and administrators set the default under *Users & access*. See `docs/guides/translations.md` to add or improve one.
+- New documentation guides: quick start, concepts, serving your network, encrypted DNS, resolver modes, query history, and translations, plus references for the `lumen` and `lumenctl` commands and for DNSSEC and trust anchors.
+
+### Changed
+
+- The state database schema is now 6 (adds the query history table). It upgrades itself on first start. Back it up before upgrading, because an older Lumen cannot open it afterwards.
+- The older on/off *Recent queries* switch now maps to the *recent only* mode and keeps working.
+- Documentation was rewritten for newcomers and reorganized into `getting-started`, `guides`, `deployment`, `reference`, `design`, and `project` folders, with a new index at `docs/README.md`. The roadmap, progress checklist, and product plan are now one page.
+- Shipped configuration files have clearer comments. No setting changed.
 
 ## [0.5.6] - 2026-11-08
 

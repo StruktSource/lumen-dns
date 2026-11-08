@@ -29,6 +29,8 @@ Welcome! This is the map to everything written about Lumen, a self-hosted DNS re
 - [Encrypted DNS](guides/encrypted-dns.md): serve DNS-over-TLS, DNS-over-HTTPS, and DNS-over-QUIC.
 - [Filtering](guides/filtering.md): block lists, rules, per-device profiles, and schedules.
 - [Web console](guides/web-console.md): accounts, setup, two-step verification, and HTTPS.
+- [Query history](guides/query-history.md): the opt-in record of lookups, with retention and an anonymous mode.
+- [Languages and translations](guides/translations.md): switch language, or add and improve one.
 - [Managed mode](guides/managed-mode.md): persistent settings, `lumenctl`, and safe reloads.
 - [Monitoring](guides/monitoring.md): Prometheus, Grafana, Home Assistant, and the metric list.
 
