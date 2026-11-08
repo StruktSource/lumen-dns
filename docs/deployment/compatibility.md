@@ -30,6 +30,40 @@ The runner labels were checked on 2026-10-30 against the
 `windows-2025`, and `windows-11-arm`. Hosted evidence above comes from
 [CI run 41116220947](https://github.com/StruktSource/lumen-dns/actions/runs/41116220947).
 
+## Release evidence
+
+Every release tag runs the full release gate before anything is published:
+native tests on all six platforms, native OCI runtime checks on amd64 and
+arm64, and the Kubernetes smoke test. Packages and images are published step by
+step as each target passes. The latest verified release is
+[v0.5.6](https://github.com/StruktSource/lumen-dns/releases/tag/v0.5.6)
+([release run](https://github.com/StruktSource/lumen-dns/actions/runs/42484167179)):
+six native packages with checksums and build provenance, plus a public
+`ghcr.io/struktsource/lumen-dns` image index for `linux/amd64` and `linux/arm64`.
+Check a download with `sha256sum --check SHA256SUMS --ignore-missing` and
+`gh attestation verify <file> --repo StruktSource/lumen-dns`.
+
+## Validation not yet done
+
+These runs and tests have not been performed. Until they are, the targets stay
+at the status shown above, and nothing here should be read as tested.
+
+- **Windows ARM64**: only the hosted `windows-11-arm` runner has exercised it.
+  There is no runtime test on a physical device, and it is not in the supported
+  scope.
+- **Proxmox LXC**: the guide has not been run on a Proxmox host, including
+  container features, storage, and network setup.
+- **Unraid**: the guide has not been run on an Unraid host, including template
+  and share handling.
+- **Raspberry Pi**: ARM64 is covered by the hosted Linux ARM64 runner only; no
+  Raspberry Pi hardware has been used.
+- **Public resolver reachability**: upstream provider endpoints are not tested
+  from CI.
+- **Long-running and failure behavior**: crash, power-loss, and native Windows
+  service-control behavior are unverified.
+- **Client-IP preservation**: behind Kubernetes load balancers and NAT it
+  depends on the cluster network and is not tested.
+
 All targets use the same workspace crates and `lumen` binary. Docker, Podman,
 Kubernetes, Proxmox, and Unraid do not have separate DNS engines. Platform files
 only set process, network, storage, and service-manager behavior.
