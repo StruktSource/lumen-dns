@@ -1077,7 +1077,7 @@ dependencies = [
 name = "lumen-core"
 version = "0.5.4"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "h2",
  "hickory-proto",
