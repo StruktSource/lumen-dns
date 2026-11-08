@@ -46,7 +46,7 @@ docker run --name lumen --read-only --user 65532:65532 \
   -p 53:5353/udp -p 53:5353/tcp \
   -p 127.0.0.1:8080:8080/tcp \
   -v "$PWD/deploy/lumen.toml:/etc/lumen/lumen.toml:ro" \
-  ghcr.io/struktsource/lumen-dns:0.5.6
+  ghcr.io/struktsource/lumen-dns:0.5.7
 ```
 
 Stop with `docker stop --time 15 lumen`. Upgrade by replacing the container with a newer **pinned** version.

@@ -8,7 +8,7 @@ Lumen follows [Semantic Versioning](https://semver.org).
 
 | Change | Version bump |
 | :--- | :--- |
-| Bug fixes | Patch (`0.5.5` to `0.5.6`) |
+| Bug fixes | Patch (`0.5.6` to `0.5.7`) |
 | New compatible features | Minor |
 | Breaking a stable contract | Major |
 
@@ -38,7 +38,7 @@ Download the archive for your system plus `SHA256SUMS`, then run:
 
 ```sh
 sha256sum --check SHA256SUMS --ignore-missing
-gh attestation verify lumen-v0.5.6-<platform>.<extension> --repo StruktSource/lumen-dns
+gh attestation verify lumen-v0.5.7-<platform>.<extension> --repo StruktSource/lumen-dns
 ```
 
 - On macOS without `sha256sum`, use `shasum -a 256 -c` with the matching `.sha256` file.
@@ -48,7 +48,7 @@ gh attestation verify lumen-v0.5.6-<platform>.<extension> --repo StruktSource/lu
 
 1. Read the [changelog](../../CHANGELOG.md) and the release's upgrade notes.
 2. Replace **both** `lumen` and `lumenctl` from the same archive. Never mix versions.
-3. Container and Helm users should **pin** the image tag (for example `0.5.6`) rather than `latest`.
+3. Container and Helm users should **pin** the image tag (for example `0.5.7`) rather than `latest`.
 4. Validate your config with the new binary: `lumen --config FILE --check`.
 5. In [managed mode](../guides/managed-mode.md), the database migrates itself on first start. A database from a newer Lumen is rejected, so back it up first.
 

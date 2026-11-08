@@ -2,6 +2,19 @@
 
 All notable user-facing changes are listed here. Lumen is still pre-release.
 
+## [0.5.7] - 2026-11-08
+
+### Changed
+
+- Documentation was rewritten for newcomers and reorganized into `getting-started`, `guides`, `deployment`, `reference`, `design`, and `project` folders, with a new index at `docs/README.md`.
+- The roadmap, progress checklist, and product plan are now one page, and several short deployment pages were merged.
+- The application is unchanged.
+
+### Added
+
+- New guides: quick start, concepts, serving your network, encrypted DNS, and resolver modes.
+- New references for the `lumen` and `lumenctl` commands and for DNSSEC and trust anchors.
+
 ## [0.5.6] - 2026-11-08
 
 ### Changed
@@ -38,6 +51,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 - Added a supported v1 configuration fixture and initial six-platform release packages.
 - Added stricter DNSSEC policy handling and release checks.
 
+[0.5.7]: https://github.com/StruktSource/lumen-dns/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/StruktSource/lumen-dns/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/StruktSource/lumen-dns/compare/v0.1.3...v0.5.5
 [0.1.3]: https://github.com/StruktSource/lumen-dns/releases/tag/v0.1.3
