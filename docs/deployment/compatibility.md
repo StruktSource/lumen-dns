@@ -1,13 +1,19 @@
 # Compatibility matrix
 
-Status terms:
+Which platforms Lumen runs on, and how much evidence backs each claim. Check this before deploying. Platform guides are listed in the [deployment index](README.md).
 
-- **Supported**: native runtime tests pass and the target is in release scope.
-- **Experimental**: integration exists, but enough runtime evidence is not yet available.
-- **Build-only**: compilation passed; runtime behavior was not proved.
-- **Planned**: no complete build or runtime proof exists.
+## How to read the status
 
-Lumen is pre-release. No platform is marked supported yet.
+| Status | Meaning |
+| :--- | :--- |
+| **Supported** | Native runtime tests pass and the target is in release scope |
+| **Experimental** | Integration exists, but there is not yet enough runtime evidence |
+| **Build-only** | Compilation passed; runtime behavior was not proved |
+| **Planned** | No complete build or runtime proof exists |
+
+Lumen is pre-release, so **no platform is marked supported yet**.
+
+## Matrix
 
 | Target | Status | Current evidence |
 | --- | --- | --- |
@@ -67,3 +73,9 @@ at the status shown above, and nothing here should be read as tested.
 All targets use the same workspace crates and `lumen` binary. Docker, Podman,
 Kubernetes, Proxmox, and Unraid do not have separate DNS engines. Platform files
 only set process, network, storage, and service-manager behavior.
+
+## Related
+
+- [Deployment guides](README.md)
+- [Verification record](../project/verification.md): the tests behind these statuses
+- [Roadmap](../project/roadmap.md)
