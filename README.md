@@ -31,7 +31,7 @@ New to the ideas? Read [Concepts](docs/getting-started/concepts.md) for a plain-
 
 | | |
 | :--- | :--- |
-| 🔒 **Private by default** | No telemetry, no query history, and no outside provider unless you add one. |
+| 🔒 **Private by default** | No telemetry, no query history unless you opt in, and no outside provider unless you add one. |
 | 🧭 **Resolves for itself** | Walks the DNS tree directly and validates DNSSEC locally, or forwards over encrypted connections to a provider you choose. |
 | 🛡️ **Filters per device** | Block ads, trackers, or categories globally, or with different rules and schedules for each device. |
 | 🖥️ **Easy to manage** | A built-in web console and a `lumenctl` command-line tool, with safe reloads that roll back on failure. |
@@ -49,7 +49,8 @@ New to the ideas? Read [Concepts](docs/getting-started/concepts.md) for a plain-
 | **Timeout fallback** | Optional forwarding **only** after a recursive timeout, never for DNSSEC failures or normal answers |
 | **Filtering** | Allow and block rules, hosts, domain, and Adblock-style lists, one-click popular lists, and configurable block replies |
 | **Per-client policy** | Device, subnet, group, profile, category, and UTC-scheduled rules, with explainable decisions |
-| **Web console** | First-run setup, accounts and roles, optional two-step verification, live overview, filtering, devices, and DNS settings |
+| **Web console** | First-run setup, accounts and roles, optional two-step verification, live overview, filtering, devices, and DNS settings, in [English, German, Italian, Spanish, and Dutch](docs/guides/translations.md) |
+| **Query history** | Opt-in. Recent lookups in memory, or saved for 1 to 90 days, anonymous or with the device, with search and one-click deletion |
 | **Operations** | Validated TOML config, optional SQLite state, staged reloads with rollback, audit log, and signed webhooks |
 
 ## Quick start
@@ -87,7 +88,7 @@ That is a private recursive resolver with DNSSEC validation. Prefer a ready-made
 - **Local clients only:** DNS and web listeners are on loopback, plus an explicit client allow-list.
 - **No automatic provider:** recursive DNS by default. Forwarding and timeout fallback are opt-in.
 - **DNSSEC on:** local validation is enabled unless you change it.
-- **No query history or telemetry.** Aggregate metrics are opt-in.
+- **No telemetry, and query history is off.** You can opt in to anonymous or full [query history](docs/guides/query-history.md), and aggregate metrics are opt-in too.
 - **No surprise filters:** external block lists and integrations need deliberate configuration.
 - **Restricted administration:** the management API is off by default, and when enabled it needs managed mode, a loopback address, and authentication.
 
@@ -115,9 +116,9 @@ Lumen is a Rust workspace with a single shared resolver pipeline and deliberatel
 
 ## Project status
 
-**Implemented:** recursive and forwarding DNS, five transports, DNSSEC, per-device filtering, managed mode, the web console, an authenticated API, metrics, and deployment files for six platforms.
+**Implemented:** recursive and forwarding DNS, five transports, DNSSEC, per-device filtering, managed mode, the web console in five languages, opt-in query history, an authenticated API, metrics, and deployment files for six platforms.
 
-**Still ahead:** persistent query history, certificate and trust-anchor automation, split DNS and local records, high availability, more interoperability and soak testing, real-hardware validation, and independent security review. These are **roadmap items, not current capabilities**.
+**Still ahead:** certificate and trust-anchor automation, split DNS and local records, high availability, more interoperability and soak testing, real-hardware validation, and independent security review. These are **roadmap items, not current capabilities**.
 
 See the [roadmap](docs/project/roadmap.md), the [verification record](docs/project/verification.md), and [performance notes](docs/project/performance.md). There is no verified production throughput or latency claim yet.
 

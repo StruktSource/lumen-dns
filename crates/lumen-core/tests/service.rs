@@ -12,7 +12,7 @@ use hickory_proto::{
     },
 };
 use lumen_config::{Config, Mode, Upstream, UpstreamProtocol};
-use lumen_core::RunningServer;
+use lumen_core::{ConsoleOptions, RunningServer};
 use rustls::{
     ClientConfig, RootCertStore,
     pki_types::{CertificateDer, ServerName},
@@ -1035,4 +1035,128 @@ async fn bad_filter_source_fails_before_listeners_open() {
     let _tcp = TcpListener::bind(bind).await.unwrap();
     let _udp = UdpSocket::bind(bind).await.unwrap();
     assert_eq!(fixture.queries.load(Ordering::Relaxed), 0);
+}
+
+/// Saved query history, end to end: a real DNS query reaches the `SQLite` file, anonymously
+/// unless an administrator chose full detail, and nothing is saved while history is off.
+#[tokio::test]
+async fn saved_history_is_opt_in_anonymous_by_choice_and_stops_when_off() {
+    use lumen_store::{HistoryDetail, HistoryMode, HistoryPrefs, QueryFilter, Store};
+
+    let fixture = fixture().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state.db");
+    let store = Store::open(&state).unwrap();
+    let prefs = |mode, detail| HistoryPrefs {
+        mode,
+        detail,
+        retention_days: 7,
+    };
+    let rows = |store: &Store| {
+        store
+            .query_log(&QueryFilter {
+                limit: 100,
+                ..QueryFilter::default()
+            })
+            .unwrap()
+    };
+    let wait_for = async |store: &Store, wanted: &dyn Fn(&[lumen_store::StoredQuery]) -> bool| {
+        for _ in 0..80 {
+            if wanted(&rows(store)) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    };
+
+    // Nothing is recorded by default, even with a console and a state file.
+    let bind = address("127.0.0.1");
+    let mut cfg = config(fixture.address, bind);
+    cfg.web.http = vec![address("127.0.0.1")];
+    let mut server = RunningServer::start_with(
+        cfg,
+        ConsoleOptions {
+            state: Some(state.clone()),
+            version: "test",
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        udp(bind, &query("quiet.example.", RecordType::A))
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::NoError
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert!(
+        rows(&store).is_empty(),
+        "history is off until it is switched on"
+    );
+    server.shutdown().await;
+
+    // Saved + anonymous from the first query on: no client address, no device.
+    store
+        .set_history_prefs(&prefs(HistoryMode::Saved, HistoryDetail::Anonymous))
+        .unwrap();
+    let mut cfg = config(fixture.address, bind);
+    cfg.web.http = vec![address("127.0.0.1")];
+    let mut server = RunningServer::start_with(
+        cfg,
+        ConsoleOptions {
+            state: Some(state.clone()),
+            version: "test",
+        },
+    )
+    .await
+    .unwrap();
+    udp(bind, &query("ok.example.", RecordType::A)).await;
+    assert!(
+        wait_for(&store, &|r| r.iter().any(|q| q.row.domain == "ok.example")).await,
+        "saved"
+    );
+    let saved = rows(&store);
+    let row = &saved
+        .iter()
+        .find(|q| q.row.domain == "ok.example")
+        .unwrap()
+        .row;
+    assert_eq!((row.client.clone(), row.device.clone()), (None, None));
+    assert_eq!(
+        (row.qtype.as_str(), row.rcode.as_str(), row.blocked),
+        ("A", "NOERROR", false)
+    );
+
+    // A setting changed behind the daemon's back (as `lumenctl history set` does) is applied
+    // within seconds: full detail now records the client address.
+    store
+        .set_history_prefs(&prefs(HistoryMode::Saved, HistoryDetail::Full))
+        .unwrap();
+    let mut seen = false;
+    for _ in 0..40 {
+        udp(bind, &query("full.example.", RecordType::A)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        seen = rows(&store).iter().any(|q| {
+            q.row.domain == "full.example" && q.row.client.as_deref() == Some("127.0.0.1")
+        });
+        if seen {
+            break;
+        }
+    }
+    assert!(seen, "full detail records the client address");
+
+    // Off again: recording stops, and what was saved stays until it expires or is deleted.
+    store
+        .set_history_prefs(&prefs(HistoryMode::Off, HistoryDetail::Full))
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2600)).await;
+    let before = rows(&store).len();
+    udp(bind, &query("after-off.example.", RecordType::A)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2600)).await;
+    let after = rows(&store);
+    assert_eq!(after.len(), before);
+    assert!(after.iter().all(|q| q.row.domain != "after-off.example"));
+    server.shutdown().await;
 }

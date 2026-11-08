@@ -197,7 +197,7 @@ Rollback pauses automatic refresh until a successful forced refresh, so you do n
 
 ## Privacy and logging
 
-Aggregate `lumen_filter_*_total` metrics count allowed and blocked decisions, refreshes, and rollbacks, with no domain, client, or profile labels. No query history is stored. Setting `decision_log = true` writes names, client IPs, and decisions to stderr; it is **off by default**, and retention or redaction is then up to your log collector. Refresh errors stay generic and never disturb live policy.
+Aggregate `lumen_filter_*_total` metrics count allowed and blocked decisions, refreshes, and rollbacks, with no domain, client, or profile labels. Filtering stores no query history; the separate opt-in [query history](query-history.md) does. Setting `decision_log = true` writes names, client IPs, and decisions to stderr; it is **off by default**, and retention or redaction is then up to your log collector. Refresh errors stay generic and never disturb live policy.
 
 ## Related
 

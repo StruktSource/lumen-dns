@@ -25,7 +25,7 @@ Without `--state`, the static page is served but every `/api` call answers `503`
 
 1. Open <http://127.0.0.1:8080> on the machine that runs Lumen.
 2. A guided setup walks you through:
-   - Welcome
+   - Welcome, with a choice of language
    - Setup code (only when you are not on the local machine)
    - Your administrator account
    - How answers are found: private recursion or a forwarding provider
@@ -61,7 +61,11 @@ Configuration edits are staged, validated by the daemon's own parser, then appli
 
 ### Privacy
 
-The overview shows aggregate counters only. **Recent queries** is off by default. When an administrator turns it on, Lumen keeps the last 1,000 lookups (domain, device, result, latency) **in memory only**. They are never written to disk and disappear on restart or when the switch is turned off.
+The overview shows aggregate counters only. **[Query history](query-history.md)** is off by default. An administrator can turn on *recent only* (the last 1,000 lookups, in memory, never written to disk) or *saved* (kept in the state database for 1 to 90 days), either anonymous or with the device and address. See [Query history](query-history.md).
+
+### Language
+
+The console is available in English, German, Italian, Spanish, and Dutch. The setup wizard asks first, each person can choose their own under **My account**, and administrators set the default under **Users & access → Console**. See [Languages and translations](translations.md).
 
 ## Accounts and sign-in
 

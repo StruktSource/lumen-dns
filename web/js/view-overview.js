@@ -11,12 +11,12 @@ function gettingStarted(cfg, st, f, c) {
   const listen = cfg ? [...cfg.listen.udp, ...cfg.listen.tcp][0] : null; const addr = listen ? listen.replace(/^0\.0\.0\.0/, '<this machine’s IP>') : 'this machine';
   const hasLists = f.lists.length > 0 || (cfg && cfg.filtering.lists.length > 0), traffic = c.queries > 0;
   const items = [
-    [traffic, 'Point a device at Lumen', `Set the DNS server of a device or your router to ${addr}${listen && /:(?!53$)\d+$/.test(listen) ? ' (non-standard port: most routers need port 53, see Listeners)' : ''}. This ticks when the first query arrives.`, null],
+    [traffic, 'Point a device at Lumen', L.t('Set the DNS server of a device or your router to {addr}{port}. This ticks when the first query arrives.', { addr, port: listen && /:(?!53$)\d+$/.test(listen) ? L.t(' (non-standard port: most routers need port 53, see Listeners)') : '' }), null],
     [hasLists, 'Install block lists', 'One click installs Hagezi, OISD and more.', ['Open lists', () => L.go('filtering', 'lists')]],
     [!!L.session.totp_enabled, 'Protect your account with two-step verification', 'An authenticator app makes a stolen password useless.', ['Set up', () => L.go('account')]],
     [L.S.devices.length > 0, 'Name your devices', 'Optional. Named devices get their own profile and readable stats.', ['Devices', () => L.go('devices')]]];
   const done = items.filter(i => i[0]).length;
-  return h('div', { class: 'welcome', role: 'region', 'aria-label': 'Getting started' }, h('div', { class: 'welcome-h' }, h('h2', {}, 'Getting started'), h('span', { class: 'mono' }, `${done} of ${items.length}`), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { localStorage.setItem('lumen.welcome.done:' + L.session.name, '1'); L.paintMain(); } }, 'Dismiss')),
+  return h('div', { class: 'welcome', role: 'region', 'aria-label': 'Getting started' }, h('div', { class: 'welcome-h' }, h('h2', {}, 'Getting started'), h('span', { class: 'mono' }, L.t('{a} of {b}', { a: done, b: items.length })), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { localStorage.setItem('lumen.welcome.done:' + L.session.name, '1'); L.paintMain(); } }, 'Dismiss')),
     h('ol', {}, items.map(([ok, t, d, act], k) => h('li', { class: ok ? 'done' : '' }, h('i', {}, ok ? '✓' : String(k + 1)), h('div', {}, h('b', {}, t), h('span', {}, d)), !ok && act ? h('button', { class: 'btn sm', onclick: act[1] }, act[0]) : null))));
 }
 
@@ -33,7 +33,7 @@ function area(points) {
   const n = series.length, x = i => pl + (n === 1 ? iw : i / (n - 1) * iw), y = v => pt + ih - v / mx * ih;
   const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Queries per minute, allowed and blocked' });
   for (let g = 0; g <= 4; g++) { const v = mx / 4 * g, yy = y(v); svg.append(sv('line', { x1: pl, x2: W - pr, y1: yy, y2: yy, stroke: 'var(--rule)', 'stroke-dasharray': g ? '3 4' : '' }), Object.assign(sv('text', { x: pl - 8, y: yy + 4, 'text-anchor': 'end', fill: 'var(--text-2)', 'font-size': 10, 'font-family': 'var(--mono)' }), { textContent: Math.round(v) })); }
-  [0, Math.floor((n - 1) / 2), n - 1].forEach((i, k) => { if (series[i]) svg.append(Object.assign(sv('text', { x: x(i), y: H - 6, 'text-anchor': k === 0 ? 'start' : k === 2 ? 'end' : 'middle', fill: 'var(--text-2)', 'font-size': 10, 'font-family': 'var(--mono)' }), { textContent: i === n - 1 ? 'now' : `-${n - 1 - i}m` })); });
+  [0, Math.floor((n - 1) / 2), n - 1].forEach((i, k) => { if (series[i]) svg.append(Object.assign(sv('text', { x: x(i), y: H - 6, 'text-anchor': k === 0 ? 'start' : k === 2 ? 'end' : 'middle', fill: 'var(--text-2)', 'font-size': 10, 'font-family': 'var(--mono)' }), { textContent: i === n - 1 ? L.t('now') : `-${n - 1 - i}m` })); });
   const allowed = series.map((s, i) => `${x(i)},${y(s.allowed)}`), base = series.map((s, i) => `${x(i)},${y(s.allowed + s.blocked)}`);
   svg.append(sv('polygon', { points: `${x(0)},${y(0)} ${allowed.join(' ')} ${x(n - 1)},${y(0)}`, fill: 'var(--text)', opacity: .12 }), sv('polyline', { points: allowed.join(' '), fill: 'none', stroke: 'var(--text)', 'stroke-width': 2 }),
     sv('polygon', { points: `${allowed.join(' ')} ${base.slice().reverse().join(' ')}`, fill: '#d8ff36', stroke: 'none', opacity: .95 }), sv('polyline', { points: base.join(' '), fill: 'none', stroke: 'var(--ink)', 'stroke-width': 1.25 }));
@@ -41,7 +41,7 @@ function area(points) {
   const tt = h('div', { class: 'tt' }); const wrap = h('div', { class: 'chart' }, svg, tt);
   svg.addEventListener('mousemove', e => { const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) / r.width * W; const i = Math.max(0, Math.min(n - 1, Math.round((px - pl) / iw * (n - 1)))); const s = series[i];
     guide.setAttribute('x1', x(i)); guide.setAttribute('x2', x(i)); guide.setAttribute('opacity', 1); tt.style.display = 'block'; tt.style.left = (x(i) / W * r.width) + 'px'; tt.style.top = (y(s.allowed + s.blocked) / H * r.height) + 'px';
-    tt.textContent = `${n - 1 - i ? '-' + (n - 1 - i) + ' min' : 'last minute'} · ${s.allowed} allowed · ${s.blocked} blocked`; });
+    tt.textContent = L.t('{when} · {allowed} allowed · {blocked} blocked', { when: n - 1 - i ? L.t('-{n} min', { n: n - 1 - i }) : L.t('last minute'), allowed: s.allowed, blocked: s.blocked }); });
   svg.addEventListener('mouseleave', () => { guide.setAttribute('opacity', 0); tt.style.display = 'none'; });
   return wrap;
 }
@@ -60,10 +60,10 @@ L.views.overview = () => {
   const rules = f.lists.reduce((a, l) => a + l.rules, 0) + (cfg ? cfg.filtering.rules.allow.length + cfg.filtering.rules.block.length : 0);
 
   const alerts = [];
-  if (s.daemon !== 'running') alerts.push(['bad', `Daemon status: ${s.daemon}.`]);
-  if (s.last_error) alerts.push(['warn', `Last control message: ${s.last_error}`]);
-  if (f.refresh_failures > 0) alerts.push(['warn', `${f.refresh_failures} filter list refresh${f.refresh_failures > 1 ? 'es' : ''} failed since start. The previous rules stay active.`, admin ? 'Open lists' : null, () => L.go('filtering', 'lists')]);
-  if (servfailPct > 1 && c.responses > 100) alerts.push(['warn', `${servfailPct.toFixed(1)}% of answers are SERVFAIL. Check your network and upstreams.`]);
+  if (s.daemon !== 'running') alerts.push(['bad', L.t('Daemon status: {status}.', { status: s.daemon })]);
+  if (s.last_error) alerts.push(['warn', L.t('Last control message: {message}', { message: s.last_error })]);
+  if (f.refresh_failures > 0) alerts.push(['warn', L.t(f.refresh_failures > 1 ? '{n} filter list refreshes failed since start. The previous rules stay active.' : '1 filter list refresh failed since start. The previous rules stay active.', { n: f.refresh_failures }), admin ? 'Open lists' : null, () => L.go('filtering', 'lists')]);
+  if (servfailPct > 1 && c.responses > 100) alerts.push(['warn', L.t('{pct}% of answers are SERVFAIL. Check your network and upstreams.', { pct: servfailPct.toFixed(1) })]);
   if (admin && cfg) {
     if (!cfg.resolver.dnssec) alerts.push(['bad', 'DNSSEC validation is off.', 'Open resolver', () => L.go('dns', 'resolver')]);
     if (cfg.listen.allow_clients.some(x => x === '0.0.0.0/0' || x === '::/0')) alerts.push(['bad', 'Open resolver: allowed networks include the whole internet.', 'Open listeners', () => L.go('dns', 'listeners')]);
@@ -78,9 +78,9 @@ L.views.overview = () => {
     admin ? gettingStarted(cfg, s, f, c) : null,
     alerts.length ? h('div', { class: 'stack', style: 'margin-bottom:16px' }, alerts.map(([k, t, label, fn]) => h('div', { class: 'note ' + k }, L.ic('alert'), h('p', {}, t), label ? h('button', { class: 'btn sm', style: 'margin-left:auto', onclick: fn }, label) : null))) : null,
     h('div', { class: 'grid g4' },
-      h('div', { class: 'kpi' }, h('span', { class: 'mono' }, last ? 'Queries · last minute' : 'Queries · total'), h('strong', {}, F.n(last ? last.queries : c.queries), last ? h('small', {}, '/min') : null), h('span', { class: 'sub' }, `${F.n(c.queries)} since start`), spark(pts.map(p => p.queries), 'var(--text)')),
-      h('div', { class: 'kpi' }, h('span', { class: 'mono' }, 'Blocked'), h('strong', {}, decided ? blockedPct.toFixed(1) : '0', h('small', {}, '%')), h('span', { class: 'sub' }, `${F.n(f.blocked)} of ${F.n(decided)} lookups`), spark(pts.map(p => p.blocked), 'var(--text)')),
-      h('div', { class: 'kpi' }, h('span', { class: 'mono' }, 'Failed answers'), h('strong', {}, c.responses ? servfailPct.toFixed(2) : '0', h('small', {}, '%')), h('span', { class: 'sub' }, `${F.n(c.rcodes.servfail)} SERVFAIL · ${F.n(c.timeouts)} timeouts`)),
+      h('div', { class: 'kpi' }, h('span', { class: 'mono' }, last ? 'Queries · last minute' : 'Queries · total'), h('strong', {}, F.n(last ? last.queries : c.queries), last ? h('small', {}, '/min') : null), h('span', { class: 'sub' }, L.t('{n} since start', { n: F.n(c.queries) })), spark(pts.map(p => p.queries), 'var(--text)')),
+      h('div', { class: 'kpi' }, h('span', { class: 'mono' }, 'Blocked'), h('strong', {}, decided ? blockedPct.toFixed(1) : '0', h('small', {}, '%')), h('span', { class: 'sub' }, L.t('{a} of {b} lookups', { a: F.n(f.blocked), b: F.n(decided) })), spark(pts.map(p => p.blocked), 'var(--text)')),
+      h('div', { class: 'kpi' }, h('span', { class: 'mono' }, 'Failed answers'), h('strong', {}, c.responses ? servfailPct.toFixed(2) : '0', h('small', {}, '%')), h('span', { class: 'sub' }, L.t('{a} SERVFAIL · {b} timeouts', { a: F.n(c.rcodes.servfail), b: F.n(c.timeouts) }))),
       h('div', { class: 'kpi' }, h('span', { class: 'mono' }, 'Latency p50 / p95'), h('strong', {}, ln ? lbl(pc(.5)).replace('≤', '<') : '—', ln ? h('small', {}, ' / ' + lbl(pc(.95)).replace('≤', '<')) : null), h('span', { class: 'sub' }, 'End to end, all transports'))),
     h('div', { class: 'grid g-main', style: 'margin-top:16px' },
       h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', {}, 'Query rate'), h('div', { class: 'legend' }, h('span', {}, h('i', { style: 'background:var(--text)' }), 'Allowed'), h('span', {}, h('i', { style: 'background:var(--acid);border:1px solid var(--ink)' }), 'Blocked'))),
@@ -95,7 +95,7 @@ L.views.overview = () => {
       h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', {}, 'Latency')), h('div', { class: 'card-b' }, barRows(EDGES.map((e, i) => [e, lat[i]]), 0)))),
     h('div', { class: 'grid g2', style: 'margin-top:16px' },
       h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', {}, 'Filtering'), h('span', { class: 'pill ' + (f.refresh_failures ? 'warn' : 'ok') }, 'Generation ' + f.generation)), h('div', { class: 'card-b' },
-        h('dl', { class: 'kv' }, h('dt', {}, 'Rules loaded'), h('dd', {}, F.n(rules)), h('dt', {}, 'Lists'), h('dd', {}, String(f.lists.length)), h('dt', {}, 'Refreshes'), h('dd', {}, `${f.refresh_successes} ok · ${f.refresh_failures} failed`), h('dt', {}, 'Rollbacks'), h('dd', {}, String(f.rollbacks))),
+        h('dl', { class: 'kv' }, h('dt', {}, 'Rules loaded'), h('dd', {}, F.n(rules)), h('dt', {}, 'Lists'), h('dd', {}, String(f.lists.length)), h('dt', {}, 'Refreshes'), h('dd', {}, L.t('{a} ok · {b} failed', { a: f.refresh_successes, b: f.refresh_failures })), h('dt', {}, 'Rollbacks'), h('dd', {}, String(f.rollbacks))),
         h('div', { class: 'row', style: 'margin-top:16px' }, h('button', { class: 'btn primary', disabled: !admin, title: admin ? '' : 'Administrators only', onclick: () => control('/api/filter/refresh', 'Filter refresh queued.') }, L.ic('refresh'), 'Refresh now'), h('button', { class: 'btn', disabled: !admin, onclick: rollback }, L.ic('undo'), 'Roll back')))),
       cfg ? h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', {}, 'Listeners')), h('div', { class: 'card-b flush' }, h('table', { class: 'tbl' }, h('tbody', {}, ['udp', 'tcp', 'dot', 'doh', 'doq'].map(k => h('tr', {}, h('td', { class: 'mono' }, k.toUpperCase()), h('td', { class: 'mono-c' }, cfg.listen[k].join(', ') || '—'), h('td', { class: 'r' }, h('span', { class: 'pill ' + (cfg.listen[k].length ? 'ok' : 'off') }, cfg.listen[k].length ? 'Listening' : 'Off')))))))) : null)
   ];

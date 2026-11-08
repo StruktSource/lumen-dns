@@ -203,3 +203,9 @@ dialog::backdrop{background:#000a;backdrop-filter:blur(2px)}dialog[open]{animati
 .bar.ind i{animation:indet 1.2s ease-in-out infinite}@keyframes indet{0%{margin-left:-35%}100%{margin-left:100%}}
 .spin{width:14px;height:14px;border:2px solid var(--ink);border-right-color:transparent;border-radius:50%;animation:rot .8s linear infinite}@keyframes rot{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.spin,.bar.ind i{animation:none}}
+
+/* Language switchers */
+.lang-select{width:auto;max-width:100%;padding:6px 30px 6px 10px;font-size:13px}
+.lang-corner{display:flex;align-items:center;justify-content:flex-end;gap:8px;color:var(--muted);margin-bottom:-6px}
+.side-lang{display:flex;align-items:center;gap:8px;color:#bbb;width:100%}.side-lang .select{flex:1;background-color:transparent;border-color:#4a4a45;color:#ddd}
+.side-tools{flex-wrap:wrap}.seg{flex-wrap:wrap}

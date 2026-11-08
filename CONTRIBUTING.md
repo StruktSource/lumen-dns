@@ -7,6 +7,7 @@ Thanks for helping! Bug reports, interoperability tests, documentation fixes, an
 - **Report a bug or idea** by opening an issue. For anything touching security, see the [security policy](SECURITY.md) and report privately.
 - **Test on real hardware.** Platforms like Proxmox, Unraid, and Raspberry Pi are not yet validated. See the [compatibility matrix](docs/deployment/compatibility.md).
 - **Improve the docs.** The [documentation index](docs/README.md) shows how they are organized.
+- **Translate the console.** Languages are plain data files. See [Languages and translations](docs/guides/translations.md).
 - **Send code.** Read the steps below first.
 
 ## Before you write code

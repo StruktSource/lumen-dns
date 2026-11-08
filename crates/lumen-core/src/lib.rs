@@ -192,13 +192,16 @@ impl ClientRates {
     }
 }
 
-/// Most recent queries kept in memory while history is enabled. Never persisted.
+/// Most recent queries kept in memory in memory mode. Never persisted.
 const HISTORY_LIMIT: usize = 1000;
+/// Lookups waiting to be saved. When the writer cannot keep up, new lookups are dropped.
+const UNSAVED_LIMIT: usize = 8192;
 
 struct Service {
     started: Instant,
-    history_on: std::sync::atomic::AtomicBool,
+    history_settings: Mutex<lumen_web::HistorySettings>,
     history: Mutex<std::collections::VecDeque<lumen_web::QueryRecord>>,
+    unsaved: Mutex<Vec<lumen_web::QueryRecord>>,
     config: Arc<Config>,
     resolver: Resolver,
     filter: Arc<lumen_filter::Filter>,
@@ -330,11 +333,13 @@ impl Service {
         response: &[u8],
         started: Instant,
     ) {
-        if !self.history_on.load(Ordering::Relaxed) {
+        let settings = *self.history_settings.lock().expect("history settings lock");
+        if settings.mode == lumen_web::HistoryMode::Off {
             return;
         }
         let client = peer.ip().to_canonical();
         let question = &query.message.queries[0];
+        let full = settings.detail == lumen_web::HistoryDetail::Full;
         let record = lumen_web::QueryRecord {
             unix_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -345,8 +350,12 @@ impl Service {
                 .trim_end_matches('.')
                 .to_ascii_lowercase(),
             qtype: question.query_type().to_string(),
-            client,
-            device: self.filter.device_of(client),
+            client: full.then_some(client),
+            device: if full {
+                self.filter.device_of(client)
+            } else {
+                None
+            },
             blocked,
             rcode: match response.get(3).map_or(0, |byte| byte & 15) {
                 0 => "NOERROR",
@@ -357,11 +366,18 @@ impl Service {
             },
             micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
         };
-        let mut log = self.history.lock().expect("history lock");
-        if log.len() >= HISTORY_LIMIT {
-            log.pop_back();
+        if settings.mode == lumen_web::HistoryMode::Saved {
+            let mut unsaved = self.unsaved.lock().expect("unsaved lock");
+            if unsaved.len() < UNSAVED_LIMIT {
+                unsaved.push(record);
+            }
+        } else {
+            let mut log = self.history.lock().expect("history lock");
+            if log.len() >= HISTORY_LIMIT {
+                log.pop_back();
+            }
+            log.push_front(record);
         }
-        log.push_front(record);
     }
 }
 
@@ -429,14 +445,18 @@ impl lumen_web::Host for Service {
         self.started.elapsed().as_secs()
     }
 
-    fn history_enabled(&self) -> bool {
-        self.history_on.load(Ordering::Relaxed)
+    fn history_settings(&self) -> lumen_web::HistorySettings {
+        *self.history_settings.lock().expect("history settings lock")
     }
 
-    fn set_history(&self, enabled: bool) {
-        self.history_on.store(enabled, Ordering::Relaxed);
-        if !enabled {
+    fn set_history(&self, settings: lumen_web::HistorySettings) {
+        *self.history_settings.lock().expect("history settings lock") = settings;
+        // Never keep what the current mode no longer allows.
+        if settings.mode != lumen_web::HistoryMode::Memory {
             self.history.lock().expect("history lock").clear();
+        }
+        if settings.mode != lumen_web::HistoryMode::Saved {
+            self.unsaved.lock().expect("unsaved lock").clear();
         }
     }
 
@@ -448,6 +468,10 @@ impl lumen_web::Host for Service {
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    fn take_unsaved_history(&self) -> Vec<lumen_web::QueryRecord> {
+        std::mem::take(&mut *self.unsaved.lock().expect("unsaved lock"))
     }
 }
 

@@ -1084,6 +1084,7 @@ dependencies = [
  "lumen-filter",
  "lumen-proto",
  "lumen-resolver",
+ "lumen-store",
  "lumen-web",
  "quinn",
  "rcgen",

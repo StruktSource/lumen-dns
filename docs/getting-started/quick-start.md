@@ -83,7 +83,7 @@ Look for `status: NOERROR` and an answer section. In the `+dnssec` query, the `a
 > [!TIP]
 > The first lookup of a name can take a second or two because Lumen is walking the DNS tree itself. Repeat it and the answer comes back almost instantly from the cache.
 
-**That is it:** a private recursive resolver with DNSSEC and bounded caches, no outside provider, and no query history.
+**That is it:** a private recursive resolver with DNSSEC and bounded caches, no outside provider, and no query history unless you turn it on.
 
 ## What next?
 

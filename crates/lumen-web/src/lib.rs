@@ -7,7 +7,9 @@
 mod console;
 mod host;
 pub use console::Console;
-pub use host::{Counters, Explained, Host, ListInfo, QueryRecord};
+pub use host::{
+    Counters, Explained, HistoryDetail, HistoryMode, HistorySettings, Host, ListInfo, QueryRecord,
+};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -60,6 +62,11 @@ const ASSETS: &[Asset] = &[
     asset!("/index.html", HTML, "index.html"),
     asset!("/assets/app.css", CSS, "app.css"),
     asset!("/assets/js/core.js", JS, "js/core.js"),
+    asset!("/assets/js/i18n.js", JS, "js/i18n.js"),
+    asset!("/assets/js/lang-de.js", JS, "js/lang-de.js"),
+    asset!("/assets/js/lang-it.js", JS, "js/lang-it.js"),
+    asset!("/assets/js/lang-es.js", JS, "js/lang-es.js"),
+    asset!("/assets/js/lang-nl.js", JS, "js/lang-nl.js"),
     asset!("/assets/js/api.js", JS, "js/api.js"),
     asset!("/assets/js/view-login.js", JS, "js/view-login.js"),
     asset!("/assets/js/view-overview.js", JS, "js/view-overview.js"),
@@ -139,8 +146,10 @@ impl BoundWeb {
     pub async fn serve(self) -> io::Result<()> {
         let mut tasks = JoinSet::new();
         if let Some(console) = &self.console {
-            let console = Arc::clone(console);
-            tasks.spawn(async move { console.run_sampler().await });
+            let sampler = Arc::clone(console);
+            tasks.spawn(async move { sampler.run_sampler().await });
+            let writer = Arc::clone(console);
+            tasks.spawn(async move { writer.run_history_writer().await });
         }
         for (listener, tls) in self.listeners {
             tasks.spawn(serve_listener(
@@ -511,6 +520,84 @@ mod tests {
         task.abort();
     }
 
+    /// Translations are plain data, so a test keeps them complete, consistent and current.
+    #[test]
+    fn language_catalogs_are_complete_consistent_and_current() {
+        fn placeholders(text: &str) -> Vec<&str> {
+            let mut found: Vec<&str> = text
+                .split('{')
+                .skip(1)
+                .filter_map(|rest| rest.split_once('}'))
+                .map(|(name, _)| name)
+                .filter(|name| {
+                    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                })
+                .collect();
+            found.sort_unstable();
+            found
+        }
+
+        use std::collections::BTreeMap;
+        let asset = |path: &str| {
+            std::str::from_utf8(ASSETS.iter().find(|a| a.path == path).expect(path).body).unwrap()
+        };
+        // The languages the UI offers are the ones the server accepts, English first.
+        let ui_line = asset("/assets/js/i18n.js")
+            .lines()
+            .find(|line| line.starts_with("L.LANGS ="))
+            .expect("L.LANGS");
+        let offered: Vec<&str> = ui_line.split("['").skip(1).map(|part| &part[..2]).collect();
+        assert_eq!(offered, console::LANGUAGES);
+
+        // Text the catalogs may point at: every script except the catalogs themselves.
+        let sources: String = ASSETS
+            .iter()
+            .filter(|a| a.path.starts_with("/assets/js/") && !a.path.contains("/lang-"))
+            .map(|a| std::str::from_utf8(a.body).unwrap())
+            .collect();
+
+        let mut catalogs: Vec<(&str, BTreeMap<String, String>)> = Vec::new();
+        for code in &console::LANGUAGES[1..] {
+            // Windows checkouts may use CRLF line endings; the catalogs do not care.
+            let body = asset(&format!("/assets/js/lang-{code}.js")).replace("\r\n", "\n");
+            assert!(body.contains(&format!("L.i18n.add('{code}', {{")), "{code}");
+            let json = &body[body.find("{\n").unwrap()..body.rfind("\n}").unwrap() + 2];
+            let catalog: BTreeMap<String, String> =
+                serde_json::from_str(json).unwrap_or_else(|error| panic!("{code}: {error}"));
+            assert!(
+                catalog.len() > 300,
+                "{code} has only {} entries",
+                catalog.len()
+            );
+            for (english, translated) in &catalog {
+                assert!(
+                    !translated.trim().is_empty(),
+                    "{code}: empty translation of {english:?}"
+                );
+                assert_eq!(
+                    placeholders(english),
+                    placeholders(translated),
+                    "{code}: {english:?}"
+                );
+                assert!(
+                    sources.contains(english.as_str())
+                        || sources.contains(&english.replace('\'', "\\'")),
+                    "{code}: {english:?} no longer appears in the console"
+                );
+            }
+            catalogs.push((code, catalog));
+        }
+        let reference: Vec<&String> = catalogs[0].1.keys().collect();
+        for (code, catalog) in &catalogs[1..] {
+            assert_eq!(
+                catalog.keys().collect::<Vec<_>>(),
+                reference,
+                "{code} differs from {}",
+                catalogs[0].0
+            );
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn api_works_over_a_socket_with_cookies_and_blocking_work_off_the_executor() {
         struct Host0;
@@ -527,11 +614,14 @@ mod tests {
             fn uptime_secs(&self) -> u64 {
                 1
             }
-            fn history_enabled(&self) -> bool {
-                false
+            fn history_settings(&self) -> HistorySettings {
+                HistorySettings::default()
             }
-            fn set_history(&self, _: bool) {}
+            fn set_history(&self, _: HistorySettings) {}
             fn history(&self, _: usize) -> Vec<QueryRecord> {
+                Vec::new()
+            }
+            fn take_unsaved_history(&self) -> Vec<QueryRecord> {
                 Vec::new()
             }
         }
