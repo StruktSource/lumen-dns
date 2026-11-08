@@ -907,15 +907,26 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
 #[tokio::test]
 async fn startup_is_atomic_and_load_stays_bounded() {
     let fixture = fixture().await;
-    let bind = address("127.0.0.1");
-    let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut invalid = config(fixture.address, bind);
-    invalid.listen.tcp.push(held.local_addr().unwrap());
-    assert!(RunningServer::start(invalid).await.is_err());
-    let mut cfg = config(fixture.address, bind);
-    cfg.limits.queries_per_second = 1000;
-    cfg.limits.max_in_flight = 16;
-    let mut server = RunningServer::start(cfg).await.unwrap();
+    // Probed ports are free only for an instant. Retry the full atomic-start check with a
+    // fresh port if another parallel test wins that race; a real cleanup leak fails every try.
+    let mut attempt = 0;
+    let (mut server, bind) = loop {
+        let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind = address("127.0.0.1");
+        let mut invalid = config(fixture.address, bind);
+        invalid.listen.tcp.push(held.local_addr().unwrap());
+        assert!(RunningServer::start(invalid).await.is_err());
+        let mut cfg = config(fixture.address, bind);
+        cfg.limits.queries_per_second = 1000;
+        cfg.limits.max_in_flight = 16;
+        match RunningServer::start(cfg).await {
+            Ok(server) => break (server, bind),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && attempt < 5 => {
+                attempt += 1;
+            }
+            Err(error) => panic!("server failed to start after atomic bind check: {error}"),
+        }
+    };
     for batch in 0..32 {
         let mut tasks = JoinSet::new();
         for index in 0..8 {
