@@ -21,13 +21,18 @@ function listModal(item) {
     h('div', { class: 'fgrid' }, L.f.field('List ID', L.f.text(l, 'id', { mono: true, disabled: !isNew, placeholder: 'ads', validate: L.v.id })), L.f.field('Format', L.f.sel(l, 'format', [['domains', 'Domains'], ['hosts', 'Hosts file'], ['adblock', 'Adblock DNS']]), 'Hosts imports become block rules. Adblock supports ||domain^ and @@||domain^ only.')),
     h('div', { class: 'field' }, h('label', {}, 'Source'), L.f.seg(kind, 'v', [['url', 'Web address'], ['path', 'File'], ['text', 'Type it in']], { onChange: drawSrc })), srcBox,
     h('div', { class: 'fgrid' }, L.f.field('Category', L.f.text(l, 'category', { mono: true, placeholder: 'optional, e.g. adult', validate: s => L.v.id(s) }), 'Categorized lists only apply to profiles that select the category.'), L.f.field('Refresh', L.f.sel(l, 'refresh_secs', REFRESH.map(([v, t]) => [String(v), t]), { onChange: () => { l.refresh_secs = +l.refresh_secs; } }))), err],
-    actions: [{ label: 'Cancel' }, { label: isNew ? 'Add list' : 'Save', kind: 'primary', onClick: () => {
+    actions: [{ label: 'Cancel' }, { label: isNew ? 'Add list' : 'Save', kind: 'primary', onClick: async () => {
       l.refresh_secs = +l.refresh_secs; if (!L.v.id(l.id)) { err.textContent = 'Enter a valid list ID.'; return false; } if (isNew && D.lists.some(x => x.id === l.id)) { err.textContent = 'List ID already exists.'; return false; }
       if (kind.v === 'url' && !/^https:\/\/[^@#\s/]+\/?\S*$/.test(l.url)) { err.textContent = 'The address must start with https:// and contain no credentials or fragment.'; return false; }
       if (kind.v === 'path' && !l.path.trim()) { err.textContent = 'Enter a file path.'; return false; } if (kind.v === 'text' && !l.text.trim()) { err.textContent = 'Enter at least one rule.'; return false; }
       if (isNew && D.lists.length >= 64) { err.textContent = 'At most 64 lists.'; return false; }
       for (const k of ['url', 'path', 'text']) if (k !== kind.v) l[k] = '';
-      const i = D.lists.findIndex(x => x.id === l.id); if (i < 0) D.lists.push(l); else D.lists[i] = l; L.touch(); L.rerender(); } }] });
+      const saved = await L.changeLists(f => {
+        const i = f.lists.findIndex(x => x.id === l.id), old = i < 0 ? null : f.lists[i];
+        if (i < 0) f.lists.push(L.clone(l)); else f.lists[i] = L.clone(l);
+        return g => { const j = g.lists.findIndex(x => x.id === l.id); if (!old) { if (j >= 0) g.lists.splice(j, 1); } else if (j >= 0) g.lists[j] = old; };
+      });
+      return saved ? undefined : false; } }] });
 }
 
 /* ---------- one-click catalog ---------- */
@@ -65,24 +70,30 @@ const CATALOG_ITEMS = CATALOG.flatMap(g => g.items), BUDGET = 4000000;
 L.catalog = { items: CATALOG_ITEMS, bundles: BUNDLES };
 const rulesLabel = n => n >= 1e6 ? (n / 1e6).toFixed(1) + ' M' : n >= 1e3 ? Math.round(n / 1e3) + ' k' : String(n);
 /* Install catalog entries. Profiles that restrict themselves to named lists get the new ones too, otherwise the list would silently never apply. */
-function installLists(ids) {
+async function installLists(ids) {
   const D = L.D().filtering; const add = CATALOG_ITEMS.filter(c => ids.includes(c.id) && !D.lists.some(l => l.id === c.id));
   if (!add.length) return L.toast('Already installed.');
   if (D.lists.length + add.length > 64) return L.toast('At most 64 lists.', 'bad');
   const est = CATALOG_ITEMS.filter(c => D.lists.some(l => l.id === c.id) || add.includes(c)).reduce((a, c) => a + c.rules, 0);
-  if (est > BUDGET) return L.toast(`That would be about ${rulesLabel(est)} rules, over the ${rulesLabel(BUDGET)} limit. Remove a list first.`, 'bad');
-  for (const c of add) D.lists.push({ id: c.id, format: c.format, url: c.url, path: '', text: '', category: '', refresh_secs: 86400 });
-  let widened = 0; for (const p of D.profiles) if (p.lists.length) { p.lists = [...p.lists, ...add.map(c => c.id)]; widened++; }
-  L.touch(); L.rerender(); L.toast(`${add.length === 1 ? add[0].name : add.length + ' lists'} added${widened ? ` and enabled in ${widened} restricted profile${widened > 1 ? 's' : ''}` : ''}. Apply to download and start blocking.`, 'ok');
+  if (est > BUDGET) return L.toast(L.t('That would be about {n} rules, over the {max} limit. Remove a list first.', { n: rulesLabel(est), max: rulesLabel(BUDGET) }), 'bad');
+  const what = add.length === 1 ? add[0].name : L.t('{n} lists', { n: add.length });
+  if (!(await L.confirm({ title: L.t('Install {what}?', { what }), text: 'Lumen downloads it in the background and starts blocking when it is ready. DNS keeps working, lists you already have are not downloaded again, and you can cancel in the progress panel.', label: 'Install' }))) return;
+  /* Profiles that restrict themselves to named lists get the new ones too, otherwise the list would silently never apply. */
+  await L.changeLists(f => {
+    const added = [], widened = [];
+    for (const c of add) if (!f.lists.some(l => l.id === c.id)) { f.lists.push({ id: c.id, format: c.format, url: c.url, path: '', text: '', category: '', refresh_secs: 86400 }); added.push(c.id); }
+    for (const p of f.profiles) if (p.lists.length) { const missing = added.filter(id => !p.lists.includes(id)); if (missing.length) { p.lists = [...p.lists, ...missing]; widened.push([p.id, missing]); } }
+    return g => { g.lists = g.lists.filter(x => !added.includes(x.id)); for (const [pid, extra] of widened) { const p = g.profiles.find(x => x.id === pid); if (p) p.lists = p.lists.filter(x => !extra.includes(x)); } };
+  });
 }
 function catalogCard() {
   const D = L.D().filtering, have = id => D.lists.some(l => l.id === id);
-  return h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h3', {}, 'Quick install'), h('span', { class: 'mono muted' }, 'one click, then Apply')),
+  return h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h3', {}, 'Quick install'), h('span', { class: 'mono muted' }, 'one click')),
     h('div', { class: 'card-b stack' },
       h('div', { class: 'grid g3' }, BUNDLES.map(b => { const done = b.ids.every(have); return h('div', { class: 'card' }, h('div', { class: 'card-b stack' }, h('div', {}, h('strong', {}, b.name), h('div', { class: 'hint' }, b.info)), done ? h('span', { class: 'pill ok' }, 'Installed') : h('button', { class: 'btn primary sm', onclick: () => installLists(b.ids) }, L.ic('plus'), 'Install ' + b.name.toLowerCase()))); })),
       CATALOG.map(g => h('div', { class: 'stack' }, h('div', { class: 'sec-title' }, h('h2', {}, g.group)), h('p', { class: 'hint', style: 'margin:0' }, g.note),
         h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('tbody', {}, g.items.map(c => h('tr', {}, h('td', {}, h('strong', {}, c.name), c.star ? h('span', { class: 'chip', style: 'margin-left:8px' }, 'recommended') : null, h('div', { class: 'hint' }, c.info)), h('td', { class: 'mono-c' }, '≈ ' + rulesLabel(c.rules)), h('td', { class: 'act' }, have(c.id) ? h('span', { class: 'pill ok' }, 'Installed') : h('button', { class: 'btn sm', onclick: () => installLists([c.id]) }, L.ic('plus'), 'Install'))))))))),
-      h('p', { class: 'hint', style: 'margin:0' }, 'Lists are fetched over HTTPS from their publishers when you apply, then refreshed daily. Rule counts are approximate.')));
+      h('p', { class: 'hint', style: 'margin:0' }, 'Lists are fetched over HTTPS from their publishers when you install them, then refreshed daily. Rule counts are approximate.')));
 }
 const sourceText = l => l.url ? l.url.replace('https://', '') : l.path ? l.path : l.text ? `typed in · ${l.text.split('\n').filter(Boolean).length} lines` : '—';
 /* Why a list might not block for the default profile. */
@@ -94,8 +105,11 @@ function listsTab() {
       D.lists.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['List', 'Format', 'Category', 'Refresh', 'Rules', 'Status', ''].map(x => h('th', {}, x)))), h('tbody', {}, D.lists.map(l => { const rt = live.find(x => x.id === l.id);
         return h('tr', {}, h('td', {}, h('strong', {}, l.id), h('div', { class: 'hint mono' }, sourceText(l))), h('td', { class: 'mono-c' }, l.format), h('td', {}, l.category ? h('span', { class: 'chip' }, l.category) : h('span', { class: 'muted' }, 'none')), h('td', {}, refreshLabel(l.refresh_secs)),
           h('td', { class: 'mono-c' }, rt ? F.n(rt.rules) : '—', rt && rt.unsupported ? h('div', { class: 'hint' }, rt.unsupported + ' unsupported') : null, rt && rt.duplicates ? h('div', { class: 'hint' }, rt.duplicates + ' duplicates') : null),
-          h('td', {}, rt ? h('span', { class: 'pill ok' }, 'Loaded') : h('span', { class: 'pill off' }, 'Pending apply'), skipped(l) ? h('div', { class: 'hint' }, skipped(l)) : null),
-          h('td', { class: 'act' }, h('button', { class: 'btn sm flat', 'aria-label': 'Edit ' + l.id, onclick: () => listModal(l) }, L.ic('pencil')), h('button', { class: 'btn sm flat danger', 'aria-label': 'Delete ' + l.id, onclick: () => { const used = D.profiles.filter(p => p.lists.includes(l.id)); if (used.length) return L.toast(`Used by profile ${used[0].id}. Remove it there first.`, 'bad'); D.lists = D.lists.filter(x => x.id !== l.id); L.touch(); L.rerender(); } }, L.ic('trash'))));
+          h('td', {}, rt ? h('span', { class: 'pill ok' }, 'Loaded') : h('span', { class: 'pill off' }, 'Waiting to load'), skipped(l) ? h('div', { class: 'hint' }, skipped(l)) : null),
+          h('td', { class: 'act' }, h('button', { class: 'btn sm flat', 'aria-label': 'Edit ' + l.id, onclick: () => listModal(l) }, L.ic('pencil')), h('button', { class: 'btn sm flat danger', 'aria-label': 'Delete ' + l.id, onclick: async () => {
+            const used = D.profiles.filter(p => p.lists.includes(l.id)); if (used.length) return L.toast(L.t('Used by profile {id}. Remove it there first.', { id: used[0].id }), 'bad');
+            if (!(await L.confirm({ title: L.t('Remove {id}?', { id: l.id }), text: 'It stops blocking right away. Your other lists stay loaded and are not downloaded again.', label: 'Remove', danger: true }))) return;
+            await L.changeLists(f => { const old = f.lists.find(x => x.id === l.id); f.lists = f.lists.filter(x => x.id !== l.id); return g => { if (old && !g.lists.some(x => x.id === old.id)) g.lists.push(old); }; }); } }, L.ic('trash'))));
       })))) : L.empty('No lists', 'No third-party list is enabled by default. Add a source you trust.')),
     catalogCard(),
     h('div', { class: 'note' }, L.ic('info'), h('p', {}, 'Refresh is atomic: Lumen builds a whole new generation and swaps it in only if every due source parses and the rule budget holds. A failed download keeps the live generation.')));
@@ -183,7 +197,7 @@ function explainTab() {
 L.views.filtering = sub => {
   const tab = sub || 'lists'; const go = id => L.go('filtering', id);
   const body = { lists: listsTab, rules: rulesTab, profiles: profilesTab, explain: explainTab }[tab] || listsTab;
-  return [L.pageHead('Filtering', 'Lists, rules, profiles and schedules. Edits stay in a draft until you apply them.'),
+  return [L.pageHead('Filtering', 'Lists install right away, in the background. Rules, profiles and schedules stay in a draft until you apply them.'),
     L.tabs([['lists', 'Lists'], ['rules', 'Rules & response'], ['profiles', 'Profiles'], ['explain', 'Explain']], tab, go), body()];
 };
 })();

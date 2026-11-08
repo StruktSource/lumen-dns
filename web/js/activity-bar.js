@@ -3,6 +3,10 @@
 'use strict';
 const L = window.L, h = L.h, F = L.fmt;
 const BUSY = new Set(['checking', 'downloading', 'starting']);
+/* Messages the daemon sends for the panel (apps/lumen/src/main.rs). They are shown as received, and listed here so
+   they have translations and the translation test keeps them in step. */
+L.daemonMessages = ['Checking the new configuration', 'Downloading and checking block lists', 'Restarting DNS with the new settings', 'The new settings are live',
+  'The new lists and rules are live', 'Refreshing block lists', 'Block lists refreshed', 'Cancelled. Nothing changed: the previous settings are still running.'];
 const STATE = { waiting: 'Waiting', downloading: 'Downloading', parsing: 'Reading rules', ready: 'Ready', failed: 'Failed' };
 const mb = n => (n / 1048576).toFixed(n >= 10485760 ? 0 : 1) + ' MB';
 let panel = null, timer = null, seen = null, wasBusy = false, collapsed = false, offline = 0; let last = null;
@@ -21,6 +25,10 @@ L.runPendingBundle = async () => {
   } catch (e) { L.toast(L.t('Could not start installing the block lists: {error}', { error: e.message }), 'bad'); }
 };
 
+async function cancel() {
+  try { const r = await L.api('POST', '/api/activity/cancel'); L.toast(r.cancelled ? 'Cancelling…' : 'Nothing to cancel.'); L.activity.poke(); } catch (e) { L.toast(e.message, 'bad'); }
+}
+
 function render(a) {
   const busy = BUSY.has(a.phase), failed = a.phase === 'failed' && dismissed() !== String(a.since) && (a.since === 0 || Date.now() / 1000 - a.since < 900);
   const show = busy || failed || (a.lists.some(l => l.state === 'downloading' || l.state === 'parsing'));
@@ -31,6 +39,7 @@ function render(a) {
   const next = h('aside', { id: 'actbar', class: 'actbar' + (failed ? ' bad' : '') + (collapsed ? ' min' : ''), role: failed ? 'alert' : 'status', 'aria-live': 'polite' },
     h('div', { class: 'act-h' }, busy ? h('i', { class: 'spin', 'aria-hidden': 'true' }) : null, h('strong', {}, title), h('span', { class: 'sp' }), h('button', { class: 'linkish', type: 'button', onclick: () => { collapsed = !collapsed; render(a); } }, collapsed ? 'Show' : 'Hide')),
     collapsed ? null : h('div', { class: 'act-b' }, h('p', {}, a.message || ''), rows.length ? h('ul', {}, rows) : null,
+      a.cancellable && L.can('admin') ? h('div', { class: 'row' }, h('button', { class: 'btn sm danger', type: 'button', onclick: cancel }, L.ic('x'), 'Cancel'), h('span', { class: 'hint' }, 'Nothing changes. Your current settings and lists stay live.')) : null,
       failed ? h('div', { class: 'row' }, L.pendingBundle() ? h('button', { class: 'btn sm primary', onclick: () => L.runPendingBundle() }, 'Try again') : null, h('button', { class: 'btn sm', onclick: () => { sessionStorage.setItem('lumen.act.dismissed', String(a.since)); render(a); } }, 'Dismiss')) : null));
   if (panel) panel.replaceWith(next); else document.body.append(next); panel = next;
 }
@@ -43,7 +52,7 @@ async function tick() {
       if (a.phase === 'idle' && s.pending_revision != null) { a.phase = 'checking'; a.message = a.message || 'Applying your changes'; }
       render(a); delay = busy ? 1000 : 8000;
       if (wasBusy && !busy) {
-        if (a.phase === 'done') { const n = a.lists.filter(l => l.state === 'ready').length; L.toast(n ? L.t(n > 1 ? 'Done. {n} block lists loaded, {rules} rules in total.' : 'Done. 1 block list loaded, {rules} rules in total.', { n, rules: F.n(a.lists.reduce((x, l) => x + l.rules, 0)) }) : a.message, 'ok'); if (L.pendingBundle()) localStorage.removeItem('lumen.pendingBundle'); L.S.draft || L.loadConfig().catch(() => {}); if (L.route().page === 'filtering') L.rerender(); }
+        if (a.phase === 'done') { const n = a.lists.filter(l => l.state === 'ready').length; L.toast(n ? L.t(n > 1 ? 'Done. {n} block lists loaded, {rules} rules in total.' : 'Done. 1 block list loaded, {rules} rules in total.', { n, rules: F.n(a.lists.reduce((x, l) => x + l.rules, 0)) }) : a.message, 'ok'); if (L.pendingBundle()) localStorage.removeItem('lumen.pendingBundle'); L.S.draft || L.loadConfig().catch(() => {}); L.loadStatus().catch(() => {}).then(() => { if (L.route().page === 'filtering') L.rerender(); }); }
         else if (a.phase === 'failed') L.toast(a.message || 'The change was not applied.', 'bad');
       }
       wasBusy = busy;

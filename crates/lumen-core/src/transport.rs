@@ -28,7 +28,6 @@ pub struct RunningServer {
     service: Arc<Service>,
     pub endpoints: Vec<(Transport, SocketAddr)>,
     pub metrics: Arc<Metrics>,
-    pub filter: Arc<lumen_filter::Filter>,
     pub web_endpoints: Vec<(bool, SocketAddr)>,
     /// One-time code needed to create the first console account from another machine.
     pub setup_code: Option<String>,
@@ -106,7 +105,7 @@ impl RunningServer {
             connections: Arc::new(Semaphore::new(config.limits.max_connections as usize)),
             clients: std::sync::Mutex::default(),
             resolver,
-            filter: Arc::clone(&filter),
+            filter: std::sync::RwLock::new(filter),
             config: Arc::new(config),
             metrics: Arc::clone(&metrics),
         });
@@ -219,7 +218,6 @@ impl RunningServer {
             service,
             endpoints,
             metrics,
-            filter,
             web_endpoints,
             setup_code,
         })
@@ -274,6 +272,26 @@ impl RunningServer {
         while self.tasks.join_next().await.is_some() {}
     }
 
+    /// The filter that is live now. It changes when lists or rules are replaced live.
+    #[must_use]
+    pub fn filter(&self) -> Arc<lumen_filter::Filter> {
+        self.service.filter()
+    }
+
+    /// Put a new filter live without restarting any listener. Its counters continue from the
+    /// old filter's, prefetch candidates chosen under the old rules are dropped, and
+    /// downloads of lists it no longer uses are forgotten.
+    ///
+    /// # Panics
+    /// Panics if an internal writer previously poisoned the filter lock.
+    pub fn replace_filter(&self, filter: Arc<lumen_filter::Filter>) {
+        let old = self.service.filter();
+        filter.inherit_metrics(&old);
+        filter.retain_downloads();
+        *self.service.filter.write().expect("filter lock") = filter;
+        self.service.resolver.clear_prefetch();
+    }
+
     /// Refresh filtering rules and discard prefetch candidates selected under old rules.
     ///
     /// # Errors
@@ -300,19 +318,19 @@ impl RunningServer {
 }
 
 async fn refresh_filter(service: &Service) -> Result<(), String> {
-    service.filter.refresh().await?;
+    service.filter().refresh().await?;
     service.resolver.clear_prefetch();
     Ok(())
 }
 
 async fn rollback_filter(service: &Service) -> Result<(), String> {
-    service.filter.rollback().await?;
+    service.filter().rollback().await?;
     service.resolver.clear_prefetch();
     Ok(())
 }
 
 async fn refresh_filter_due(service: &Service) -> Result<bool, String> {
-    let changed = service.filter.refresh_due().await?;
+    let changed = service.filter().refresh_due().await?;
     if changed {
         service.resolver.clear_prefetch();
     }
@@ -729,7 +747,7 @@ async fn serve_metrics(listener: TcpListener, service: Arc<Service>) -> io::Resu
                 let mut input = Vec::new(); let mut byte = [0];
                 while input.len() < 4096 && !input.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).await?; input.push(byte[0]); }
                 let (status, body) = if !input.ends_with(b"\r\n\r\n") { ("431 Request Header Fields Too Large", String::new()) }
-                    else if input.starts_with(b"GET /metrics HTTP/1.") { ("200 OK", service.metrics.render() + &service.resolver.metrics().render() + &service.filter.metrics.render()) }
+                    else if input.starts_with(b"GET /metrics HTTP/1.") { ("200 OK", service.metrics.render() + &service.resolver.metrics().render() + &service.filter().metrics.render()) }
                     else if input.starts_with(b"GET /healthz HTTP/1.") { ("200 OK", "ok\n".into()) }
                     else { ("404 Not Found", String::new()) };
                 let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());

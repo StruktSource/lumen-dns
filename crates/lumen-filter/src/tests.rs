@@ -664,3 +664,75 @@ async fn lists_beyond_the_old_limit_use_eight_bytes_per_rule_and_keep_precedence
     // A manual allow still beats a list block.
     assert!(!filter.explain("a10.big.example", ip(), 0).blocked);
 }
+
+/// The only test that touches the process-wide download cache, so it cannot race another.
+#[tokio::test]
+async fn reloads_reuse_downloaded_lists_and_only_a_refresh_downloads_again() {
+    let url = "https://downloads.invalid/ads.txt";
+    let unused = "https://downloads.invalid/unused.txt";
+    let remote = |id: &str, url: &str, refresh_secs: u32| List {
+        id: id.into(),
+        text: None,
+        path: None,
+        url: Some(url.into()),
+        format: Format::Domains,
+        category: None,
+        refresh_secs,
+    };
+    let cached = |domains: &str| {
+        let parsed = rules::parse(domains.as_bytes(), Format::Domains).unwrap();
+        Arc::new(parsed)
+    };
+
+    // Nothing cached: the address cannot be reached, so the load fails (and says so).
+    assert!(
+        Filter::load(Config {
+            lists: vec![remote("ads", url, 86400)],
+            ..Config::default()
+        })
+        .await
+        .is_err()
+    );
+
+    // Cached: the same list loads with no network at all.
+    cache::put(url, Format::Domains, cached("ads.example"));
+    cache::put(unused, Format::Domains, cached("old.example"));
+    let config = Config {
+        lists: vec![remote("ads", url, 86400)],
+        ..Config::default()
+    };
+    let filter = Filter::load(config.clone()).await.unwrap();
+    assert!(filter.explain("ads.example", ip(), 0).blocked);
+
+    // Changing something else (a new inline list, new rules, a profile) reuses the download.
+    let mut changed = config.clone();
+    changed.lists.push(list("mine", "mine.example", None));
+    changed.rules.block.push("manual.example".into());
+    let second = Filter::load(changed).await.unwrap();
+    assert!(second.explain("ads.example", ip(), 0).blocked);
+    assert!(second.explain("mine.example", ip(), 0).blocked);
+    assert!(second.explain("manual.example", ip(), 0).blocked);
+
+    // Removing a list from the config and going live forgets only that download.
+    second.retain_downloads();
+    assert!(cache::get(url, Format::Domains, None).is_some());
+    assert!(cache::get(unused, Format::Domains, None).is_none());
+
+    // A download past its own refresh interval is not served from the cache.
+    assert!(cache::get(url, Format::Domains, Some(Duration::ZERO)).is_none());
+    assert!(cache::get(url, Format::Domains, Some(Duration::from_secs(60))).is_some());
+    // A different format of the same address is a different list.
+    assert!(cache::get(url, Format::Hosts, None).is_none());
+
+    // A refresh always downloads again, fails here, and keeps the live rules.
+    cache::put(url, Format::Domains, cached("ads.example"));
+    let live = Filter::load(config).await.unwrap();
+    assert!(live.refresh().await.is_err());
+    assert!(live.explain("ads.example", ip(), 0).blocked);
+
+    // Counters survive a live change of lists.
+    live.metrics.blocked.store(7, Ordering::Relaxed);
+    second.inherit_metrics(&live);
+    assert_eq!(second.metrics.blocked.load(Ordering::Relaxed), 7);
+    assert!(!second.decision_log());
+}

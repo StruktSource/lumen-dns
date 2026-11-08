@@ -33,7 +33,7 @@ const ICONS = {
   power: '<path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/>', plus: '<path d="M12 5v14M5 12h14"/>',
   trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>', pencil: '<path d="M17 3l4 4L7 21H3v-4L17 3z"/>',
   refresh: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/>', undo: '<path d="M3 7v6h6M3 13a9 9 0 1 0 3-7.7"/>',
-  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>', up: '<path d="M12 19V5M5 12l7-7 7 7"/>', down: '<path d="M12 5v14M19 12l-7 7-7-7"/>',
   check: '<path d="M20 6L9 17l-5-5"/>', x: '<path d="M18 6L6 18M6 6l12 12"/>', search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
   eye: '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
@@ -108,13 +108,6 @@ L.providerUpstreams = providers => {
   }
   return n;
 };
-/* Pick the broadest setting for a new preset that fits, leaving room for more upstreams when possible (soft cap 4, hard cap 8). */
-L.fitProvider = (providers, p, reserve = 0) => {
-  const supported = DEFAULT_PRIORITY.filter(t => p.transports.includes(t));
-  const tries = [['any', supported], ['ipv4', supported], ['any', supported.filter(t => t !== 'quic')], ['ipv4', supported.filter(t => t !== 'quic')], ['ipv4', supported.slice(0, 1)]];
-  for (const cap of [4, 8]) for (const [family, priority] of tries) { const sel = { id: p.id, protocol: 'auto', address_family: family, transport_priority: priority }; if (priority.length && L.providerUpstreams([...providers, sel]) + reserve <= cap) return sel; }
-  return { id: p.id, protocol: 'auto', address_family: 'ipv4', transport_priority: supported.slice(0, 1) };
-};
 
 /* ---------- config model ---------- */
 /* The server returns the effective config (the daemon's own defaults filled in). Nulls become empty strings for form fields. */
@@ -133,6 +126,7 @@ L.toServer = cfg => {
   for (const l of c.filtering.lists) for (const k of ['category', 'url', 'path', 'text']) blank(l, k);
   const a = c.filtering.action; if (a.kind === 'address') { blank(a, 'ipv4'); blank(a, 'ipv6'); } else { delete a.ipv4; delete a.ipv6; } if (a.kind !== 'cname') delete a.target;
   for (const sel of c.resolver.providers) { if (sel.protocol !== 'auto') { delete sel.transport_priority; delete sel.encryption; } else delete sel.encryption; }
+  if (c.resolver.mode !== 'forward') c.resolver.strategy = null;
   if (c.resolver.mode === 'forward') { c.resolver.warm.enabled = false; c.resolver.prefetch.enabled = false; c.resolver.fallback.enabled = false; c.resolver.hedge_ms = 0; }
   return { config: c };
 };
@@ -240,7 +234,9 @@ L.validate = cfg => {
   if (cfg.web.https.length && !(cfg.web.certificate && cfg.web.private_key)) bad('web.certificate', 'HTTPS needs certificate and private_key');
   if (r.mode === 'forward') { if (!r.upstreams.length && !r.providers.length) bad('resolver.upstreams', 'forward mode needs 1–8 upstreams or a provider'); if (r.upstreams.length > 8) bad('resolver.upstreams', 'at most 8'); }
   else { if (r.upstreams.length) bad('resolver.upstreams', 'rejected in recursive mode'); if (r.providers.length) bad('resolver.providers', 'rejected in recursive mode'); }
-  if (r.mode === 'forward' && r.providers.length) { const n = L.providerUpstreams(r.providers) + r.upstreams.length; if (n > 8) bad('resolver.providers', `the providers and custom upstreams add up to ${n} addresses but 8 is the most. Choose IPv4 only, fewer providers, or remove a custom upstream`); }
+  if (r.mode === 'forward' && r.providers.length > 8) bad('resolver.providers', 'at most 8 providers');
+  if (r.mode === 'forward' && r.providers.some(x => x.protocol === 'auto') && !r.providers.every(x => x.protocol === 'auto')) bad('resolver.providers', 'automatic and explicit provider transports cannot be mixed');
+  if (r.mode === 'forward' && r.providers.length) { const n = L.providerUpstreams(r.providers) + r.upstreams.length; if (n > 128) bad('resolver.providers', `the providers and custom upstreams add up to ${n} addresses but 128 is the most. Choose IPv4 only or fewer providers`); }
   r.upstreams.forEach((u, i) => { if (!L.v.socket(u.address)) bad(`resolver.upstreams[${i}]`, 'address must be an explicit IP:port'); if (['tls', 'https', 'quic'].includes(u.protocol) && !u.server_name) bad(`resolver.upstreams[${i}]`, 'encrypted protocols need server_name'); });
   const f = r.fallback; if (f.enabled) { if (r.mode !== 'recursive') bad('resolver.fallback', 'recursive mode only'); if (!f.upstreams.length || f.upstreams.length > 8) bad('resolver.fallback.upstreams', 'enabled fallback needs 1–8 upstreams'); if (f.recursive_timeout_ms + f.timeout_ms > cfg.limits.query_timeout_ms) bad('resolver.fallback', 'recursive_timeout_ms + timeout_ms must not exceed limits.query_timeout_ms'); }
   if (!(r.hedge_ms === 0 || (r.hedge_ms >= 100 && r.hedge_ms <= 5000))) bad('resolver.hedge_ms', 'must be 0 or 100–5000'); if (r.hedge_ms && r.mode !== 'recursive') bad('resolver.hedge_ms', 'recursive mode only');
