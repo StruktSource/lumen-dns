@@ -50,9 +50,13 @@ printf '%s' "$PASSWORD" | lumenctl user add --state state.db --name admin --role
 
 Whenever Lumen applies a change or downloads lists, a panel in the corner of every page shows what it is doing: checking, downloading (per list, with bytes received), reading rules, restarting DNS. When it finishes you get a notification. If a change is **not** applied, the panel stays, shows the reason (for example `list address answered HTTP 404`), and tells you the previous settings are still running. It contains only list names, byte counts, and error text.
 
+While lists are downloading, an administrator can press **Cancel**. The downloads stop, nothing changes, and your current settings and lists stay live. What was already downloaded is kept, so trying again does not start from zero.
+
 ### What you can change
 
-Configuration edits are staged, validated by the daemon's own parser, then applied through the normal [reload path](managed-mode.md#change-the-configuration-safely): listeners restart, caches clear, and a failure restores the previous settings.
+**Lists apply right away.** Installing, removing, adding, or editing a list asks you to confirm, then Lumen downloads in the background. There is no draft and no *Apply* bar for lists, DNS keeps answering, and the other lists you already have are **not** downloaded again.
+
+**Other edits are staged.** Changes to DNS settings, rules, profiles, and schedules stay in a draft until you press *Apply*. They are validated by the daemon's own parser, then applied through the [reload path](managed-mode.md#change-the-configuration-safely). If a change only touches filtering (lists, rules, profiles, schedules, devices), it goes live **without restarting the listeners**. Anything else restarts them and clears caches, and a failure restores the previous settings.
 
 - The newest 50 revisions are kept and can be restored.
 - Saving from the console **rewrites the stored TOML from the form**: comments are not preserved and values equal to the defaults are omitted.

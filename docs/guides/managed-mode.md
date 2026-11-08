@@ -39,12 +39,16 @@ What `apply` does:
 
 1. It stages your file as a candidate revision and queues a reload.
 2. The daemon parses it with the original base directory, loads filter sources, and checks resolver and TLS state.
-3. It restarts the listeners and promotes the revision **only after every socket binds**.
-4. If anything fails, the previous runtime is restored and the candidate is discarded.
+3. It puts the revision live and promotes it. How depends on what changed (below).
+4. If anything fails or is cancelled, the previous runtime is kept or restored and the candidate is discarded.
 
-Filter lists are downloaded and validated **before** the swap, while DNS keeps answering, and the new server reuses that loaded filter. DNS is unavailable only during the listener swap, about a second, even with multi-megabyte lists.
+**Only filtering changed** (lists, rules, profiles, schedules, devices): the new filter is built in the background and swapped in. **No listener restarts, no connection closes, and no cache clears.** Counters carry on.
 
-A reload is not zero-downtime: it closes active connections, briefly releases the listener sockets, and clears the in-memory DNS caches.
+**Anything else changed** (listeners, resolver, limits, web, and so on): the daemon restarts the listeners and promotes the revision **only after every socket binds**. This is not zero-downtime: it closes active connections, briefly releases the listener sockets (about a second), and clears the in-memory DNS caches.
+
+**Lists are not downloaded twice.** Lumen keeps the lists it has downloaded in memory. A reload downloads only lists that are new, changed, or past their own refresh interval, so changing the resolver or an upstream never re-downloads your block lists. Use *Refresh filter lists* to force a download. Cancelled and failed applies keep what they already fetched. The copies are not written to disk, so a restart downloads the lists again.
+
+Downloads happen **before** any swap, while DNS keeps answering, and can be cancelled from the console's progress panel.
 
 ## Control a running daemon
 

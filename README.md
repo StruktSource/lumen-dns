@@ -45,7 +45,7 @@ New to the ideas? Read [Concepts](docs/getting-started/concepts.md) for a plain-
 | **Recursive DNS** | Iterative resolution, QNAME minimization, caching, and bundled root hints |
 | **DNSSEC** | Local validation on by default, with configurable trust anchors |
 | **Five transports** | UDP, TCP, DNS-over-HTTPS, DNS-over-TLS, and DNS-over-QUIC (encrypted ones need your own certificate) |
-| **Forwarding** | A catalog of encrypted public resolvers with automatic transport failover, never downgrading to plain text |
+| **Forwarding** | A catalog of encrypted public resolvers: use up to 8, rank them, and choose ranked fallback, fastest first, round-robin, or race. Never downgrades to plain text |
 | **Timeout fallback** | Optional forwarding **only** after a recursive timeout, never for DNSSEC failures or normal answers |
 | **Filtering** | Allow and block rules, hosts, domain, and Adblock-style lists, one-click popular lists, and configurable block replies |
 | **Per-client policy** | Device, subnet, group, profile, category, and UTC-scheduled rules, with explainable decisions |

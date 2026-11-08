@@ -75,8 +75,9 @@ lumen --config FILE --check
 | `root_hints` | Bundled InterNIC hints | Optional BIND-format file. Recursive mode only. 64 KiB, 1 to 64 IP records, directives disabled |
 | `trust_anchor` | Hickory's bundled root DNSKEYs | Optional DNSKEY-format file. 64 KiB, at least one key. DNSSEC must be enabled |
 | `upstream_ca` | Public WebPKI roots | Optional PEM CA bundle (1 MiB). Replaces the public roots for encrypted forwarding |
-| `upstreams` | `[]` | 1 to 8 custom endpoints in forward mode. Rejected in recursive mode |
-| `providers` | `[]` | Bundled provider selections. May combine with custom upstreams (at most 8 addresses in total) |
+| `upstreams` | `[]` | Up to 8 custom endpoints, which rank after any providers. In forward mode you need at least one provider or upstream. Rejected in recursive mode |
+| `providers` | `[]` | Up to 8 bundled provider selections, in rank order, each used once. They expand to at most 128 addresses together with the custom upstreams |
+| `strategy` | unset | Forward mode only: `failover`, `fastest`, `round_robin`, or `race`. Unset keeps the older behavior (`failover` for automatic transports, otherwise `fastest`). See [Upstream providers](../guides/upstream-providers.md#use-several-providers) |
 | `attempts` | `2` | 1 to 5 forwarding attempts |
 | `upstream_timeout_ms` | `2000` | 1 to 30000. Per-attempt forwarding timeout |
 | `recursion_depth` | `24` | 1 to 64. Bounds recursive query and nameserver recursion |

@@ -93,7 +93,9 @@ Transport admission bounds live tasks, message allocations, HTTP and QUIC stream
 ## Extension points
 
 - Filtering sits before cache lookup and resolution.
-- A managed config reload stages a SQLite revision, validates it, restarts runtime state, and restores the prior server on bind failure.
+- A managed config reload stages a SQLite revision and validates it. A change that touches only `[filtering]` builds a new filter in the background and swaps it into the running service, so listeners never restart. Any other change restarts runtime state and restores the prior server on bind failure.
+- Downloaded lists are cached in memory by address and format, so a new filter only downloads lists that are new or due. A cancel flag stops in-flight downloads and leaves the live filter untouched.
+- Forward mode runs one forwarder per provider and chooses between providers itself (ranked, fastest, round-robin, or race). Only connection errors and timeouts move on to another provider; DNS answers and DNSSEC failures are final.
 - The web console and scoped API cannot affect parser ownership or bypass resolver limits.
 - Query history is written off the query path: the daemon only appends to a bounded in-memory buffer, and the console's writer task saves it to SQLite in batches. Future plugins would need explicit permissions.
 
