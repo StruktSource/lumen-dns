@@ -2,6 +2,19 @@
 
 All notable user-facing changes are listed here. Lumen is still pre-release.
 
+## [0.5.8] - 2026-11-08
+
+### Added
+
+- **Several forwarding providers.** Choose up to 8 bundled providers (plus up to 8 custom upstreams), rank them, and pick how they are used: *ranked fallback*, *fastest first*, *round-robin*, or *race* (`resolver.strategy`). Only a connection failure or timeout moves on to another provider; a DNS answer or DNSSEC failure is final. A provider that just failed is left alone for 10 seconds so queries do not keep waiting for it.
+- **Cancel from the progress panel.** Administrators can stop block-list downloads. Nothing changes and what was already downloaded is kept.
+
+### Changed
+
+- **Lists apply right away.** Installing, removing, adding or editing a list now asks you to confirm and then loads in the background, with no draft and no *Apply* bar. A list change that touches only filtering goes live **without restarting the listeners**, closing connections, or clearing caches, and the filter counters carry on.
+- **Lists are no longer downloaded again after unrelated changes.** Lumen keeps downloaded lists in memory, so changing the resolver, an upstream, or another list never re-downloads the lists you already have. Refresh and a list's own interval still do. A restart downloads them again.
+- Provider addresses are no longer limited to 8 in total: the limits are now 8 providers, 8 custom upstreams, and 128 addresses together.
+
 ## [0.5.7] - 2026-11-08
 
 ### Added
@@ -53,6 +66,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 - Added a supported v1 configuration fixture and initial six-platform release packages.
 - Added stricter DNSSEC policy handling and release checks.
 
+[0.5.8]: https://github.com/StruktSource/lumen-dns/compare/v0.5.7...v0.5.8
 [0.5.7]: https://github.com/StruktSource/lumen-dns/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/StruktSource/lumen-dns/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/StruktSource/lumen-dns/compare/v0.1.3...v0.5.5
