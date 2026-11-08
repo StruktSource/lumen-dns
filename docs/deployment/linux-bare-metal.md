@@ -1,9 +1,21 @@
 # Linux bare metal
 
-Download the archive that matches `linux-amd64` or `linux-arm64`. Verify it with
-`SHA256SUMS` and GitHub artifact attestation before install. Put `lumen` and
-`lumenctl` in `/usr/local/bin`, create an unprivileged `lumen` user, and place a
-root-owned, world-readable config at `/etc/lumen/lumen.toml`.
+Download the `v0.5.5` archive that matches `linux-amd64` or `linux-arm64`, plus
+`SHA256SUMS`, from the GitHub release. Verify it before install:
+
+```sh
+sha256sum --check SHA256SUMS --ignore-missing
+gh attestation verify lumen-v0.5.5-linux-amd64.tar.gz --repo StruktSource/lumen-dns
+tar -xzf lumen-v0.5.5-linux-amd64.tar.gz
+cd lumen-v0.5.5
+./lumen --version
+./lumenctl --version
+```
+
+Use `linux-arm64` on ARM64 hosts. Put `lumen` and `lumenctl` in
+`/usr/local/bin`, create an unprivileged `lumen` user, and place a root-owned,
+world-readable config at `/etc/lumen/lumen.toml`. The archive includes the
+configuration, deployment files, docs, release notes, and a file manifest.
 
 Install `deploy/systemd/lumen.service`, then run:
 

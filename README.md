@@ -88,7 +88,7 @@ dig @::1 -p 5353 example.com AAAA +tcp
 For a minimal start without a config file, run `cargo run --locked --bin lumen -- --bind 127.0.0.1:5353`. Run `cargo run --locked --bin lumen -- --help` for startup options.
 
 > [!NOTE]
-> The built-in page at `http://127.0.0.1:8080` is currently a **placeholder**, not a DNS administration interface. The management API is separate and disabled by default.
+> The built-in console is available when Lumen runs in managed mode with `--state`. Open `http://127.0.0.1:8080` for first-run setup. Keep it on loopback or put it behind HTTPS before remote use.
 
 ## Make it yours
 
@@ -133,7 +133,7 @@ Lumen uses the **same Rust DNS core and TOML schema** across its native and cont
 | macOS / Windows | [macOS](docs/deployment/macos.md) · [Windows](docs/deployment/windows.md) |
 | Homelab platforms | [Proxmox LXC](docs/deployment/proxmox-lxc.md) · [Unraid](docs/deployment/unraid.md) · [Raspberry Pi](docs/deployment/raspberry-pi.md) |
 
-**Read the [compatibility matrix](docs/deployment/compatibility.md) before deployment.** All platforms remain pre-release; the matrix distinguishes experimentally tested targets from guides that have not yet been hardware-validated. The provided Compose/OCI configurations are an evaluation starting point, not proof of production readiness or published image availability.
+**Read the [compatibility matrix](docs/deployment/compatibility.md) before deployment.** All platforms remain pre-release; the matrix distinguishes experimentally tested targets from guides that have not yet been hardware-validated. Release archives and OCI images are built by the release workflow only after its platform, container, and Kubernetes gates pass.
 
 For local images and optimized binaries:
 
