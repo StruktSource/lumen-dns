@@ -1203,19 +1203,20 @@ async fn forward_strategies_fail_over_spread_race_and_skip_dead_upstreams() {
             );
         }
     };
-    let start = async |strategy: Option<ForwardStrategy>, upstream_list: Vec<Upstream>| {
-        let bind = address("127.0.0.1");
-        let mut cfg = config(upstreams[0].address, bind);
-        cfg.resolver.upstreams = upstream_list;
-        cfg.resolver.strategy = strategy;
-        cfg.resolver.upstream_timeout_ms = 300;
-        (RunningServer::start(cfg).await.unwrap(), bind)
-    };
+    let start =
+        async |strategy: Option<ForwardStrategy>, upstream_list: Vec<Upstream>, timeout_ms: u32| {
+            let bind = address("127.0.0.1");
+            let mut cfg = config(upstreams[0].address, bind);
+            cfg.resolver.upstreams = upstream_list;
+            cfg.resolver.strategy = strategy;
+            cfg.resolver.upstream_timeout_ms = timeout_ms;
+            (RunningServer::start(cfg).await.unwrap(), bind)
+        };
     let live: Vec<Upstream> = upstreams.iter().map(|u| udp_upstream(u.address)).collect();
 
     // Ranked fallback: the first upstream answers everything and the others stand by.
     let before = counts();
-    let (mut server, bind) = start(Some(ForwardStrategy::Failover), live.clone()).await;
+    let (mut server, bind) = start(Some(ForwardStrategy::Failover), live.clone(), 2_000).await;
     ask(bind, "failover", 6).await;
     server.shutdown().await;
     let after = counts();
@@ -1224,7 +1225,7 @@ async fn forward_strategies_fail_over_spread_race_and_skip_dead_upstreams() {
 
     // Round-robin: every upstream starts the same number of queries.
     let before = counts();
-    let (mut server, bind) = start(Some(ForwardStrategy::RoundRobin), live.clone()).await;
+    let (mut server, bind) = start(Some(ForwardStrategy::RoundRobin), live.clone(), 2_000).await;
     ask(bind, "robin", 9).await;
     server.shutdown().await;
     let after = counts();
@@ -1233,7 +1234,7 @@ async fn forward_strategies_fail_over_spread_race_and_skip_dead_upstreams() {
 
     // Race: every upstream is asked, and the first answer is used.
     let before = counts();
-    let (mut server, bind) = start(Some(ForwardStrategy::Race), live.clone()).await;
+    let (mut server, bind) = start(Some(ForwardStrategy::Race), live.clone(), 2_000).await;
     ask(bind, "race", 4).await;
     server.shutdown().await;
     let after = counts();
@@ -1250,7 +1251,7 @@ async fn forward_strategies_fail_over_spread_race_and_skip_dead_upstreams() {
     // Fastest first and the older default ask one upstream per query.
     for strategy in [Some(ForwardStrategy::Fastest), None] {
         let before = counts();
-        let (mut server, bind) = start(strategy, live.clone()).await;
+        let (mut server, bind) = start(strategy, live.clone(), 2_000).await;
         ask(
             bind,
             if strategy.is_some() {
@@ -1276,7 +1277,7 @@ async fn forward_strategies_fail_over_spread_race_and_skip_dead_upstreams() {
     ] {
         let list = vec![udp_upstream(dead), udp_upstream(upstreams[1].address)];
         let before = counts();
-        let (mut server, bind) = start(Some(strategy), list).await;
+        let (mut server, bind) = start(Some(strategy), list, 300).await;
         // The first query may wait for the dead provider once. After that it is left alone,
         // so the rest do not each wait for a timeout.
         ask(bind, &format!("dead-first-{strategy:?}"), 1).await;
