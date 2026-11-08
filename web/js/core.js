@@ -13,10 +13,11 @@ L.h = (tag, props, ...kids) => {
     else if (k === 'style') el.style.cssText = v;
     else if (k === 'html') el.innerHTML = v;
     else if (k === 'for') el.htmlFor = v;
-    else if (['value', 'checked', 'disabled', 'type', 'placeholder', 'min', 'max', 'step', 'title', 'id', 'name', 'rows', 'autocomplete', 'spellcheck', 'readOnly'].includes(k)) el[k] = v;
-    else el.setAttribute(k, v === true ? '' : v);
+    else if (['value', 'checked', 'disabled', 'type', 'placeholder', 'min', 'max', 'step', 'title', 'id', 'name', 'rows', 'autocomplete', 'spellcheck', 'readOnly'].includes(k)) el[k] = (k === 'title' || k === 'placeholder') && typeof v === 'string' && L.t ? L.t(v) : v;
+    else el.setAttribute(k, v === true ? '' : k === 'aria-label' && typeof v === 'string' && L.t ? L.t(v) : v);
   }
-  kids.flat(9).forEach(c => { if (c != null && c !== false) el.append(c.nodeType ? c : document.createTextNode(c)); });
+  /* Text is translated here, so views keep plain English strings. Strings without a translation stay as written. */
+  kids.flat(9).forEach(c => { if (c != null && c !== false) el.append(c.nodeType ? c : document.createTextNode(typeof c === 'string' && L.t ? L.t(c) : c)); });
   return el;
 };
 const h = L.h;
@@ -41,6 +42,7 @@ const ICONS = {
   info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>', download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>', copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>', settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20"/>',
   lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>', file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>'
 };
 L.ic = (name, size) => {
@@ -51,10 +53,10 @@ L.ic = (name, size) => {
 
 /* ---------- formatting ---------- */
 L.fmt = {
-  n: v => Math.round(v).toLocaleString('en-US'),
+  n: v => Math.round(v).toLocaleString(L.locale ? L.locale() : 'en'),
   pct: v => (v * 100).toFixed(1) + '%',
   dur: s => { const d = Math.floor(s / 86400), hh = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return d ? `${d}d ${hh}h` : hh ? `${hh}h ${m}m` : `${m}m`; },
-  ago: t => { const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? 'just now' : s < 3600 ? Math.floor(s / 60) + ' min ago' : s < 86400 ? Math.floor(s / 3600) + ' h ago' : Math.floor(s / 86400) + ' d ago'; },
+  ago: t => { const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? L.t('just now') : s < 3600 ? L.t('{n} min ago', { n: Math.floor(s / 60) }) : s < 86400 ? L.t('{n} h ago', { n: Math.floor(s / 3600) }) : L.t('{n} d ago', { n: Math.floor(s / 86400) }); },
   time: t => new Date(t).toISOString().replace('T', ' ').slice(0, 19) + 'Z',
   hm: m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0')
 };
@@ -86,7 +88,7 @@ L.get = (o, p) => p.split('.').reduce((a, k) => a == null ? a : a[k], o);
 L.set = (o, p, v) => { const ks = p.split('.'); const last = ks.pop(); ks.reduce((a, k) => a[k], o)[last] = v; };
 
 /* ---------- state ---------- */
-L.S = { cfg: null, draft: null, devices: [], users: [], status: null, series: [], audit: [], history: { enabled: false, items: [] }, settings: { session_idle_minutes: 30 }, providers: [], revisions: [] };
+L.S = { cfg: null, draft: null, devices: [], users: [], status: null, series: [], audit: [], history: { enabled: false, mode: 'off', detail: 'full', retention_days: 7, saved: { rows: 0 }, items: [], next_before: null }, settings: { session_idle_minutes: 30, language: null }, providers: [], revisions: [] };
 L.session = null; L.csrf = '';
 L.D = () => L.S.draft || (L.S.draft = L.clone(L.S.cfg));
 L.isDirty = () => !!L.S.draft && JSON.stringify(L.S.draft) !== JSON.stringify(L.S.cfg);
@@ -153,7 +155,7 @@ L.modal = ({ title, body, actions = [], wide = false }) => {
 L.confirm = ({ title, text, label = 'Confirm', danger = false, typed = null }) => new Promise(res => {
   let ok = !typed; const btnRef = {};
   const input = typed ? h('input', { class: 'input mono-in', placeholder: typed, autocomplete: 'off', oninput: e => { ok = e.target.value === typed; btnRef.b.disabled = !ok; } }) : null;
-  const close = L.modal({ title, body: [h('p', { style: 'margin:0' }, text), typed ? h('div', { class: 'field' }, h('label', {}, `Type ${typed} to continue`), input) : null],
+  const close = L.modal({ title, body: [h('p', { style: 'margin:0' }, text), typed ? h('div', { class: 'field' }, h('label', {}, L.t('Type {word} to continue', { word: typed })), input) : null],
     actions: [{ label: 'Cancel', onClick: () => { res(false); } }, { label, kind: danger ? 'danger' : 'primary', onClick: () => { if (!ok) return false; res(true); } }] });
   setTimeout(() => { btnRef.b = L.$('dialog:last-of-type .dlg-f .btn:last-child'); if (typed && btnRef.b) btnRef.b.disabled = true; input?.focus(); }, 0);
   void close;
@@ -168,7 +170,7 @@ L.f = {
   num: (o, k, path, opt = {}) => {
     const [min, max, unit] = L.bounds[path] || [opt.min, opt.max, opt.unit || ''];
     const err = h('div', { class: 'err' }); const inp = h('input', { class: 'input mono-in', type: 'number', value: o[k], min, max, step: 1, disabled: opt.disabled,
-      oninput: e => { const v = e.target.value === '' ? NaN : +e.target.value; o[k] = v; const bad = !(Number.isInteger(v) && v >= min && v <= max) && !(opt.zero && v === 0); e.target.setAttribute('aria-invalid', bad); err.textContent = bad ? `Allowed ${opt.zero ? '0 or ' : ''}${min}–${max}` : ''; L.touch(); } });
+      oninput: e => { const v = e.target.value === '' ? NaN : +e.target.value; o[k] = v; const bad = !(Number.isInteger(v) && v >= min && v <= max) && !(opt.zero && v === 0); e.target.setAttribute('aria-invalid', bad); err.textContent = bad ? L.t(opt.zero ? 'Allowed 0 or {min}–{max}' : 'Allowed {min}–{max}', { min, max }) : ''; L.touch(); } });
     return h('div', {}, unit ? h('div', { class: 'unit' }, inp, h('span', {}, unit)) : inp, err);
   },
   sw: (o, k, label, opt = {}) => h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: !!o[k], disabled: opt.disabled, onchange: e => { o[k] = e.target.checked; L.touch(); opt.onChange ? opt.onChange(e.target.checked) : null; } }), h('i'), label ? h('span', {}, label) : null),
@@ -177,8 +179,8 @@ L.f = {
     options.forEach(x => { const [v, t] = Array.isArray(x) ? x : [x, x]; wrap.append(h('button', { type: 'button', disabled: opt.disabled, onclick: () => { o[k] = v; paint(); L.touch(); opt.onChange && opt.onChange(v); } }, t)); }); paint(); return wrap; },
   tags: (arr, opt = {}) => {
     const box = h('div', { class: 'tagbox' }); const chips = h('div', { class: 'chips' }); const msg = h('div', { class: 'err' });
-    const draw = () => { chips.replaceChildren(...arr.map((v, i) => h('span', { class: 'chip' }, v, opt.disabled ? null : h('button', { type: 'button', 'aria-label': 'Remove ' + v, onclick: () => { arr.splice(i, 1); draw(); L.touch(); opt.onChange && opt.onChange(); } }, L.ic('x', 12))))); chips.hidden = !arr.length; };
-    const add = raw => { for (const v of raw.split(/[\s,]+/).filter(Boolean)) { if (opt.validate && !opt.validate(v)) { msg.textContent = `“${v}” is not valid${opt.what ? ' ' + opt.what : ''}.`; return false; } if (arr.includes(v)) continue; if (opt.max && arr.length >= opt.max) { msg.textContent = `At most ${opt.max} entries.`; return false; } arr.push(v); } msg.textContent = ''; draw(); L.touch(); opt.onChange && opt.onChange(); return true; };
+    const draw = () => { chips.replaceChildren(...arr.map((v, i) => h('span', { class: 'chip' }, v, opt.disabled ? null : h('button', { type: 'button', 'aria-label': L.t('Remove {item}', { item: v }), onclick: () => { arr.splice(i, 1); draw(); L.touch(); opt.onChange && opt.onChange(); } }, L.ic('x', 12))))); chips.hidden = !arr.length; };
+    const add = raw => { for (const v of raw.split(/[\s,]+/).filter(Boolean)) { if (opt.validate && !opt.validate(v)) { msg.textContent = opt.what ? L.t('“{v}” is not valid {what}.', { v, what: L.t(opt.what) }) : L.t('“{v}” is not valid.', { v }); return false; } if (arr.includes(v)) continue; if (opt.max && arr.length >= opt.max) { msg.textContent = L.t('At most {n} entries.', { n: opt.max }); return false; } arr.push(v); } msg.textContent = ''; draw(); L.touch(); opt.onChange && opt.onChange(); return true; };
     const inp = h('input', { placeholder: opt.placeholder || 'Add and press Enter', spellcheck: false, disabled: opt.disabled, onkeydown: e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); if (add(inp.value)) inp.value = ''; } else if (e.key === 'Backspace' && !inp.value && arr.length) { arr.pop(); draw(); L.touch(); } }, onblur: () => { if (inp.value && add(inp.value)) inp.value = ''; } });
     draw(); box.append(chips); if (!opt.disabled) box.append(inp); return h('div', {}, box, msg);
   }
@@ -190,7 +192,7 @@ L.renderSaveBar = () => {
   const dirty = L.isDirty(); bar.classList.toggle('show', dirty);
   if (!dirty) return;
   const errs = L.validate(L.S.draft);
-  bar.querySelector('.msg').replaceChildren(h('b', {}, 'Unsaved changes. '), errs.length ? `${errs.length} problem${errs.length > 1 ? 's' : ''} to fix before applying.` : 'Nothing is live until you apply.');
+  bar.querySelector('.msg').replaceChildren(h('b', {}, 'Unsaved changes. '), errs.length ? L.t(errs.length > 1 ? '{n} problems to fix before applying.' : '1 problem to fix before applying.', { n: errs.length }) : 'Nothing is live until you apply.');
   bar.querySelector('[data-act=apply]').disabled = errs.length > 0;
 };
 L.applyDraft = async () => {
@@ -200,9 +202,9 @@ L.applyDraft = async () => {
   const btn = L.$('[data-act=apply]'); if (btn) btn.disabled = true;
   try {
     const r = await L.api('PUT', '/api/config', L.toServer(L.S.draft));
-    L.toast(`Applying revision ${r.revision}…`);
+    L.toast(L.t('Applying revision {n}…', { n: r.revision }));
     const result = await L.waitForConfig(r.revision);
-    if (result.ok) { L.S.draft = null; await L.loadConfig(); L.renderSaveBar(); L.rerender(); L.toast(`Revision ${r.revision} is live.`); }
+    if (result.ok) { L.S.draft = null; await L.loadConfig(); L.renderSaveBar(); L.rerender(); L.toast(L.t('Revision {n} is live.', { n: r.revision })); }
     else { L.toast(result.error || 'The daemon rejected the new settings. The previous settings are still active.', 'bad'); if (btn) btn.disabled = false; }
   } catch (e) { L.toast(e.message, 'bad'); if (btn) btn.disabled = false; }
 };
@@ -211,7 +213,7 @@ L.reviewDraft = async () => {
   try { toml = (await L.api('POST', '/api/config/preview', L.toServer(L.D()))).toml; } catch (e) { serverError = e.message; }
   const problems = [...errs.map(e => [e.path, e.msg]), ...(serverError ? [['config', serverError]] : [])];
   L.modal({ title: 'Review configuration', wide: true, body: [
-    problems.length ? h('div', { class: 'note bad' }, L.ic('alert'), h('div', {}, h('b', {}, `${problems.length} problem${problems.length > 1 ? 's' : ''}`), h('ul', { style: 'margin:6px 0 0;padding-left:18px' }, problems.map(([p, m]) => h('li', {}, h('code', {}, p), ' — ', m))))) : h('div', { class: 'note' }, L.ic('check'), h('p', {}, 'Lumen accepts this configuration. Ports, certificates and list downloads are checked again when you apply.')),
+    problems.length ? h('div', { class: 'note bad' }, L.ic('alert'), h('div', {}, h('b', {}, L.t(problems.length > 1 ? '{n} problems' : '1 problem', { n: problems.length })), h('ul', { style: 'margin:6px 0 0;padding-left:18px' }, problems.map(([p, m]) => h('li', {}, h('code', {}, p), ' — ', m))))) : h('div', { class: 'note' }, L.ic('check'), h('p', {}, 'Lumen accepts this configuration. Ports, certificates and list downloads are checked again when you apply.')),
     toml ? h('pre', { class: 'code' }, toml) : null],
     actions: [toml ? { label: 'Download TOML', onClick: () => { const a = h('a', { href: URL.createObjectURL(new Blob([toml], { type: 'application/toml' })), download: 'lumen.toml' }); a.click(); return false; } } : { label: 'Close' }, toml ? { label: 'Close' } : null].filter(Boolean) });
 };
@@ -220,7 +222,7 @@ L.reviewDraft = async () => {
 L.route = () => { const p = location.hash.replace(/^#\//, '').split('/'); return { page: p[0] || 'overview', sub: p[1] || '' }; };
 L.go = (page, sub = '') => { location.hash = '#/' + page + (sub ? '/' + sub : ''); };
 L.rerender = () => { const y = scrollY; L.render(); scrollTo(0, y); };
-L.lockPage = () => h('div', { class: 'card' }, h('div', { class: 'empty' }, L.ic('lock', 28), h('h3', {}, 'Administrators only'), h('p', {}, `Your account (${L.session.name}) has the ${L.ROLE_LABEL[L.session.role].toLowerCase()} role. Ask an administrator if you need access.`)));
+L.lockPage = () => h('div', { class: 'card' }, h('div', { class: 'empty' }, L.ic('lock', 28), h('h3', {}, 'Administrators only'), h('p', {}, L.t('Your account ({name}) has the {role} role. Ask an administrator if you need access.', { name: L.session.name, role: L.t(L.ROLE_LABEL[L.session.role]).toLowerCase() }))));
 L.tabs = (items, current, onPick) => h('div', { class: 'tabs', role: 'tablist' }, items.map(([id, label]) => h('button', { role: 'tab', 'aria-selected': String(id === current), onclick: () => onPick(id) }, label)));
 L.pageHead = (title, desc, actions) => h('div', { class: 'top' }, h('div', {}, h('h1', {}, title), desc ? h('p', {}, desc) : null), actions ? h('div', { class: 'actions' }, actions) : null);
 L.empty = (title, text, action) => h('div', { class: 'empty' }, h('h3', {}, title), h('p', {}, text), action || null);
@@ -268,7 +270,7 @@ L.pw = {
 L.pwField = (o, k, { label = 'Password', meter = true, autocomplete = 'new-password', id } = {}) => {
   const bar = h('div', { class: 'meter' }, h('i'), h('i'), h('i'), h('i')); const txt = h('div', { class: 'hint' });
   const inp = h('input', { class: 'input', type: 'password', autocomplete, spellcheck: false, id, value: o[k] || '', oninput: e => { o[k] = e.target.value; if (meter) paint(); } });
-  const paint = () => { const r = L.pw.check(o[k] || ''); [...bar.children].forEach((b, i) => { b.className = o[k] && i < r.score ? 's' + r.score : ''; }); txt.textContent = o[k] ? (r.ok ? r.label : `${r.label}. Use ${r.tips.join(' and ')}.`) : 'At least 10 characters. A passphrase works well.'; };
+  const paint = () => { const r = L.pw.check(o[k] || ''); [...bar.children].forEach((b, i) => { b.className = o[k] && i < r.score ? 's' + r.score : ''; }); txt.textContent = o[k] ? (r.ok ? L.t(r.label) : L.t('{label}. Use {tips}.', { label: L.t(r.label), tips: r.tips.map(x => L.t(x)).join(L.t(' and ')) })) : L.t('At least 10 characters. A passphrase works well.'); };
   if (meter) paint();
   return h('div', { class: 'field' }, h('label', { for: id }, label), h('div', { class: 'eye' }, inp, h('button', { type: 'button', class: 'btn icon flat', 'aria-label': 'Show password', onclick: () => { inp.type = inp.type === 'password' ? 'text' : 'password'; } }, L.ic('eye'))), meter ? [bar, txt] : null);
 };

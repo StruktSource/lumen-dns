@@ -2,7 +2,10 @@
 //! Cross-platform local control through Lumen's versioned `SQLite` state.
 
 use lumen_filter::config::Device;
-use lumen_store::{Command as ControlCommand, Role, Store, password};
+use lumen_store::{
+    Command as ControlCommand, HistoryDetail, HistoryMode, HistoryPrefs, MAX_RETENTION_DAYS, Role,
+    Store, password,
+};
 use std::{
     io,
     net::IpAddr,
@@ -25,6 +28,8 @@ const HELP: &str = "Usage:
   lumenctl user add --state FILE --name NAME [--role admin|user] --password stdin|generate
   lumenctl user reset-password --state FILE --name NAME --password stdin|generate
   lumenctl user reset-2fa --state FILE --name NAME
+  lumenctl history status|clear --state FILE
+  lumenctl history set --state FILE --mode off|memory|saved [--detail anonymous|full] [--days 1-90]
 
 Console accounts: `--password stdin` reads one line from standard input, e.g.
   printf '%s' \"$PASSWORD\" | lumenctl user add --state state.db --name admin --role admin --password stdin
@@ -85,6 +90,18 @@ enum Command {
         name: String,
         generate: bool,
     },
+    HistoryStatus {
+        state: PathBuf,
+    },
+    HistorySet {
+        state: PathBuf,
+        mode: HistoryMode,
+        detail: Option<HistoryDetail>,
+        days: Option<u32>,
+    },
+    HistoryClear {
+        state: PathBuf,
+    },
 }
 
 fn arguments(args: impl IntoIterator<Item = String>) -> Result<Option<Command>, String> {
@@ -99,6 +116,7 @@ fn arguments(args: impl IntoIterator<Item = String>) -> Result<Option<Command>, 
         [name, rest @ ..] if name == "config" => config_command(rest),
         [name, rest @ ..] if name == "device" => device_command(rest),
         [name, rest @ ..] if name == "user" => user_command(rest),
+        [name, rest @ ..] if name == "history" => history_command(rest),
         [name, action, rest @ ..] if name == "filter" && action == "refresh" => {
             Ok(Some(Command::Control {
                 state: one_path(rest, "--state")?,
@@ -223,6 +241,43 @@ fn user_command(args: &[String]) -> Result<Option<Command>, String> {
                 state: PathBuf::from(required(&values, "--state")?),
                 name: required(&values, "--name")?.to_owned(),
                 generate: generate(&values)?,
+            }))
+        }
+        _ => Err(HELP.into()),
+    }
+}
+
+fn history_command(args: &[String]) -> Result<Option<Command>, String> {
+    match args {
+        [action, rest @ ..] if action == "status" => Ok(Some(Command::HistoryStatus {
+            state: one_path(rest, "--state")?,
+        })),
+        [action, rest @ ..] if action == "clear" => Ok(Some(Command::HistoryClear {
+            state: one_path(rest, "--state")?,
+        })),
+        [action, rest @ ..] if action == "set" => {
+            let values = options(rest, &["--state", "--mode", "--detail", "--days"], &[])?;
+            let mode = HistoryMode::parse(required(&values, "--mode")?)
+                .ok_or("--mode must be off, memory or saved")?;
+            let detail = optional(&values, "--detail")
+                .map(|value| {
+                    HistoryDetail::parse(value).ok_or("--detail must be anonymous or full")
+                })
+                .transpose()?;
+            let days = optional(&values, "--days")
+                .map(|value| {
+                    value
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|days| (1..=MAX_RETENTION_DAYS).contains(days))
+                        .ok_or("--days must be 1-90")
+                })
+                .transpose()?;
+            Ok(Some(Command::HistorySet {
+                state: PathBuf::from(required(&values, "--state")?),
+                mode,
+                detail,
+                days,
             }))
         }
         _ => Err(HELP.into()),
@@ -389,6 +444,44 @@ async fn main() -> io::Result<()> {
                 .enqueue(ControlCommand::Reload)
                 .map_err(io::Error::other)?;
             println!("Device {id} removed; reload queued");
+        }
+        Command::HistoryStatus { state } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            let prefs = store.history_prefs();
+            let saved = store.query_log_summary().map_err(io::Error::other)?;
+            println!("mode: {}", prefs.mode.as_str());
+            println!("detail: {}", prefs.detail.as_str());
+            println!("retention: {} days", prefs.retention_days);
+            println!("saved lookups: {}", saved.rows);
+            if let (Some(oldest), Some(newest)) = (saved.oldest_ms, saved.newest_ms) {
+                println!("oldest: {oldest} (Unix ms)");
+                println!("newest: {newest} (Unix ms)");
+            }
+        }
+        Command::HistorySet {
+            state,
+            mode,
+            detail,
+            days,
+        } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            let current = store.history_prefs();
+            store
+                .set_history_prefs(&HistoryPrefs {
+                    mode,
+                    detail: detail.unwrap_or(current.detail),
+                    retention_days: days.unwrap_or(current.retention_days),
+                })
+                .map_err(io::Error::other)?;
+            println!(
+                "History set to {}. A running Lumen picks this up within a few seconds.",
+                mode.as_str()
+            );
+        }
+        Command::HistoryClear { state } => {
+            let store = Store::open(&state).map_err(io::Error::other)?;
+            let removed = store.clear_query_log().map_err(io::Error::other)?;
+            println!("Deleted {removed} saved lookups");
         }
         Command::UserList { state } => {
             let store = Store::open(&state).map_err(io::Error::other)?;
@@ -570,5 +663,72 @@ mod tests {
         assert!(
             matches!(command, Command::Explain { domain, at: Some(0), .. } if domain == "example.com")
         );
+    }
+
+    #[test]
+    fn history_commands_are_strict() {
+        let set = parse(&[
+            "history",
+            "set",
+            "--state",
+            "a",
+            "--mode",
+            "saved",
+            "--detail",
+            "anonymous",
+            "--days",
+            "30",
+        ])
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            set,
+            Command::HistorySet {
+                mode: HistoryMode::Saved,
+                detail: Some(HistoryDetail::Anonymous),
+                days: Some(30),
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["history", "set", "--state", "a", "--mode", "off"])
+                .unwrap()
+                .unwrap(),
+            Command::HistorySet {
+                mode: HistoryMode::Off,
+                detail: None,
+                days: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["history", "status", "--state", "a"]),
+            Ok(Some(Command::HistoryStatus { .. }))
+        ));
+        assert!(matches!(
+            parse(&["history", "clear", "--state", "a"]),
+            Ok(Some(Command::HistoryClear { .. }))
+        ));
+        for args in [
+            vec!["history"],
+            vec!["history", "set", "--state", "a"],
+            vec!["history", "set", "--state", "a", "--mode", "forever"],
+            vec![
+                "history", "set", "--state", "a", "--mode", "saved", "--detail", "all",
+            ],
+            vec![
+                "history", "set", "--state", "a", "--mode", "saved", "--days", "0",
+            ],
+            vec![
+                "history", "set", "--state", "a", "--mode", "saved", "--days", "91",
+            ],
+            vec![
+                "history", "set", "--state", "a", "--mode", "saved", "--days", "x",
+            ],
+            vec!["history", "clear"],
+            vec!["history", "purge", "--state", "a"],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
     }
 }

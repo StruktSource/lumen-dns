@@ -5,8 +5,8 @@ const act = async (path, msg, opt) => { if (await L.confirm(opt)) { try { await 
 L.views.system = () => {
   const s = L.S.status, cfg = L.S.cfg, revs = L.S.revisions;
   const restore = async r => {
-    if (!(await L.confirm({ title: `Restore revision ${r.revision}`, text: 'This applies those settings as a new revision. Lumen restarts its listeners and clears DNS caches. Devices are not changed.', label: 'Restore and reload' }))) return;
-    try { const out = await L.api('POST', '/api/config/restore', { revision: r.revision }); L.toast(`Applying revision ${out.revision}…`); const res = await L.waitForConfig(out.revision); L.S.draft = null; if (res.ok) L.toast('Restored.'); else L.toast(res.error || 'Lumen refused those settings.', 'bad'); await L.refreshPage(); } catch (e) { L.toast(e.message, 'bad'); }
+    if (!(await L.confirm({ title: L.t('Restore revision {n}', { n: r.revision }), text: 'This applies those settings as a new revision. Lumen restarts its listeners and clears DNS caches. Devices are not changed.', label: 'Restore and reload' }))) return;
+    try { const out = await L.api('POST', '/api/config/restore', { revision: r.revision }); L.toast(L.t('Applying revision {n}…', { n: out.revision })); const res = await L.waitForConfig(out.revision); L.S.draft = null; if (res.ok) L.toast('Restored.'); else L.toast(res.error || 'Lumen refused those settings.', 'bad'); await L.refreshPage(); } catch (e) { L.toast(e.message, 'bad'); }
   };
   return [L.pageHead('System', 'Daemon status, control actions and configuration history.', h('span', { class: 'pill ' + (s.daemon === 'running' ? 'ok' : 'bad') }, s.daemon === 'running' ? 'Healthy' : s.daemon)),
     h('div', { class: 'grid g2' },
@@ -20,9 +20,9 @@ L.views.system = () => {
         h('div', { class: 'row' }, h('div', { class: 'sp' }, h('strong', {}, 'Roll back filter lists'), h('div', { class: 'hint' }, 'Swap to the previous successful generation.')), h('button', { class: 'btn', onclick: () => act('/api/filter/rollback', 'Rollback queued.', { title: 'Roll back filter lists', text: 'Automatic refresh pauses until the next successful manual refresh.', label: 'Roll back' }) }, L.ic('undo'), 'Roll back')),
         h('div', { class: 'row' }, h('div', { class: 'sp' }, h('strong', {}, 'Reload configuration'), h('div', { class: 'hint' }, 'Restarts listeners, closes connections, clears caches.')), h('button', { class: 'btn', onclick: () => act('/api/reload', 'Reload queued.', { title: 'Reload configuration', text: 'Listeners restart briefly and DNS caches clear.', label: 'Reload' }) }, L.ic('refresh'), 'Reload')),
         h('div', { class: 'row' }, h('div', { class: 'sp' }, h('strong', {}, 'Shut down'), h('div', { class: 'hint' }, 'Stops DNS for every device until the service is started again.')), h('button', { class: 'btn danger', onclick: () => act('/api/shutdown', 'Shutdown queued.', { title: 'Shut down Lumen', text: 'This stops Lumen and this console. DNS stops working for every device on your network until you start the service again.', label: 'Shut down', danger: true, typed: 'SHUTDOWN' }) }, L.ic('power'), 'Shut down'))))),
-    h('div', { class: 'sec-title' }, h('h2', {}, 'Configuration history'), h('span', { class: 'mono muted' }, `${revs.length} kept`)),
+    h('div', { class: 'sec-title' }, h('h2', {}, 'Configuration history'), h('span', { class: 'mono muted' }, L.t('{n} kept', { n: revs.length }))),
     h('div', { class: 'card' }, h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Revision', 'Applied', 'By', ''].map(x => h('th', {}, x)))), h('tbody', {}, revs.map((r, i) => h('tr', {}, h('td', {}, h('strong', {}, '#' + r.revision), r.revision === s.revision ? h('span', { class: 'pill ok', style: 'margin-left:8px' }, 'Active') : null), h('td', {}, F.ago(r.t * 1000)), h('td', {}, r.actor || 'startup file'),
-      h('td', { class: 'act' }, h('button', { class: 'btn sm flat', onclick: () => L.modal({ title: 'Revision #' + r.revision, wide: true, body: [h('pre', { class: 'code' }, r.toml)], actions: [{ label: 'Close' }] }) }, L.ic('file'), 'View'),
+      h('td', { class: 'act' }, h('button', { class: 'btn sm flat', onclick: () => L.modal({ title: L.t('Revision #{n}', { n: r.revision }), wide: true, body: [h('pre', { class: 'code' }, r.toml)], actions: [{ label: 'Close' }] }) }, L.ic('file'), 'View'),
         r.revision !== s.revision ? h('button', { class: 'btn sm', onclick: () => restore(r) }, L.ic('undo'), 'Restore') : null)))))))];
 };
 })();

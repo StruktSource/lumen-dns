@@ -23,6 +23,7 @@ function shell(content, page) {
     h('div', { class: 'side-foot' },
       h('a', { class: 'who', href: '#/account', title: 'My account', onclick: () => side.classList.remove('open') }, h('div', { class: 'av' }, L.session.name[0].toUpperCase()), h('div', {}, h('strong', {}, L.session.name), h('span', {}, L.ROLE_LABEL[L.session.role]))),
       h('div', { class: 'side-tools' },
+        h('div', { class: 'side-lang' }, L.ic('globe', 16), L.langSelect()),
         h('button', { class: 'btn sp', title: 'Toggle theme', onclick: () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = t; localStorage.setItem('lumen-theme', t); L.render(); } }, L.ic(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon'), document.documentElement.dataset.theme === 'dark' ? 'Light' : 'Dark'),
         h('button', { class: 'btn sp', onclick: L.logout }, L.ic('logout'), 'Sign out'))));
   const mob = h('div', { class: 'mobbar' }, h('div', { class: 'brand', style: 'padding:0' }, h('b', {}, '✦'), 'LUMEN'), h('button', { class: 'btn', 'aria-label': 'Menu', onclick: () => side.classList.toggle('open') }, L.ic('menu')));
@@ -38,7 +39,7 @@ const draw = () => {
   const { def, sub } = current();
   if (L.session.must_change && def[0] !== 'account') { location.hash = '#/account'; return; }
   const view = !L.can(def[3]) ? [L.pageHead(def[1]), L.lockPage()] : L.views[def[0]](sub);
-  root().replaceChildren(shell(view, def[0])); L.renderSaveBar(); document.title = `${def[1]} · Lumen`;
+  root().replaceChildren(shell(view, def[0])); L.renderSaveBar(); document.title = `${L.t(def[1])} · Lumen`;
 };
 const failure = (message, retry) => h('div', { class: 'main' }, L.pageHead('Something went wrong'), h('div', { class: 'card' }, L.empty('Lumen could not load this page', message, h('button', { class: 'btn primary', onclick: retry }, 'Try again'))));
 
@@ -54,6 +55,7 @@ L.render = async () => {
   if (mine === gen && L.session) draw();
 };
 /* Redraw with data already in memory (form toggles, tab-local changes). */
+L.redraw = () => L.render();
 L.rerender = () => { if (!L.session) return; const y = scrollY; draw(); scrollTo(0, y); };
 /* Reload this page's data from the server, then redraw (after a successful change). */
 L.refreshPage = async () => { const { def } = current(); try { await L.loadPage(def[0]); } catch (e) { L.toast(e.message, 'bad'); } L.rerender(); };
@@ -65,6 +67,7 @@ addEventListener('hashchange', () => { L.render(); scrollTo(0, 0); });
 (async () => {
   document.documentElement.dataset.theme = localStorage.getItem('lumen-theme') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   try { L.meta = await L.api('GET', '/api/state'); } catch (e) { L.meta = null; L.metaError = e.message; }
+  L.initLang();
   if (L.meta?.user) { L.session = L.meta.user.user; L.csrf = L.meta.user.csrf; }
   await L.render();
 })();

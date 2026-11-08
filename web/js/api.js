@@ -14,11 +14,11 @@ L.api = async (method, path, body) => {
   /* A reload restarts the listeners for a moment. Reads wait it out; writes are never repeated. */
   for (let attempt = 0; ; attempt++) {
     try { res = await fetch(path, init); break; }
-    catch { if (method !== 'GET' || attempt >= 12) throw new ApiError('Cannot reach Lumen. Check that the service is running.', 0); await new Promise(r => setTimeout(r, 500)); }
+    catch { if (method !== 'GET' || attempt >= 12) throw new ApiError(L.t('Cannot reach Lumen. Check that the service is running.'), 0); await new Promise(r => setTimeout(r, 500)); }
   }
   let data = null; try { data = await res.json(); } catch { /* empty body */ }
   if (res.status === 401 && L.session) { L.session = null; L.S.draft = null; if (L.onSignedOut) L.onSignedOut(); }
-  if (!res.ok) throw new ApiError((data && data.error) || `Request failed (${res.status})`, res.status);
+  if (!res.ok) throw new ApiError(data && data.error ? L.t(data.error) : L.t('Request failed ({status})', { status: res.status }), res.status);
   return data;
 };
 
@@ -31,7 +31,16 @@ L.loadSeries = async () => { L.S.series = (await L.api('GET', '/api/series')).po
 L.loadDevices = async () => { L.S.devices = await L.api('GET', '/api/devices'); };
 L.loadUsers = async () => { L.S.users = await L.api('GET', '/api/users'); };
 L.loadAudit = async () => { L.S.audit = await L.api('GET', '/api/audit?limit=300'); };
-L.loadHistory = async () => { L.S.history = await L.api('GET', '/api/history?limit=500'); };
+/* `q` = { search, filter }. `more` appends the next page of saved lookups instead of replacing the list. */
+L.loadHistory = async (q = {}, more = false) => {
+  const p = new URLSearchParams({ limit: '100' });
+  if (q.search) p.set('search', q.search);
+  if (q.filter && q.filter !== 'all') p.set('filter', q.filter);
+  if (more && L.S.history.next_before) p.set('before', String(L.S.history.next_before));
+  const r = await L.api('GET', '/api/history?' + p);
+  if (more) r.items = [...L.S.history.items, ...r.items];
+  L.S.history = r;
+};
 L.loadSettings = async () => { L.S.settings = await L.api('GET', '/api/settings'); };
 L.loadProviders = async () => { if (!L.S.providers.length) L.S.providers = await L.api('GET', '/api/providers'); };
 L.loadRevisions = async () => { L.S.revisions = await L.api('GET', '/api/config/history'); };
@@ -58,9 +67,9 @@ L.waitForConfig = async revision => {
     try {
       const s = await L.api('GET', '/api/status'); lastError = s.last_error;
       if (s.revision >= revision) return { ok: true };
-      if (s.pending_revision == null && s.revision < revision) return { ok: false, error: s.last_error ? `Lumen refused the new settings: ${s.last_error}` : null };
-    } catch (e) { if (e.status === 401) return { ok: false, error: 'You were signed out. Sign in again to check the result.' }; }
+      if (s.pending_revision == null && s.revision < revision) return { ok: false, error: s.last_error ? L.t('Lumen refused the new settings: {error}', { error: s.last_error }) : null };
+    } catch (e) { if (e.status === 401) return { ok: false, error: L.t('You were signed out. Sign in again to check the result.') }; }
   }
-  return { ok: false, error: lastError || 'The change is still pending after 5 minutes. Check the System page and the daemon log.' };
+  return { ok: false, error: lastError || L.t('The change is still pending after 5 minutes. Check the System page and the daemon log.') };
 };
 })();

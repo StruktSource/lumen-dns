@@ -4,7 +4,7 @@
 //! the daemon through [`Host`].
 #![allow(clippy::unused_self)] // Handlers live on `Console` so each route reads as one method.
 
-use crate::host::{Counters, Host};
+use crate::host::{Counters, HistoryDetail, HistoryMode, HistorySettings, Host};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{
@@ -13,7 +13,10 @@ use hyper::{
 };
 use lumen_config::{Config, providers::Catalog};
 use lumen_filter::config::Device;
-use lumen_store::{Command, Role, Session, Store, password, totp};
+use lumen_store::{
+    Command, HistoryPrefs, MAX_RETENTION_DAYS, QUERY_LOG_MAX_ROWS, QueryFilter, QueryRow, Role,
+    Session, Store, password, totp,
+};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
@@ -29,6 +32,12 @@ const COOKIE_NAME: &str = "lumen_session";
 const MAX_SESSION_SECS: u64 = 12 * 3600;
 const DEFAULT_IDLE_MINUTES: u64 = 30;
 const SERIES_POINTS: usize = 60;
+/// Console languages. The first is the default. The web console carries the translations.
+pub(crate) const LANGUAGES: [&str; 5] = ["en", "de", "it", "es", "nl"];
+/// How often lookups waiting in memory are written to the database.
+const HISTORY_FLUSH_SECS: u64 = 2;
+/// How often saved lookups past their retention are deleted (in flush ticks).
+const HISTORY_PRUNE_TICKS: u64 = 300;
 const BODY_LIMIT: usize = 256 * 1024;
 
 /// One minute of traffic.
@@ -191,7 +200,7 @@ impl Console {
     pub fn prepare(&self) -> Result<Option<String>, String> {
         let store = Store::open(&self.state)?;
         self.host
-            .set_history(store.setting("history")?.as_deref() == Some("1"));
+            .set_history(runtime_settings(store.history_prefs()));
         if store.user_count()? == 0 {
             if let Some(code) = store.setting("setup_code")? {
                 return Ok(Some(code));
@@ -237,6 +246,47 @@ impl Console {
                 let _ = store.purge_sessions(24 * 3600, MAX_SESSION_SECS);
             }
         }
+    }
+
+    /// Write saved-mode lookups to the database in small batches and delete expired ones.
+    ///
+    /// # Errors
+    /// Never returns an error today; the signature matches the other web tasks.
+    pub async fn run_history_writer(self: Arc<Self>) -> std::io::Result<()> {
+        let mut tick = tokio::time::interval(Duration::from_secs(HISTORY_FLUSH_SECS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut count = 0_u64;
+        loop {
+            tick.tick().await;
+            let prune = count.is_multiple_of(HISTORY_PRUNE_TICKS);
+            count = count.wrapping_add(1);
+            let console = Arc::clone(&self);
+            // Database work stays off the async executor threads.
+            let _ = tokio::task::spawn_blocking(move || console.flush_history(prune)).await;
+        }
+    }
+
+    /// One writer step: pick up setting changes made by `lumenctl`, save waiting lookups,
+    /// and optionally delete lookups older than the retention period.
+    pub(crate) fn flush_history(&self, prune: bool) -> Result<(), String> {
+        let mut store = Store::open(&self.state)?;
+        let prefs = store.history_prefs();
+        let settings = runtime_settings(prefs);
+        if settings != self.host.history_settings() {
+            self.host.set_history(settings);
+        }
+        let records = self.host.take_unsaved_history();
+        if !records.is_empty() {
+            let rows: Vec<QueryRow> = records.into_iter().map(record_row).collect();
+            store.insert_queries(&rows)?;
+        }
+        if prune {
+            let cutoff = now()
+                .saturating_mul(1000)
+                .saturating_sub(u64::from(prefs.retention_days) * 86_400_000);
+            store.prune_query_log(cutoff, QUERY_LOG_MAX_ROWS)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn handle(&self, request: &Request) -> Reply {
@@ -289,7 +339,7 @@ impl Console {
             ("GET", ["status"]) => return self.status(&store),
             ("GET", ["series"]) => return self.series_json(),
             ("GET", ["devices"]) => return devices_json(&store),
-            ("GET", ["history"]) => return self.history(request),
+            ("GET", ["history"]) => return self.history(&store, request),
             ("GET", ["settings"]) => return settings_json(&store),
             _ => {}
         }
@@ -335,6 +385,7 @@ impl Console {
             ("GET", ["audit"]) => audit_json(&store, &request.query),
             ("PUT", ["settings"]) => self.put_settings(&mut store, &ctx),
             ("PUT", ["history"]) => self.put_history(&mut store, &ctx),
+            ("DELETE", ["history"]) => self.clear_history(&mut store, &ctx),
             _ => error(StatusCode::NOT_FOUND, "route not found"),
         }
     }
@@ -428,6 +479,8 @@ impl Console {
                 "version": self.version,
                 "setup_needed": setup,
                 "setup_code_required": setup && !request.peer.ip().to_canonical().is_loopback(),
+                "language": language(store),
+                "languages": LANGUAGES,
                 "user": signed_in,
             }),
         )
@@ -508,6 +561,9 @@ impl Console {
         // Optional first-run choices. Failures here never undo the account.
         if let Err(message) = self.apply_setup_choices(store, &body, &name) {
             let _ = message;
+        }
+        if let Some(code) = text(&body, "language").filter(|c| LANGUAGES.contains(c)) {
+            let _ = store.set_setting("language", code);
         }
         let _ = store.clear_setting("setup_code");
         Self::audit(
@@ -1034,7 +1090,8 @@ impl Console {
                 "last_error": last_error,
                 "revision": store.config().ok().flatten().map(|c| c.revision),
                 "pending_revision": store.staged_config().ok().flatten().map(|c| c.revision),
-                "history_enabled": self.host.history_enabled(),
+                "history_enabled": self.host.history_settings().mode != HistoryMode::Off,
+                "history_mode": self.host.history_settings().mode.as_str(),
                 "rss_bytes": rss_bytes(),
                 "activity": activity_json(),
                 "counters": {
@@ -1069,78 +1126,219 @@ impl Console {
     }
 
     #[allow(clippy::cast_precision_loss)] // Microseconds to milliseconds for display only.
-    fn history(&self, request: &Request) -> Reply {
-        if !self.host.history_enabled() {
-            return reply(StatusCode::OK, &json!({ "enabled": false, "items": [] }));
-        }
+    fn history(&self, store: &Store, request: &Request) -> Reply {
+        let prefs = store.history_prefs();
+        let settings = runtime_settings(prefs);
+        let saved = store.query_log_summary().unwrap_or_default();
         let limit = query_param(&request.query, "limit")
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(200)
             .clamp(1, 1000);
-        let items: Vec<Value> = self
-            .host
-            .history(limit)
-            .into_iter()
-            .map(|r| {
-                json!({
-                    "t": r.unix_ms, "domain": r.domain, "type": r.qtype, "client": r.client.to_string(),
-                    "device": r.device, "blocked": r.blocked, "rcode": r.rcode, "ms": (r.micros as f64) / 1000.0,
+        let search = query_param(&request.query, "search")
+            .map(percent_decode)
+            .filter(|v| !v.is_empty());
+        let blocked = match query_param(&request.query, "filter") {
+            Some("blocked") => Some(true),
+            Some("allowed") => Some(false),
+            _ => None,
+        };
+        let before = query_param(&request.query, "before").and_then(|v| v.parse::<i64>().ok());
+        let mut next_before = None;
+        let items: Vec<Value> = if settings.mode == HistoryMode::Memory {
+            let needle = search.as_deref().map(str::to_lowercase);
+            self.host
+                .history(1000)
+                .into_iter()
+                .filter(|r| blocked.is_none_or(|b| b == r.blocked))
+                .filter(|r| {
+                    needle.as_deref().is_none_or(|n| {
+                        let hay = format!(
+                            "{} {} {}",
+                            r.domain,
+                            r.device.as_deref().unwrap_or(""),
+                            r.client.map(|c| c.to_string()).unwrap_or_default()
+                        );
+                        hay.to_lowercase().contains(n)
+                    })
                 })
-            })
-            .collect();
-        reply(StatusCode::OK, &json!({ "enabled": true, "items": items }))
+                .take(limit)
+                .map(|r| {
+                    json!({
+                        "t": r.unix_ms, "domain": r.domain, "type": r.qtype,
+                        "client": r.client.map(|c| c.to_string()), "device": r.device,
+                        "blocked": r.blocked, "rcode": r.rcode, "ms": (r.micros as f64) / 1000.0,
+                    })
+                })
+                .collect()
+        } else if saved.rows > 0 {
+            // Saved lookups stay visible (and deletable) even after the mode is switched off.
+            let page = u16::try_from(limit).unwrap_or(1000);
+            let Ok(rows) = store.query_log(&QueryFilter {
+                search: search.as_deref(),
+                blocked,
+                before_id: before,
+                limit: page,
+            }) else {
+                return unavailable();
+            };
+            if rows.len() == usize::from(page) {
+                next_before = rows.last().map(|r| r.id);
+            }
+            rows.into_iter()
+                .map(|r| {
+                    json!({
+                        "id": r.id, "t": r.row.t, "domain": r.row.domain, "type": r.row.qtype,
+                        "client": r.row.client, "device": r.row.device, "blocked": r.row.blocked,
+                        "rcode": r.row.rcode, "ms": (r.row.micros as f64) / 1000.0,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        reply(
+            StatusCode::OK,
+            &json!({
+                "enabled": settings.mode != HistoryMode::Off,
+                "mode": settings.mode.as_str(),
+                "detail": settings.detail.as_str(),
+                "retention_days": prefs.retention_days,
+                "max_rows": QUERY_LOG_MAX_ROWS,
+                "saved": { "rows": saved.rows, "oldest": saved.oldest_ms, "newest": saved.newest_ms },
+                "items": items,
+                "next_before": next_before,
+            }),
+        )
     }
 
     fn put_history(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
         let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
             return bad("invalid JSON");
         };
-        let Some(on) = body.get("enabled").and_then(Value::as_bool) else {
-            return bad("enabled must be true or false");
+        let current = store.history_prefs();
+        // `{"enabled": bool}` is the older on/off form. It means memory mode or off.
+        let mode = if let Some(on) = body.get("enabled").and_then(Value::as_bool) {
+            if on {
+                HistoryMode::Memory
+            } else {
+                HistoryMode::Off
+            }
+        } else if let Some(value) = body.get("mode") {
+            match value.as_str().and_then(HistoryMode::parse) {
+                Some(mode) => mode,
+                None => return bad("mode must be off, memory or saved"),
+            }
+        } else {
+            return bad("mode must be off, memory or saved");
         };
-        self.host.set_history(on);
-        if store
-            .set_setting("history", if on { "1" } else { "0" })
-            .is_err()
-        {
+        let detail = match body.get("detail") {
+            None => current.detail,
+            Some(value) => match value.as_str().and_then(HistoryDetail::parse) {
+                Some(detail) => detail,
+                None => return bad("detail must be anonymous or full"),
+            },
+        };
+        let days = match body.get("retention_days") {
+            None => current.retention_days,
+            Some(value) => match value
+                .as_u64()
+                .and_then(|d| u32::try_from(d).ok())
+                .filter(|d| (1..=MAX_RETENTION_DAYS).contains(d))
+            {
+                Some(days) => days,
+                None => return bad("retention_days must be 1-90"),
+            },
+        };
+        let prefs = HistoryPrefs {
+            mode,
+            detail,
+            retention_days: days,
+        };
+        if store.set_history_prefs(&prefs).is_err() {
             return unavailable();
         }
+        let settings = runtime_settings(prefs);
+        self.host.set_history(settings);
         Self::actor(
             store,
             ctx,
-            if on {
-                "history.enable"
-            } else {
-                "history.disable"
-            },
-            "console",
+            "history.update",
+            &format!(
+                "mode {} detail {} days {days}",
+                mode.as_str(),
+                detail.as_str()
+            ),
         );
-        reply(StatusCode::OK, &json!({ "enabled": on }))
+        reply(
+            StatusCode::OK,
+            &json!({
+                "enabled": mode != HistoryMode::Off, "mode": mode.as_str(),
+                "detail": detail.as_str(), "retention_days": days,
+            }),
+        )
+    }
+
+    fn clear_history(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
+        let Ok(removed) = store.clear_query_log() else {
+            return unavailable();
+        };
+        // Lookups already waiting to be saved are saved history too.
+        let _ = self.host.take_unsaved_history();
+        Self::actor(store, ctx, "history.clear", &format!("{removed} rows"));
+        reply(StatusCode::OK, &json!({ "removed": removed }))
     }
 
     fn put_settings(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
         let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
             return bad("invalid JSON");
         };
-        let Some(minutes) = body
-            .get("session_idle_minutes")
-            .and_then(Value::as_u64)
-            .filter(|m| (5..=1440).contains(m))
-        else {
-            return bad("session_idle_minutes must be 5-1440");
-        };
-        if store
-            .set_setting("session_idle_minutes", &minutes.to_string())
-            .is_err()
-        {
-            return unavailable();
+        let idle = body.get("session_idle_minutes");
+        let language = body.get("language");
+        if idle.is_none() && language.is_none() {
+            return bad("nothing to change");
         }
-        Self::actor(
-            store,
-            ctx,
-            "settings.update",
-            &format!("idle {minutes} min"),
-        );
+        let minutes = match idle {
+            None => None,
+            Some(value) => match value.as_u64().filter(|m| (5..=1440).contains(m)) {
+                Some(minutes) => Some(minutes),
+                None => return bad("session_idle_minutes must be 5-1440"),
+            },
+        };
+        // `null` goes back to "automatic": each browser then uses its own language.
+        let clear_language = language.is_some_and(Value::is_null);
+        let code = match language {
+            None => None,
+            Some(value) if value.is_null() => None,
+            Some(value) => match value.as_str().filter(|c| LANGUAGES.contains(c)) {
+                Some(code) => Some(code),
+                None => return bad("language is not available"),
+            },
+        };
+        if let Some(minutes) = minutes {
+            if store
+                .set_setting("session_idle_minutes", &minutes.to_string())
+                .is_err()
+            {
+                return unavailable();
+            }
+            Self::actor(
+                store,
+                ctx,
+                "settings.update",
+                &format!("idle {minutes} min"),
+            );
+        }
+        if let Some(code) = code {
+            if store.set_setting("language", code).is_err() {
+                return unavailable();
+            }
+            Self::actor(store, ctx, "settings.update", &format!("language {code}"));
+        } else if clear_language {
+            if store.clear_setting("language").is_err() {
+                return unavailable();
+            }
+            Self::actor(store, ctx, "settings.update", "language automatic");
+        }
         settings_json(store)
     }
 
@@ -1369,6 +1567,51 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
         .map(|(_, v)| v)
 }
 
+/// Decode `%XX` and `+` in a query-string value. Invalid escapes are kept as typed.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    out.push(byte);
+                    i += 2;
+                } else {
+                    out.push(b'%');
+                }
+            }
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).chars().take(100).collect()
+}
+
+/// The daemon-side half of the stored history choices.
+const fn runtime_settings(prefs: HistoryPrefs) -> HistorySettings {
+    HistorySettings {
+        mode: prefs.mode,
+        detail: prefs.detail,
+    }
+}
+
+fn record_row(record: crate::host::QueryRecord) -> QueryRow {
+    QueryRow {
+        t: record.unix_ms,
+        domain: record.domain,
+        qtype: record.qtype,
+        client: record.client.map(|c| c.to_string()),
+        device: record.device,
+        blocked: record.blocked,
+        rcode: record.rcode.to_owned(),
+        micros: record.micros,
+    }
+}
+
 fn user_json(user: &lumen_store::User) -> Value {
     json!({
         "name": user.name, "role": user.role.as_str(), "must_change": user.must_change,
@@ -1410,10 +1653,24 @@ fn devices_json(store: &Store) -> Reply {
     }
 }
 
+/// The console language an administrator chose as the default. `None` until one is chosen,
+/// so each browser can then use its own language.
+fn language(store: &Store) -> Option<String> {
+    store
+        .setting("language")
+        .ok()
+        .flatten()
+        .filter(|code| LANGUAGES.contains(&code.as_str()))
+}
+
 fn settings_json(store: &Store) -> Reply {
     reply(
         StatusCode::OK,
-        &json!({ "session_idle_minutes": Console::idle_secs(store) / 60 }),
+        &json!({
+            "session_idle_minutes": Console::idle_secs(store) / 60,
+            "language": language(store),
+            "languages": LANGUAGES,
+        }),
     )
 }
 
@@ -1686,7 +1943,13 @@ mod tests {
     use crate::host::{Explained, ListInfo, QueryRecord};
     use lumen_store::password::hash_with_iterations;
 
-    struct Stub;
+    /// A host whose history behaves like the daemon's: settings, a recent list, a save queue.
+    #[derive(Default)]
+    struct Stub {
+        settings: Mutex<HistorySettings>,
+        recent: Mutex<Vec<QueryRecord>>,
+        unsaved: Mutex<Vec<QueryRecord>>,
+    }
     impl Host for Stub {
         fn counters(&self) -> Counters {
             Counters {
@@ -1719,12 +1982,26 @@ mod tests {
         fn uptime_secs(&self) -> u64 {
             5
         }
-        fn history_enabled(&self) -> bool {
-            false
+        fn history_settings(&self) -> HistorySettings {
+            *self.settings.lock().unwrap()
         }
-        fn set_history(&self, _: bool) {}
-        fn history(&self, _: usize) -> Vec<QueryRecord> {
-            Vec::new()
+        fn set_history(&self, settings: HistorySettings) {
+            *self.settings.lock().unwrap() = settings;
+            if settings.mode != HistoryMode::Saved {
+                self.unsaved.lock().unwrap().clear();
+            }
+        }
+        fn history(&self, limit: usize) -> Vec<QueryRecord> {
+            self.recent
+                .lock()
+                .unwrap()
+                .iter()
+                .take(limit)
+                .cloned()
+                .collect()
+        }
+        fn take_unsaved_history(&self) -> Vec<QueryRecord> {
+            std::mem::take(&mut *self.unsaved.lock().unwrap())
         }
     }
 
@@ -1732,6 +2009,7 @@ mod tests {
 
     struct Fixture {
         console: Console,
+        host: Arc<Stub>,
         _directory: tempfile::TempDir,
         state: PathBuf,
     }
@@ -1748,8 +2026,10 @@ mod tests {
         store
             .create_user("anna", Role::User, &cheap("anna passphrase 123"), false)
             .unwrap();
+        let host = Arc::new(Stub::default());
         Fixture {
-            console: Console::new(state.clone(), Arc::new(Stub), "test"),
+            console: Console::new(state.clone(), host.clone(), "test"),
+            host,
             _directory: directory,
             state,
         }
@@ -2014,8 +2294,10 @@ mod tests {
         let state = directory.path().join("state.db");
         let mut store = Store::open(&state).unwrap();
         store.set_config(CONFIG, directory.path()).unwrap();
+        let host = Arc::new(Stub::default());
         let f = Fixture {
-            console: Console::new(state.clone(), Arc::new(Stub), "test"),
+            console: Console::new(state.clone(), host.clone(), "test"),
+            host,
             _directory: directory,
             state,
         };
@@ -2040,7 +2322,8 @@ mod tests {
                 Method::POST,
                 "/api/setup",
                 None,
-                &json!({"code": code, "username": "Owner", "password": pw}).to_string(),
+                &json!({"code": code, "username": "Owner", "password": pw, "language": "it"})
+                    .to_string(),
                 from,
             ))
         };
@@ -2075,6 +2358,15 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["user"]["name"], "owner");
         assert_eq!(json["user"]["role"], "admin");
+        assert_eq!(
+            Store::open(&f.state)
+                .unwrap()
+                .setting("language")
+                .unwrap()
+                .as_deref(),
+            Some("it"),
+            "the language chosen in the wizard is kept"
+        );
         assert_eq!(
             attempt("127.0.0.1", "", "another passphrase!").0,
             StatusCode::CONFLICT
@@ -2531,6 +2823,59 @@ mod tests {
             "127.0.0.1",
         ));
         assert_eq!(settings["session_idle_minutes"], 60);
+        assert!(
+            settings["language"].is_null(),
+            "no default until an administrator chooses"
+        );
+        for bad in [
+            r"{}",
+            r#"{"language":"xx"}"#,
+            r#"{"language":7}"#,
+            r#"{"language":"de","session_idle_minutes":1}"#,
+        ] {
+            assert_eq!(
+                call(&f, Method::PUT, "/api/settings", session, bad, "127.0.0.1").status(),
+                StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
+        let (_, german) = body(call(
+            &f,
+            Method::PUT,
+            "/api/settings",
+            session,
+            r#"{"language":"de"}"#,
+            "127.0.0.1",
+        ));
+        assert_eq!(
+            (
+                german["language"].clone(),
+                german["session_idle_minutes"].clone()
+            ),
+            ("de".into(), 60.into())
+        );
+        // Going back to automatic removes the default again.
+        let (_, automatic) = body(call(
+            &f,
+            Method::PUT,
+            "/api/settings",
+            session,
+            r#"{"language":null}"#,
+            "127.0.0.1",
+        ));
+        assert!(automatic["language"].is_null());
+        call(
+            &f,
+            Method::PUT,
+            "/api/settings",
+            session,
+            r#"{"language":"de"}"#,
+            "127.0.0.1",
+        );
+        // The default language is public, so the sign-in page can use it.
+        let (_, public) = body(call(&f, Method::GET, "/api/state", None, "", "127.0.0.1"));
+        assert_eq!(public["language"], "de");
+        assert_eq!(public["languages"], json!(["en", "de", "it", "es", "nl"]));
         assert_eq!(
             call(
                 &f,
@@ -2546,15 +2891,257 @@ mod tests {
         assert_eq!(
             Store::open(&f.state)
                 .unwrap()
-                .setting("history")
+                .setting("history_mode")
                 .unwrap()
                 .as_deref(),
-            Some("1")
+            Some("memory")
         );
+        assert_eq!(f.host.history_settings().mode, HistoryMode::Memory);
         assert_eq!(
             call(&f, Method::GET, "/api/nope", session, "", "127.0.0.1").status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    fn record(t: u64, domain: &str, blocked: bool, full: bool) -> QueryRecord {
+        QueryRecord {
+            unix_ms: t,
+            domain: domain.into(),
+            qtype: "A".into(),
+            client: full.then(|| "192.168.1.5".parse().unwrap()),
+            device: full.then(|| "tablet".to_owned()),
+            blocked,
+            rcode: if blocked { "NXDOMAIN" } else { "NOERROR" },
+            micros: 2500,
+        }
+    }
+
+    #[test]
+    fn saved_history_modes_search_paging_retention_and_clearing() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let get = |path: &str| body(call(&f, Method::GET, path, session, "", "127.0.0.1")).1;
+        let put = |payload: &str| {
+            call(
+                &f,
+                Method::PUT,
+                "/api/history",
+                session,
+                payload,
+                "127.0.0.1",
+            )
+        };
+
+        // Off by default: nothing is recorded or listed, and the defaults are privacy-first.
+        let off = get("/api/history");
+        assert_eq!(
+            (off["enabled"].clone(), off["mode"].clone()),
+            (false.into(), "off".into())
+        );
+        assert_eq!(off["retention_days"], 7);
+        assert_eq!(off["items"].as_array().unwrap().len(), 0);
+
+        // Bad input is refused before anything is stored.
+        for bad in [
+            r#"{"mode":"forever"}"#,
+            r#"{"mode":"saved","detail":"everything"}"#,
+            r#"{"mode":"saved","retention_days":0}"#,
+            r#"{"mode":"saved","retention_days":91}"#,
+            r#"{"detail":"anonymous"}"#,
+            "not json",
+        ] {
+            assert_eq!(put(bad).status(), StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert_eq!(f.host.history_settings().mode, HistoryMode::Off);
+
+        // Saved + anonymous with a 3 day retention.
+        assert_eq!(
+            put(r#"{"mode":"saved","detail":"anonymous","retention_days":3}"#).status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            f.host.history_settings(),
+            HistorySettings {
+                mode: HistoryMode::Saved,
+                detail: HistoryDetail::Anonymous
+            }
+        );
+        let now_ms = now() * 1000;
+        f.host.unsaved.lock().unwrap().extend([
+            record(now_ms - 10 * 86_400_000, "ancient.example", false, false),
+            record(now_ms - 2_000, "news.example", false, false),
+            record(now_ms - 1_000, "ads.example", true, false),
+            record(now_ms, "Shop.example", false, true),
+        ]);
+        // The writer step saves the queue once, and the retention prune drops the old row.
+        f.console.flush_history(true).unwrap();
+        assert!(f.host.unsaved.lock().unwrap().is_empty());
+        f.console.flush_history(true).unwrap();
+        let listed = get("/api/history?limit=10");
+        assert_eq!(listed["saved"]["rows"], 3);
+        let items = listed["items"].as_array().unwrap();
+        assert_eq!(items[0]["domain"], "Shop.example");
+        assert_eq!(items[0]["device"], "tablet");
+        assert!(
+            items[1]["client"].is_null(),
+            "anonymous rows keep no client"
+        );
+
+        // Filter, search (URL-decoded) and paging.
+        let blocked = get("/api/history?filter=blocked");
+        assert_eq!(blocked["items"].as_array().unwrap().len(), 1);
+        let found = get("/api/history?search=SHOP%2Eexample");
+        assert_eq!(found["items"][0]["domain"], "Shop.example");
+        assert_eq!(
+            get("/api/history?search=nothing%20here")["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let page = get("/api/history?limit=2");
+        assert_eq!(page["items"].as_array().unwrap().len(), 2);
+        let next = get(&format!(
+            "/api/history?limit=2&before={}",
+            page["next_before"]
+        ));
+        assert_eq!(next["items"].as_array().unwrap().len(), 1);
+        assert!(next["next_before"].is_null());
+
+        // Turning history off stops recording but keeps what is saved, which can still be seen.
+        assert_eq!(put(r#"{"mode":"off"}"#).status(), StatusCode::OK);
+        assert_eq!(f.host.history_settings().mode, HistoryMode::Off);
+        let after_off = get("/api/history");
+        assert_eq!(
+            (
+                after_off["enabled"].clone(),
+                after_off["saved"]["rows"].clone()
+            ),
+            (false.into(), 3.into())
+        );
+        assert_eq!(after_off["detail"], "anonymous");
+        assert_eq!(after_off["retention_days"], 3);
+
+        // Only administrators change or delete history; nothing is deleted by a refusal.
+        let (user_cookie, user_csrf) = sign_in(&f, "anna", "anna passphrase 123");
+        let user = Some((user_cookie.as_str(), user_csrf.as_str()));
+        for method in [Method::PUT, Method::DELETE] {
+            assert_eq!(
+                call(
+                    &f,
+                    method,
+                    "/api/history",
+                    user,
+                    r#"{"mode":"saved"}"#,
+                    "127.0.0.1"
+                )
+                .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        assert_eq!(get("/api/history")["saved"]["rows"], 3);
+
+        // Clearing deletes saved rows and anything still waiting to be saved. It is audited.
+        f.host
+            .unsaved
+            .lock()
+            .unwrap()
+            .push(record(now_ms, "late.example", false, false));
+        let cleared = body(call(
+            &f,
+            Method::DELETE,
+            "/api/history",
+            session,
+            "",
+            "127.0.0.1",
+        ));
+        assert_eq!(
+            (cleared.0, cleared.1["removed"].clone()),
+            (StatusCode::OK, 3.into())
+        );
+        assert!(f.host.unsaved.lock().unwrap().is_empty());
+        assert_eq!(get("/api/history")["saved"]["rows"], 0);
+        let audit = Store::open(&f.state).unwrap().audit_events(50).unwrap();
+        for action in ["history.update", "history.clear"] {
+            assert!(audit.iter().any(|e| e.action == action), "{action}");
+        }
+        assert!(
+            audit.iter().all(|e| !e.target.contains("example")),
+            "no domains in the audit log"
+        );
+    }
+
+    #[test]
+    fn memory_history_filters_in_memory_and_cli_setting_changes_are_picked_up() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let now_ms = now() * 1000;
+        f.host.recent.lock().unwrap().extend([
+            record(now_ms, "ads.example", true, true),
+            record(now_ms - 1, "news.example", false, true),
+        ]);
+        // The older on/off flag keeps working: it means memory mode.
+        Store::open(&f.state)
+            .unwrap()
+            .set_setting("history", "1")
+            .unwrap();
+        f.console.prepare().unwrap();
+        assert_eq!(f.host.history_settings().mode, HistoryMode::Memory);
+        let (_, listed) = body(call(
+            &f,
+            Method::GET,
+            "/api/history?filter=blocked",
+            session,
+            "",
+            "127.0.0.1",
+        ));
+        assert_eq!(listed["mode"], "memory");
+        assert_eq!(listed["items"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["items"][0]["device"], "tablet");
+        let (_, searched) = body(call(
+            &f,
+            Method::GET,
+            "/api/history?search=tablet",
+            session,
+            "",
+            "127.0.0.1",
+        ));
+        assert_eq!(searched["items"].as_array().unwrap().len(), 2);
+
+        // `lumenctl history set` writes the settings; the writer step applies them to the daemon.
+        let store = Store::open(&f.state).unwrap();
+        store.set_setting("history_mode", "saved").unwrap();
+        store.set_setting("history_detail", "anonymous").unwrap();
+        drop(store);
+        f.console.flush_history(false).unwrap();
+        assert_eq!(
+            f.host.history_settings(),
+            HistorySettings {
+                mode: HistoryMode::Saved,
+                detail: HistoryDetail::Anonymous
+            }
+        );
+        // A new mode wins over the older flag even after it is switched off again.
+        assert_eq!(
+            call(
+                &f,
+                Method::PUT,
+                "/api/history",
+                session,
+                r#"{"enabled":false}"#,
+                "127.0.0.1"
+            )
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            Store::open(&f.state).unwrap().setting("history").unwrap(),
+            None
+        );
+        f.console.prepare().unwrap();
+        assert_eq!(f.host.history_settings().mode, HistoryMode::Off);
     }
 
     #[test]

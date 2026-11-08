@@ -49,13 +49,22 @@ pub struct Explained {
     pub generation: u64,
 }
 
-/// One entry of the opt-in, in-memory recent query list.
+pub use lumen_store::{HistoryDetail, HistoryMode};
+
+/// Current history behaviour of the daemon.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HistorySettings {
+    pub mode: HistoryMode,
+    pub detail: HistoryDetail,
+}
+
+/// One recorded lookup. `client` and `device` are `None` in anonymous mode.
 #[derive(Clone, Debug)]
 pub struct QueryRecord {
     pub unix_ms: u64,
     pub domain: String,
     pub qtype: String,
-    pub client: IpAddr,
+    pub client: Option<IpAddr>,
     pub device: Option<String>,
     pub blocked: bool,
     pub rcode: &'static str,
@@ -68,8 +77,12 @@ pub trait Host: Send + Sync + 'static {
     fn lists(&self) -> Vec<ListInfo>;
     fn explain(&self, domain: &str, client: IpAddr, unix_seconds: u64) -> Explained;
     fn uptime_secs(&self) -> u64;
-    fn history_enabled(&self) -> bool;
-    fn set_history(&self, enabled: bool);
-    /// Newest first.
+    fn history_settings(&self) -> HistorySettings;
+    /// Switching away from a mode discards what that mode still holds in memory.
+    fn set_history(&self, settings: HistorySettings);
+    /// Memory mode only: the recent lookups, newest first.
     fn history(&self, limit: usize) -> Vec<QueryRecord>;
+    /// Saved mode only: lookups waiting to be written to the database, oldest first.
+    /// Each lookup is returned once.
+    fn take_unsaved_history(&self) -> Vec<QueryRecord>;
 }

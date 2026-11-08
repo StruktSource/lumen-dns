@@ -99,8 +99,9 @@ impl RunningServer {
         let metrics = Arc::new(Metrics::default());
         let service = Arc::new(Service {
             started: std::time::Instant::now(),
-            history_on: std::sync::atomic::AtomicBool::new(false),
+            history_settings: std::sync::Mutex::default(),
             history: std::sync::Mutex::default(),
+            unsaved: std::sync::Mutex::default(),
             queries: Arc::new(Semaphore::new(config.limits.max_in_flight as usize)),
             connections: Arc::new(Semaphore::new(config.limits.max_connections as usize)),
             clients: std::sync::Mutex::default(),

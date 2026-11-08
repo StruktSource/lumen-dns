@@ -12,7 +12,29 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
+
+/// Hard cap on saved query history rows, whatever the retention says.
+pub const QUERY_LOG_MAX_ROWS: u64 = 500_000;
+/// Saved lookups are kept this many days unless an administrator chooses otherwise.
+pub const DEFAULT_RETENTION_DAYS: u32 = 7;
+/// The longest retention an administrator can choose.
+pub const MAX_RETENTION_DAYS: u32 = 90;
+
+/// Opt-in saved query history. Empty and unused unless an administrator turns it on.
+const MIGRATION_6: &str = "CREATE TABLE query_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    t INTEGER NOT NULL,
+                    domain TEXT NOT NULL,
+                    qtype TEXT NOT NULL,
+                    client TEXT,
+                    device TEXT,
+                    blocked INTEGER NOT NULL,
+                    rcode TEXT NOT NULL,
+                    micros INTEGER NOT NULL
+                );
+                CREATE INDEX query_log_t ON query_log(t);
+                PRAGMA user_version = 6;";
 
 /// Two-step verification (TOTP secret, replay guard, hashed recovery codes).
 const MIGRATION_5: &str = "ALTER TABLE users ADD COLUMN totp_secret TEXT;
@@ -168,6 +190,127 @@ impl Command {
     }
 }
 
+/// What the daemon remembers about lookups. Off by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HistoryMode {
+    /// Nothing is recorded. Only aggregate counters exist.
+    #[default]
+    Off,
+    /// The last 1,000 lookups, in memory only. Never written to disk.
+    Memory,
+    /// Lookups are saved to the state database until the retention period ends.
+    Saved,
+}
+
+impl HistoryMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Memory => "memory",
+            Self::Saved => "saved",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "memory" => Some(Self::Memory),
+            "saved" => Some(Self::Saved),
+            _ => None,
+        }
+    }
+}
+
+/// How much about the person behind a lookup is recorded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HistoryDetail {
+    /// Domain, type, result and timing only. No client address or device.
+    Anonymous,
+    /// Also the client address and the device name.
+    #[default]
+    Full,
+}
+
+impl HistoryDetail {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Anonymous => "anonymous",
+            Self::Full => "full",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "anonymous" => Some(Self::Anonymous),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+}
+
+/// Saved history choices: what to record, how detailed, and for how long.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryPrefs {
+    pub mode: HistoryMode,
+    pub detail: HistoryDetail,
+    /// How long saved lookups are kept, 1 to [`MAX_RETENTION_DAYS`].
+    pub retention_days: u32,
+}
+
+impl Default for HistoryPrefs {
+    fn default() -> Self {
+        Self {
+            mode: HistoryMode::Off,
+            detail: HistoryDetail::Full,
+            retention_days: DEFAULT_RETENTION_DAYS,
+        }
+    }
+}
+
+/// One saved lookup. `client` and `device` are `None` in anonymous mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryRow {
+    /// Unix time in milliseconds.
+    pub t: u64,
+    pub domain: String,
+    pub qtype: String,
+    pub client: Option<String>,
+    pub device: Option<String>,
+    pub blocked: bool,
+    pub rcode: String,
+    pub micros: u64,
+}
+
+/// A saved lookup with its row ID, used to page through history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredQuery {
+    pub id: i64,
+    pub row: QueryRow,
+}
+
+/// Which saved lookups to return. Newest first.
+#[derive(Clone, Debug, Default)]
+pub struct QueryFilter<'a> {
+    /// Case-insensitive text found in the domain, device or client address.
+    pub search: Option<&'a str>,
+    pub blocked: Option<bool>,
+    /// Only rows older than this ID, for paging.
+    pub before_id: Option<i64>,
+    pub limit: u16,
+}
+
+/// Size of the saved query history.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QueryLogSummary {
+    pub rows: u64,
+    pub oldest_ms: Option<u64>,
+    pub newest_ms: Option<u64>,
+}
+
 pub struct Store {
     connection: Connection,
 }
@@ -274,6 +417,11 @@ impl Store {
         if version < 5 {
             transaction
                 .execute_batch(MIGRATION_5)
+                .map_err(database_error)?;
+        }
+        if version < 6 {
+            transaction
+                .execute_batch(MIGRATION_6)
                 .map_err(database_error)?;
         }
         transaction.commit().map_err(database_error)
@@ -714,6 +862,181 @@ impl Store {
             )
             .map_err(database_error)?;
         Ok(())
+    }
+
+    /// Save a batch of lookups in one transaction.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn insert_queries(&mut self, rows: &[QueryRow]) -> Result<(), String> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let transaction = self.connection.transaction().map_err(database_error)?;
+        {
+            let mut statement = transaction
+                .prepare_cached(
+                    "INSERT INTO query_log(t, domain, qtype, client, device, blocked, rcode, micros)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .map_err(database_error)?;
+            for row in rows {
+                statement
+                    .execute(params![
+                        row.t,
+                        row.domain,
+                        row.qtype,
+                        row.client,
+                        row.device,
+                        row.blocked,
+                        row.rcode,
+                        row.micros
+                    ])
+                    .map_err(database_error)?;
+            }
+        }
+        transaction.commit().map_err(database_error)
+    }
+
+    /// Read saved lookups, newest first.
+    ///
+    /// # Errors
+    /// Returns an error when `limit` is not 1-1000 or database access fails.
+    pub fn query_log(&self, filter: &QueryFilter<'_>) -> Result<Vec<StoredQuery>, String> {
+        if !(1..=1000).contains(&filter.limit) {
+            return Err("limit must be 1-1000".into());
+        }
+        let search = filter.search.map(str::to_lowercase).unwrap_or_default();
+        let blocked: Option<i64> = filter.blocked.map(i64::from);
+        let mut statement = self
+            .connection
+            .prepare_cached(
+                "SELECT id, t, domain, qtype, client, device, blocked, rcode, micros
+                 FROM query_log
+                 WHERE (?1 = '' OR instr(lower(domain || ' ' || ifnull(device, '') || ' ' || ifnull(client, '')), ?1) > 0)
+                   AND (?2 IS NULL OR blocked = ?2)
+                   AND (?3 IS NULL OR id < ?3)
+                 ORDER BY id DESC LIMIT ?4",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map(
+                params![search, blocked, filter.before_id, filter.limit],
+                |row| {
+                    Ok(StoredQuery {
+                        id: row.get(0)?,
+                        row: QueryRow {
+                            t: row.get(1)?,
+                            domain: row.get(2)?,
+                            qtype: row.get(3)?,
+                            client: row.get(4)?,
+                            device: row.get(5)?,
+                            blocked: row.get(6)?,
+                            rcode: row.get(7)?,
+                            micros: row.get(8)?,
+                        },
+                    })
+                },
+            )
+            .map_err(database_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
+    }
+
+    /// How many lookups are saved and how far back they go.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn query_log_summary(&self) -> Result<QueryLogSummary, String> {
+        self.connection
+            .query_row(
+                "SELECT count(*), min(t), max(t) FROM query_log",
+                [],
+                |row| {
+                    Ok(QueryLogSummary {
+                        rows: row.get(0)?,
+                        oldest_ms: row.get(1)?,
+                        newest_ms: row.get(2)?,
+                    })
+                },
+            )
+            .map_err(database_error)
+    }
+
+    /// Delete lookups older than `cutoff_ms`, then the oldest rows beyond `max_rows`.
+    /// Returns how many rows were removed.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn prune_query_log(&self, cutoff_ms: u64, max_rows: u64) -> Result<u64, String> {
+        let by_age = self
+            .connection
+            .execute("DELETE FROM query_log WHERE t < ?1", [cutoff_ms])
+            .map_err(database_error)?;
+        let by_size = self
+            .connection
+            .execute(
+                "DELETE FROM query_log WHERE id <= (SELECT id FROM query_log ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+                [max_rows],
+            )
+            .map_err(database_error)?;
+        Ok((by_age + by_size) as u64)
+    }
+
+    /// Delete every saved lookup. Returns how many rows were removed.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn clear_query_log(&self) -> Result<u64, String> {
+        let removed = self
+            .connection
+            .execute("DELETE FROM query_log", [])
+            .map_err(database_error)?;
+        Ok(removed as u64)
+    }
+
+    /// The history choices. The older `history` flag means memory mode until a mode is chosen.
+    /// Unreadable or out-of-range values fall back to the private defaults.
+    #[must_use]
+    pub fn history_prefs(&self) -> HistoryPrefs {
+        let get = |key: &str| self.setting(key).ok().flatten();
+        let mode = get("history_mode")
+            .as_deref()
+            .and_then(HistoryMode::parse)
+            .unwrap_or_else(|| {
+                if get("history").as_deref() == Some("1") {
+                    HistoryMode::Memory
+                } else {
+                    HistoryMode::Off
+                }
+            });
+        let detail = get("history_detail")
+            .as_deref()
+            .and_then(HistoryDetail::parse)
+            .unwrap_or_default();
+        let retention_days = get("history_days")
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|days| (1..=MAX_RETENTION_DAYS).contains(days))
+            .unwrap_or(DEFAULT_RETENTION_DAYS);
+        HistoryPrefs {
+            mode,
+            detail,
+            retention_days,
+        }
+    }
+
+    /// Save the history choices.
+    ///
+    /// # Errors
+    /// Rejects a retention outside 1-90 days or a failed database write.
+    pub fn set_history_prefs(&self, prefs: &HistoryPrefs) -> Result<(), String> {
+        if !(1..=MAX_RETENTION_DAYS).contains(&prefs.retention_days) {
+            return Err(format!("retention must be 1-{MAX_RETENTION_DAYS} days"));
+        }
+        self.set_setting("history_mode", prefs.mode.as_str())?;
+        self.set_setting("history_detail", prefs.detail.as_str())?;
+        self.set_setting("history_days", &prefs.retention_days.to_string())?;
+        // The older flag must not bring a switched-off history back.
+        self.clear_setting("history")
     }
 
     /// Applied configuration revisions, newest first.
@@ -1564,5 +1887,214 @@ mod tests {
         assert_eq!(store.config().unwrap().unwrap().revision, 7);
         assert_eq!(store.config_history(5).unwrap()[0].revision, 7);
         assert_eq!(store.user_count().unwrap(), 0);
+    }
+
+    fn row(t: u64, domain: &str, blocked: bool, client: Option<&str>) -> QueryRow {
+        QueryRow {
+            t,
+            domain: domain.into(),
+            qtype: "A".into(),
+            client: client.map(Into::into),
+            device: client.map(|_| "tablet".to_owned()),
+            blocked,
+            rcode: if blocked { "NXDOMAIN" } else { "NOERROR" }.into(),
+            micros: 1500,
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Scenario test reads top to bottom.
+    fn query_log_saves_filters_pages_prunes_and_clears() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("state.db")).unwrap();
+        assert_eq!(
+            store.query_log_summary().unwrap(),
+            QueryLogSummary::default()
+        );
+        store
+            .insert_queries(&[
+                row(1_000, "old.example", false, None),
+                row(2_000, "ads.example", true, Some("192.0.2.10")),
+                row(3_000, "News.Example", false, Some("192.0.2.11")),
+            ])
+            .unwrap();
+        store.insert_queries(&[]).unwrap();
+        let summary = store.query_log_summary().unwrap();
+        assert_eq!(
+            (summary.rows, summary.oldest_ms, summary.newest_ms),
+            (3, Some(1_000), Some(3_000))
+        );
+
+        let all = store
+            .query_log(&QueryFilter {
+                limit: 10,
+                ..QueryFilter::default()
+            })
+            .unwrap();
+        let domains: Vec<_> = all.iter().map(|q| q.row.domain.as_str()).collect();
+        assert_eq!(domains, ["News.Example", "ads.example", "old.example"]);
+        // Anonymous rows keep no client or device.
+        assert_eq!(all[2].row.client, None);
+        assert_eq!(all[2].row.device, None);
+
+        let blocked = store
+            .query_log(&QueryFilter {
+                blocked: Some(true),
+                limit: 10,
+                ..QueryFilter::default()
+            })
+            .unwrap();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].row.domain, "ads.example");
+
+        // Case-insensitive search across domain, device and client.
+        for needle in ["NEWS", "tablet", "192.0.2.11"] {
+            let found = store
+                .query_log(&QueryFilter {
+                    search: Some(needle),
+                    limit: 10,
+                    ..QueryFilter::default()
+                })
+                .unwrap();
+            assert!(
+                found.iter().any(|q| q.row.domain == "News.Example"),
+                "{needle}"
+            );
+        }
+        // LIKE wildcards are literal text, not patterns.
+        assert!(
+            store
+                .query_log(&QueryFilter {
+                    search: Some("%"),
+                    limit: 10,
+                    ..QueryFilter::default()
+                })
+                .unwrap()
+                .is_empty()
+        );
+
+        // Paging: next page starts after the last ID of the first.
+        let first = store
+            .query_log(&QueryFilter {
+                limit: 2,
+                ..QueryFilter::default()
+            })
+            .unwrap();
+        let next = store
+            .query_log(&QueryFilter {
+                limit: 2,
+                before_id: Some(first[1].id),
+                ..QueryFilter::default()
+            })
+            .unwrap();
+        assert_eq!((first.len(), next.len()), (2, 1));
+        assert_eq!(next[0].row.domain, "old.example");
+        assert!(
+            store
+                .query_log(&QueryFilter {
+                    limit: 0,
+                    ..QueryFilter::default()
+                })
+                .is_err()
+        );
+        assert!(
+            store
+                .query_log(&QueryFilter {
+                    limit: 1001,
+                    ..QueryFilter::default()
+                })
+                .is_err()
+        );
+
+        // Retention by age, then the row cap keeps only the newest rows.
+        assert_eq!(store.prune_query_log(1_500, 100).unwrap(), 1);
+        assert_eq!(store.prune_query_log(0, 1).unwrap(), 1);
+        let left = store
+            .query_log(&QueryFilter {
+                limit: 10,
+                ..QueryFilter::default()
+            })
+            .unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].row.domain, "News.Example");
+
+        assert_eq!(store.clear_query_log().unwrap(), 1);
+        assert_eq!(store.query_log_summary().unwrap().rows, 0);
+    }
+
+    #[test]
+    fn schema_five_upgrades_to_six_without_touching_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.set_setting("history", "1").unwrap();
+        }
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE query_log; PRAGMA user_version = 5;")
+            .unwrap();
+        drop(connection);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.setting("history").unwrap().as_deref(), Some("1"));
+        assert_eq!(
+            store.history_prefs().mode,
+            HistoryMode::Memory,
+            "older flag"
+        );
+        assert_eq!(store.query_log_summary().unwrap().rows, 0);
+        let version: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn history_prefs_default_private_validate_and_replace_the_older_flag() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("state.db")).unwrap();
+        assert_eq!(store.history_prefs(), HistoryPrefs::default());
+        assert_eq!(store.history_prefs().mode, HistoryMode::Off);
+        assert_eq!(store.history_prefs().retention_days, 7);
+
+        store.set_setting("history", "1").unwrap();
+        assert_eq!(store.history_prefs().mode, HistoryMode::Memory);
+
+        let saved = HistoryPrefs {
+            mode: HistoryMode::Saved,
+            detail: HistoryDetail::Anonymous,
+            retention_days: 30,
+        };
+        store.set_history_prefs(&saved).unwrap();
+        assert_eq!(store.history_prefs(), saved);
+        assert_eq!(store.setting("history").unwrap(), None);
+        store
+            .set_history_prefs(&HistoryPrefs {
+                mode: HistoryMode::Off,
+                ..saved
+            })
+            .unwrap();
+        assert_eq!(
+            store.history_prefs().mode,
+            HistoryMode::Off,
+            "flag stays gone"
+        );
+
+        for days in [0, 91, u32::MAX] {
+            assert!(
+                store
+                    .set_history_prefs(&HistoryPrefs {
+                        retention_days: days,
+                        ..saved
+                    })
+                    .is_err()
+            );
+        }
+        // Garbage in the database falls back to the private defaults.
+        store.set_setting("history_mode", "forever").unwrap();
+        store.set_setting("history_detail", "x").unwrap();
+        store.set_setting("history_days", "9999").unwrap();
+        assert_eq!(store.history_prefs(), HistoryPrefs::default());
     }
 }

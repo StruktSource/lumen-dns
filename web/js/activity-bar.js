@@ -18,7 +18,7 @@ L.runPendingBundle = async () => {
     for (const c of L.catalog.items.filter(c => bundle.ids.includes(c.id) && !have.has(c.id))) cfg.filtering.lists.push({ id: c.id, format: c.format, url: c.url, path: '', text: '', category: '', refresh_secs: 86400 });
     for (const p of cfg.filtering.profiles) if (p.lists.length) p.lists = [...new Set([...p.lists, ...bundle.ids])];
     await L.api('PUT', '/api/config', L.toServer(cfg)); sessionStorage.removeItem('lumen.act.dismissed'); L.activity.poke();
-  } catch (e) { L.toast('Could not start installing the block lists: ' + e.message, 'bad'); }
+  } catch (e) { L.toast(L.t('Could not start installing the block lists: {error}', { error: e.message }), 'bad'); }
 };
 
 function render(a) {
@@ -26,7 +26,7 @@ function render(a) {
   const show = busy || failed || (a.lists.some(l => l.state === 'downloading' || l.state === 'parsing'));
   if (!show) { panel?.remove(); panel = null; return; }
   const title = failed ? 'Not applied' : a.phase === 'starting' ? 'Restarting DNS' : 'Working on it';
-  const rows = a.lists.map(l => { const pct = l.total ? Math.min(100, l.bytes / l.total * 100) : null; const sub = l.state === 'downloading' ? (l.total ? `${mb(l.bytes)} of ${mb(l.total)}` : l.bytes ? mb(l.bytes) : 'connecting…') : l.state === 'ready' ? F.n(l.rules) + ' rules' : l.state === 'failed' ? (l.error || 'failed') : STATE[l.state];
+  const rows = a.lists.map(l => { const pct = l.total ? Math.min(100, l.bytes / l.total * 100) : null; const sub = l.state === 'downloading' ? (l.total ? L.t('{a} of {b}', { a: mb(l.bytes), b: mb(l.total) }) : l.bytes ? mb(l.bytes) : 'connecting…') : l.state === 'ready' ? L.t('{n} rules', { n: F.n(l.rules) }) : l.state === 'failed' ? (l.error || 'failed') : STATE[l.state];
     return h('li', { class: 'act-' + l.state }, h('div', { class: 'act-row' }, h('b', { class: 'mono' }, l.id), h('span', {}, sub)), h('div', { class: 'bar' + (l.state === 'downloading' && pct == null ? ' ind' : ''), role: 'progressbar', 'aria-label': l.id, 'aria-valuenow': pct == null ? null : Math.round(pct) }, h('i', { style: `width:${l.state === 'ready' ? 100 : l.state === 'parsing' ? 100 : pct ?? 35}%` }))); });
   const next = h('aside', { id: 'actbar', class: 'actbar' + (failed ? ' bad' : '') + (collapsed ? ' min' : ''), role: failed ? 'alert' : 'status', 'aria-live': 'polite' },
     h('div', { class: 'act-h' }, busy ? h('i', { class: 'spin', 'aria-hidden': 'true' }) : null, h('strong', {}, title), h('span', { class: 'sp' }), h('button', { class: 'linkish', type: 'button', onclick: () => { collapsed = !collapsed; render(a); } }, collapsed ? 'Show' : 'Hide')),
@@ -43,7 +43,7 @@ async function tick() {
       if (a.phase === 'idle' && s.pending_revision != null) { a.phase = 'checking'; a.message = a.message || 'Applying your changes'; }
       render(a); delay = busy ? 1000 : 8000;
       if (wasBusy && !busy) {
-        if (a.phase === 'done') { const n = a.lists.filter(l => l.state === 'ready').length; L.toast(n ? `Done. ${n} block list${n > 1 ? 's' : ''} loaded, ${F.n(a.lists.reduce((x, l) => x + l.rules, 0))} rules in total.` : a.message, 'ok'); if (L.pendingBundle()) localStorage.removeItem('lumen.pendingBundle'); L.S.draft || L.loadConfig().catch(() => {}); if (L.route().page === 'filtering') L.rerender(); }
+        if (a.phase === 'done') { const n = a.lists.filter(l => l.state === 'ready').length; L.toast(n ? L.t(n > 1 ? 'Done. {n} block lists loaded, {rules} rules in total.' : 'Done. 1 block list loaded, {rules} rules in total.', { n, rules: F.n(a.lists.reduce((x, l) => x + l.rules, 0)) }) : a.message, 'ok'); if (L.pendingBundle()) localStorage.removeItem('lumen.pendingBundle'); L.S.draft || L.loadConfig().catch(() => {}); if (L.route().page === 'filtering') L.rerender(); }
         else if (a.phase === 'failed') L.toast(a.message || 'The change was not applied.', 'bad');
       }
       wasBusy = busy;
