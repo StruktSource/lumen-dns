@@ -1,19 +1,22 @@
 # 🌱 Code of conduct
 
-Lumen is a respectful, practical, inclusive contributor space.
+Lumen is a respectful, practical, and inclusive space for contributors and users. This applies to issues, pull requests, discussions, and any other project space.
 
-## Expected
+## What we expect
 
 - Be kind, specific, and constructive.
-- Discuss code and ideas, not a person’s worth or identity.
+- Discuss code and ideas, not a person's worth or identity.
 - Respect privacy and security boundaries.
+- Assume good intent, and ask when something is unclear.
 
-## Not acceptable
+## What is not acceptable
 
-Harassment, discrimination, threats, personal attacks, doxxing, sexualized
-language, and deliberate disruption are not welcome.
+Harassment, discrimination, threats, personal attacks, doxxing, sexualized language, and deliberate disruption are not welcome.
 
-## Reporting
+## Reporting a problem
 
-Report concerns privately to maintainers. Do not post personal details publicly.
-Maintainers may warn, remove content, or restrict participation for safety.
+Report concerns **privately** to the maintainers. Please do not post personal details publicly.
+
+## What maintainers may do
+
+Maintainers may warn, remove content, or restrict participation to keep the space safe.

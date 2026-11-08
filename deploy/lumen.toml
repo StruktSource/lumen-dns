@@ -1,5 +1,5 @@
 # Lumen deployment defaults. Private-network DNS with blank UI hosting.
-# Full reference: ../docs/configuration.md
+# Full reference: ../docs/reference/configuration.md
 schema_version = 1
 # Optional local aggregate metrics. Disabled by default.
 # metrics = "127.0.0.1:9153"
@@ -27,7 +27,7 @@ allow_clients = [
     "192.168.0.0/16",
     "fc00::/7"
 ]
-# Optional encrypted listener example. See ../docs/resolver.md.
+# Optional encrypted listener example. See ../docs/guides/encrypted-dns.md.
 # dot = ["127.0.0.1:8853", "[::1]:8853"]
 # doh = ["127.0.0.1:8443", "[::1]:8443"]
 # doq = ["127.0.0.1:8853", "[::1]:8853"]
@@ -80,7 +80,7 @@ attempts = 1
 # server_name = "cloudflare-dns.com"
 # doh_path = "/dns-query" # HTTPS only; defaults to /dns-query.
 
-# Shared work and network bounds. See ../docs/configuration.md#limits.
+# Shared work and network bounds. See ../docs/reference/configuration.md#limits.
 [limits]
 max_in_flight = 128
 max_connections = 64

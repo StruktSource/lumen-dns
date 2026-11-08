@@ -1,9 +1,17 @@
-# Performance snapshots
+# Performance
 
-The idle snapshots are local measurements, not throughput or latency benchmarks;
-no DNS requests were sent for them. The newest section below measures cold-cache
-latency with real queries. The computer was not a dedicated server and other system
-activity was not controlled. Results are specific to each run.
+Measurements of how Lumen performs, with the method and the limits of each one.
+
+> [!NOTE]
+> **The short version.** Lumen is small: an idle process uses roughly 9 MiB of memory and no measurable CPU, and the release binary is about 11.5 MiB. Lumen has **no verified production throughput or latency claim yet**. The measurements below are snapshots from one machine, not guarantees.
+
+| Question | Answer | Details |
+| :--- | :--- | :--- |
+| How much memory does it idle at? | About 9 MiB (8.98 MiB without filtering, 9.37 MiB with a small active filter) | [Phase 2 comparison](#2026-10-30--phase-2-filtering-comparison) |
+| Do the recursion speed-ups work? | Shared recursion clearly helped identical-query bursts. A cold single-query gain was **not** statistically significant | [Cold-cache A/B](#2026-10-31--cold-cache-recursion-ab-issue-9) |
+| How much memory do big block lists need? | About 19 MiB for Hagezi Pro, about 150 MiB for roughly 2.4 million rules | [Filtering guide](../guides/filtering.md#limits-and-memory) |
+
+The idle snapshots are local measurements, not throughput or latency benchmarks; no DNS requests were sent for them. The cold-cache section measures latency with real queries. The computer was not a dedicated server and other system activity was not controlled. Results are specific to each run.
 
 ## 2026-10-31 — Cold-cache recursion A/B (Issue #9)
 
