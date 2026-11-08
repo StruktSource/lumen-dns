@@ -1032,7 +1032,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "lumen"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "lumen-api",
  "lumen-config",
@@ -1043,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-api"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "lumen-config",
  "lumen-filter",
@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-config"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "ipnet",
  "lumen-filter",
@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-core"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "base64",
  "bytes",
@@ -1096,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-filter"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "ipnet",
  "lumen-proto",
@@ -1113,14 +1113,14 @@ dependencies = [
 
 [[package]]
 name = "lumen-proto"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "hickory-proto",
 ]
 
 [[package]]
 name = "lumen-resolver"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "async-trait",
  "hickory-server",
@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-store"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "lumen-filter",
  "ring",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-web"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "bytes",
  "http-body-util",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "lumenctl"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "lumen-config",
  "lumen-core",

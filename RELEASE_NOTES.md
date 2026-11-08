@@ -1,15 +1,12 @@
-# Lumen 0.5.5
+# Lumen 0.5.6
 
-Lumen 0.5.5 is a major pre-release step since 0.1.3. It adds a usable local web console and makes release packages easier to check and install.
+Lumen 0.5.6 is a release-pipeline update on top of 0.5.5. The application itself is unchanged.
 
 ## Highlights
 
-- Built-in console for setup, accounts, roles, optional TOTP, filtering, devices, DNS settings, audit events, and recent activity.
-- Guided filter-list setup and faster loading of very large lists.
-- DNSSEC recursion fix for parent and child zones that share name servers.
-- Six native packages: Linux, macOS, and Windows on x64 and ARM64.
-- Multi-architecture OCI image for Linux amd64 and arm64.
-- Packages now carry deployment files, documentation, checksums, and a file manifest.
+- Step-by-step publishing: each platform package and each container architecture is published as soon as it is built and tested, so finished downloads are available while slower platforms complete.
+- Container images are built and tested natively on amd64 and arm64.
+- `SHA256SUMS` now uses Unix line endings, so `sha256sum --check` works for the Windows archives too.
 
 ## Check the download
 
@@ -17,16 +14,17 @@ Download the archive for your system plus `SHA256SUMS`, then run:
 
 ```sh
 sha256sum --check SHA256SUMS --ignore-missing
-gh attestation verify lumen-v0.5.5-<platform>.<extension> --repo StruktSource/lumen-dns
+gh attestation verify lumen-v0.5.6-<platform>.<extension> --repo StruktSource/lumen-dns
 ```
 
 On macOS, use `shasum -a 256 -c` with the matching `.sha256` file if `sha256sum` is not installed.
 
+While a release is still publishing, its page lists only the platforms that are ready. `SHA256SUMS` and the final `latest` image tag appear last.
+
 ## Upgrade notes
 
-- Back up `state.db`, configuration, local lists, TLS keys, and custom trust anchors.
+- No configuration or data changes since 0.5.5.
 - Replace both `lumen` and `lumenctl` from the same archive.
-- Container and Helm users should pin image tag `0.5.5`.
-- Read the deployment guide in the archive before starting the new build.
+- Container and Helm users should pin image tag `0.5.6`.
 
 Lumen remains pre-release software. Test it on the target network before wider use. See `CHANGELOG.md` for the full summary.
