@@ -193,7 +193,9 @@ def main() -> None:
     except ValueError as error:
         parser.error(str(error))
     checksum = archive.with_name(f"{archive.name}.sha256")
-    checksum.write_text(f"{digest(archive)}  {archive.name}\n", encoding="utf-8")
+    # newline="\n" keeps LF on Windows runners so SHA256SUMS verifies everywhere.
+    with checksum.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(f"{digest(archive)}  {archive.name}\n")
 
 
 if __name__ == "__main__":

@@ -1,13 +1,13 @@
 # Linux bare metal
 
-Download the `v0.5.5` archive that matches `linux-amd64` or `linux-arm64`, plus
+Download the `v0.5.6` archive that matches `linux-amd64` or `linux-arm64`, plus
 `SHA256SUMS`, from the GitHub release. Verify it before install:
 
 ```sh
 sha256sum --check SHA256SUMS --ignore-missing
-gh attestation verify lumen-v0.5.5-linux-amd64.tar.gz --repo StruktSource/lumen-dns
-tar -xzf lumen-v0.5.5-linux-amd64.tar.gz
-cd lumen-v0.5.5
+gh attestation verify lumen-v0.5.6-linux-amd64.tar.gz --repo StruktSource/lumen-dns
+tar -xzf lumen-v0.5.6-linux-amd64.tar.gz
+cd lumen-v0.5.6
 ./lumen --version
 ./lumenctl --version
 ```
