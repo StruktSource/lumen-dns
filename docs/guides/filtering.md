@@ -43,6 +43,8 @@ Open **Filtering → Lists** and use **Quick install**. It offers the large publ
 
 Three bundles (**Recommended**, **Light**, **Strict**) install a sensible combination in one click. A list installs as an ordinary list with a daily refresh, and nothing downloads until you apply. Profiles that limit themselves to named lists get the new lists added so they take effect. The page also flags any list the default profile does not use.
 
+Installing and removing lists takes effect **right away, in the background**. You confirm, Lumen downloads, and blocking starts when the lists are ready. DNS keeps working, and lists you already have are not downloaded again. You can cancel from the progress panel; nothing changes if you do.
+
 ### In the config file
 
 Each `[[filtering.lists]]` needs a unique `id`, a `format`, and exactly one source: `path`, `url`, or `text`.

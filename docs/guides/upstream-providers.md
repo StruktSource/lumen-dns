@@ -32,11 +32,54 @@ transport_priority = ["quic", "https", "tls"]
 | `encryption` | Auto mode only. Defaults to, and only accepts, `required`. There is no plaintext policy. |
 | `transport_priority` | Auto mode only. An ordered, unique subset of `quic`, `https`, `tls`. Default order: QUIC, HTTPS, TLS. |
 
-You can select several providers and mix them with custom `[[resolver.upstreams]]`. Custom entries are appended after the presets, in the order written, and the total stays at **most eight endpoints**. Automatic and explicit preset transports cannot be mixed in one config.
+## Use several providers
+
+Choose **up to 8 providers**, and add up to 8 custom `[[resolver.upstreams]]` next to them. The order you write the `providers` is their **rank**, and custom upstreams rank after them. A provider can be selected only once. Automatic and explicit transports cannot be mixed in one config, and a provider with no encrypted transport (such as `dns-watch`) cannot be used with `auto`.
+
+```toml
+[resolver]
+mode = "forward"
+strategy = "failover"        # failover | fastest | round_robin | race
+
+[[resolver.providers]]       # rank 1
+id = "quad9-unfiltered"
+protocol = "auto"
+
+[[resolver.providers]]       # rank 2
+id = "cloudflare-unfiltered"
+protocol = "auto"
+
+[[resolver.providers]]       # rank 3
+id = "dns4eu-unfiltered"
+protocol = "auto"
+```
+
+In the web console this is **DNS settings → Upstreams**: add providers, move them up and down to rank them, and pick how they are used.
+
+### Choose a strategy
+
+| `strategy` | What happens | Who sees your lookups |
+| :--- | :--- | :--- |
+| `failover` (ranked fallback) | The first provider answers. The next is used only when it does not respond. | One provider at a time |
+| `fastest` | The provider that answered fastest recently takes the query. | Mostly the fastest provider |
+| `round_robin` | Each query goes to the next provider in turn, so load and exposure are spread evenly. | Every provider sees a share |
+| `race` | Every provider gets every query at once, and the first answer wins. | **Every provider sees every lookup** |
+
+If you do not set a strategy, the older behavior stays: `failover` for automatic transports, `fastest` otherwise. With a single provider there is nothing to choose between.
+
+If you know load balancing from other filter apps: *Load balancing* corresponds to `round_robin` or `fastest` here, and *Parallel requests* corresponds to `race`. Random, weighted spreading is not offered yet.
 
 ### How failover works
 
-Lumen tries the next encrypted endpoint only after a **connection, transport, or timeout** failure. A DNS answer, including NXDOMAIN or SERVFAIL, ends the attempt, and so does a local DNSSEC failure. `attempts`, `upstream_timeout_ms`, and the overall query deadline still apply. Certificate chain and hostname checks always stay on, and selection never probes public services at startup.
+Each provider is its own forwarder with its own timeout. Lumen moves to the next provider only after a **connection, transport, or timeout** failure. A DNS answer, including NXDOMAIN or SERVFAIL, and a local DNSSEC failure, ends the lookup: another provider is never asked for a different answer.
+
+- A provider that **just failed** is left alone for 10 seconds and then tried again at its rank, so every query does not wait for it. If every provider fails, all of them are tried again.
+- A provider that accepts connections but never answers costs **one timeout** (`upstream_timeout_ms`, 2 seconds by default) the first time. Lower it if you want quicker fallback.
+- When several providers are in use, each gets one attempt per query; the next provider is the retry. A single provider keeps `attempts` retries.
+- Within one provider, `auto` still tries its transports in order (QUIC, then HTTPS, then TLS) as before. **Known limit:** if a provider's *first* transport is silently blocked (for example a firewall that drops QUIC), that provider can fail as a whole instead of moving on to its next transport. Other providers still answer. Until this is improved, choose HTTPS or TLS for that provider on such a network.
+- `race` is the fastest but the least private. `round_robin` and `failover` send each lookup to one provider, `race` sends it to all.
+
+Certificate chain and hostname checks always stay on, and selection never probes public services at startup.
 
 ## Included providers
 

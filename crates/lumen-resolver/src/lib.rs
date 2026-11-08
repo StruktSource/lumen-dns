@@ -29,7 +29,7 @@ use hickory_server::{
         MessageResponse, Nsec3QueryInfo, ZoneHandler, ZoneType,
     },
 };
-use lumen_config::{Config, Mode, UpstreamProtocol, read_bounded};
+use lumen_config::{Config, ForwardStrategy, Mode, UpstreamProtocol, read_bounded};
 use lumen_proto::Query;
 use std::{
     fmt::Write,
@@ -44,6 +44,7 @@ use std::{
 use tokio::time::timeout;
 
 mod accel;
+mod forward;
 
 pub use hickory_server::net::xfer::Protocol as Transport;
 
@@ -256,7 +257,7 @@ impl Resolver {
         options.positive_max_ttl = Some(Duration::from_secs(u64::from(settings.positive_ttl_secs)));
         options.negative_max_ttl = Some(Duration::from_secs(u64::from(settings.negative_ttl_secs)));
         let (handler, background) = match settings.mode {
-            Mode::Forward => (forward_zone(settings, options, anchors)?, None),
+            Mode::Forward => (forward_zone(settings, &options, anchors.as_ref())?, None),
             Mode::Recursive => {
                 let (handler, background) =
                     recursive_zone(settings, &options, anchors, Arc::clone(&metrics))?;
@@ -334,14 +335,49 @@ impl Resolver {
 
 fn forward_zone(
     settings: &lumen_config::Resolver,
-    options: ResolverOpts,
-    anchors: Option<Arc<TrustAnchors>>,
+    options: &ResolverOpts,
+    anchors: Option<&Arc<TrustAnchors>>,
 ) -> Result<Arc<dyn ZoneHandler>, String> {
-    let resolver = forward_resolver(settings, &settings.upstreams, options, anchors)?;
+    // Without a strategy the older behavior stays: one forwarder over every address.
+    let (strategy, groups) = match settings.strategy {
+        Some(strategy) => (
+            strategy,
+            group_sizes(&settings.provider_groups, settings.upstreams.len()),
+        ),
+        None => (ForwardStrategy::Failover, vec![settings.upstreams.len()]),
+    };
+    let mut members = Vec::new();
+    let mut start = 0;
+    for size in groups.iter().copied().filter(|&size| size > 0) {
+        let mut member_options = options.clone();
+        if groups.len() > 1 {
+            // Another provider is the retry, so a silent one costs one timeout, not two.
+            member_options.attempts = 1;
+        }
+        members.push(forward_resolver(
+            settings,
+            &settings.upstreams[start..start + size],
+            member_options,
+            anchors.cloned(),
+        )?);
+        start += size;
+    }
+    let penalty = Duration::from_millis(u64::from(settings.upstream_timeout_ms));
     Ok(Arc::new(ResolutionZone {
         origin: Name::root().into(),
-        backend: Backend::Forward(Box::new(resolver)),
+        backend: Backend::Forward(Box::new(forward::ForwardPool::new(
+            members, strategy, penalty,
+        ))),
     }))
+}
+
+/// Sizes of the groups that `count` upstreams form, one group per provider and then one per
+/// custom upstream. `provider_groups` lists the provider groups in rank order.
+fn group_sizes(provider_groups: &[usize], count: usize) -> Vec<usize> {
+    let mut groups = provider_groups.to_vec();
+    let used: usize = groups.iter().sum();
+    groups.extend(std::iter::repeat_n(1, count.saturating_sub(used)));
+    groups
 }
 
 fn forward_resolver(
@@ -559,7 +595,7 @@ enum Backend<P: hickory_server::net::runtime::RuntimeProvider> {
         fallback: Option<FallbackBackend<P>>,
         accel: Arc<Accel>,
     },
-    Forward(Box<hickory_server::resolver::Resolver<P>>),
+    Forward(Box<forward::ForwardPool<P>>),
 }
 struct FallbackBackend<P: hickory_server::net::runtime::RuntimeProvider> {
     resolver: Box<hickory_server::resolver::Resolver<P>>,
@@ -583,7 +619,7 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
     fn can_validate_dnssec(&self) -> bool {
         match &self.backend {
             Backend::Recursive { recursor, .. } => recursor.is_validating(),
-            Backend::Forward(resolver) => resolver.options().validate,
+            Backend::Forward(pool) => pool.validates(),
         }
     }
     fn origin(&self) -> &LowerName {
@@ -706,7 +742,7 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
                     },
                 },
             },
-            Backend::Forward(resolver) => resolver
+            Backend::Forward(pool) => pool
                 .lookup(Name::from(name), rtype)
                 .await
                 .map(AuthLookup::from)

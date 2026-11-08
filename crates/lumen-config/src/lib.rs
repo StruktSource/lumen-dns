@@ -161,6 +161,33 @@ pub enum Mode {
     Forward,
 }
 
+/// Most bundled providers a forward-mode config may select.
+pub const MAX_PROVIDERS: usize = 8;
+/// Most custom upstreams, next to any providers.
+pub const MAX_CUSTOM_UPSTREAMS: usize = 8;
+/// Most endpoints (addresses and transports) all providers and upstreams may expand to.
+pub const MAX_FORWARD_ENDPOINTS: usize = 128;
+
+/// How forward mode spreads queries across its providers and upstreams.
+///
+/// The order of `providers` is their rank. Custom upstreams rank after the providers.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ForwardStrategy {
+    /// Ranked fallback: the first provider answers, and the next one is used only when it
+    /// fails (connection error or timeout). A DNS answer such as NXDOMAIN is final.
+    Failover,
+    /// Fastest first: providers are ordered by how quickly they recently answered, so the
+    /// fastest takes the query and the others stand by.
+    Fastest,
+    /// Round-robin: each new query starts at the next provider in turn, spreading queries
+    /// evenly. A failing provider is skipped for that query.
+    RoundRobin,
+    /// Race: every provider gets every query at the same time and the first answer wins.
+    /// The fastest possible answer, but all providers see every lookup.
+    Race,
+}
+
 /// DNSSEC validates by default in both modes.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -172,8 +199,15 @@ pub struct Resolver {
     pub upstream_ca: Option<PathBuf>,
     pub upstreams: Vec<Upstream>,
     pub providers: Vec<ProviderSelection>,
+    /// How forward mode uses several providers. Unset keeps the older behavior: ranked
+    /// fallback for automatic transports, fastest first otherwise.
+    pub strategy: Option<ForwardStrategy>,
     #[serde(skip)]
     pub automatic_transport: bool,
+    /// Endpoints each provider selection expanded to, in order. They add up to
+    /// `provider_upstreams`; every custom upstream after them is a group of one.
+    #[serde(skip)]
+    pub provider_groups: Vec<usize>,
     /// Leading entries of `upstreams` that came from provider presets.
     #[serde(skip)]
     pub provider_upstreams: usize,
@@ -202,7 +236,9 @@ impl Default for Resolver {
             upstream_ca: None,
             upstreams: vec![],
             providers: vec![],
+            strategy: None,
             automatic_transport: false,
+            provider_groups: vec![],
             provider_upstreams: 0,
             cache_entries: 4096,
             nameserver_cache_entries: 1024,
@@ -397,6 +433,22 @@ impl Default for Limits {
 }
 
 impl Config {
+    /// Whether `other` differs from this configuration only inside `[filtering]` (lists,
+    /// rules, profiles, devices, schedules). Such a change can go live without restarting
+    /// any listener. Anything uncertain answers `false`, which means a full reload.
+    #[must_use]
+    pub fn same_except_filtering(&self, other: &Self) -> bool {
+        let without_filtering = |config: &Self| {
+            let mut config = config.clone();
+            config.filtering = lumen_filter::config::Config::default();
+            toml::to_string(&config).ok()
+        };
+        match (without_filtering(self), without_filtering(other)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    }
+
     /// Read at most 64 KiB, resolve paths, and validate before any sockets open.
     ///
     /// # Errors
@@ -470,8 +522,22 @@ impl Config {
         if automatic != 0 && automatic != self.resolver.providers.len() {
             return Err("automatic and explicit provider transports cannot be mixed".into());
         }
+        if self.resolver.providers.len() > MAX_PROVIDERS {
+            return Err(format!("at most {MAX_PROVIDERS} providers can be selected"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !self
+            .resolver
+            .providers
+            .iter()
+            .all(|p| seen.insert(p.id.as_str()))
+        {
+            return Err("a provider can be selected only once".into());
+        }
         let mut upstreams = Vec::new();
+        let mut groups = Vec::new();
         for selection in &self.resolver.providers {
+            let before = upstreams.len();
             if selection.protocol == ProviderProtocol::Auto {
                 if selection.encryption.unwrap_or(EncryptionPolicy::Required)
                     != EncryptionPolicy::Required
@@ -501,16 +567,22 @@ impl Config {
                     )?,
                 );
             }
+            groups.push(upstreams.len() - before);
         }
         // Custom upstreams follow the provider addresses, so they act as ordered extras.
         let provided = upstreams.len();
+        if self.resolver.upstreams.len() > MAX_CUSTOM_UPSTREAMS {
+            return Err(format!(
+                "at most {MAX_CUSTOM_UPSTREAMS} custom upstreams are allowed"
+            ));
+        }
         upstreams.append(&mut self.resolver.upstreams);
-        if provided > 8 {
-            return Err("provider presets resolve to more than 8 upstreams".into());
+        if upstreams.len() > MAX_FORWARD_ENDPOINTS {
+            return Err(format!(
+                "providers and upstreams resolve to more than {MAX_FORWARD_ENDPOINTS} addresses"
+            ));
         }
-        if upstreams.len() > 8 {
-            return Err("providers plus custom upstreams exceed 8 upstreams".into());
-        }
+        self.resolver.provider_groups = groups;
         self.resolver.provider_upstreams = provided;
         self.resolver.upstreams = upstreams;
         self.resolver.automatic_transport = automatic != 0;
@@ -803,8 +875,20 @@ impl Config {
 
     fn validate_upstreams(&self) -> Result<(), String> {
         let resolver = &self.resolver;
-        if resolver.upstreams.len() > 8 {
-            return Err("at most 8 upstreams are allowed".into());
+        if resolver.upstreams.len() > MAX_FORWARD_ENDPOINTS {
+            return Err(format!(
+                "at most {MAX_FORWARD_ENDPOINTS} upstream addresses are allowed"
+            ));
+        }
+        if resolver
+            .upstreams
+            .len()
+            .saturating_sub(resolver.provider_upstreams)
+            > MAX_CUSTOM_UPSTREAMS
+        {
+            return Err(format!(
+                "at most {MAX_CUSTOM_UPSTREAMS} custom upstreams are allowed"
+            ));
         }
         for upstream in resolver
             .upstreams
@@ -935,6 +1019,148 @@ mod tests {
         config.listen.dot.clear();
         config.limits.max_connections = 0;
         assert!(config.validate().is_err());
+    }
+
+    fn forward_config(strategy: &str, providers: &[&str], custom: usize) -> String {
+        use std::fmt::Write;
+        let mut text = format!("schema_version = 1\n[resolver]\nmode = \"forward\"\n{strategy}\n");
+        for id in providers {
+            let _ = write!(
+                text,
+                "[[resolver.providers]]\nid = \"{id}\"\nprotocol = \"auto\"\n"
+            );
+        }
+        for index in 0..custom {
+            let _ = write!(
+                text,
+                "[[resolver.upstreams]]\naddress = \"192.0.2.{}:853\"\nprotocol = \"tls\"\nserver_name = \"dns.example\"\n",
+                index + 1
+            );
+        }
+        text
+    }
+
+    #[test]
+    fn several_providers_keep_their_rank_groups_and_strategy() {
+        let ids = [
+            "cloudflare-unfiltered",
+            "quad9-unfiltered",
+            "dns-sb-unfiltered",
+        ];
+        let config = Config::parse(
+            &forward_config("strategy = \"round_robin\"", &ids, 1),
+            Path::new("."),
+        )
+        .unwrap();
+        let resolver = &config.resolver;
+        assert_eq!(resolver.strategy, Some(ForwardStrategy::RoundRobin));
+        // One group per provider, in the order they were written, then the custom upstream.
+        assert_eq!(resolver.provider_groups.len(), 3);
+        assert!(resolver.provider_groups.iter().all(|&n| n > 0));
+        assert_eq!(
+            resolver.provider_groups.iter().sum::<usize>(),
+            resolver.provider_upstreams
+        );
+        assert_eq!(resolver.upstreams.len(), resolver.provider_upstreams + 1);
+        // Three providers need far more than the old 8 addresses, and that is now allowed.
+        assert!(
+            resolver.provider_upstreams > 8,
+            "{}",
+            resolver.provider_upstreams
+        );
+        assert!(resolver.automatic_transport);
+
+        for (name, strategy) in [
+            ("failover", ForwardStrategy::Failover),
+            ("fastest", ForwardStrategy::Fastest),
+            ("round_robin", ForwardStrategy::RoundRobin),
+            ("race", ForwardStrategy::Race),
+        ] {
+            let parsed = Config::parse(
+                &forward_config(&format!("strategy = \"{name}\""), &ids[..1], 0),
+                Path::new("."),
+            )
+            .unwrap();
+            assert_eq!(parsed.resolver.strategy, Some(strategy));
+        }
+        // Unset keeps the older behavior.
+        let legacy = Config::parse(&forward_config("", &ids[..1], 0), Path::new(".")).unwrap();
+        assert_eq!(legacy.resolver.strategy, None);
+        assert!(
+            Config::parse(
+                &forward_config("strategy = \"random\"", &ids, 0),
+                Path::new(".")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_and_upstream_limits() {
+        // The eight bundled providers that offer encrypted transport.
+        let encrypted = [
+            "dns4eu-unfiltered",
+            "ffmuc-unfiltered",
+            "libredns-unfiltered",
+            "dns-sb-unfiltered",
+            "quad9-unfiltered",
+            "uncensoreddns-anycast",
+            "cloudflare-unfiltered",
+            "google-public-dns",
+        ];
+        // All eight at once are fine, with room to spare under the endpoint cap.
+        let eight = Config::parse(&forward_config("", &encrypted, 0), Path::new(".")).unwrap();
+        assert_eq!(eight.resolver.provider_groups.len(), 8);
+        assert!(eight.resolver.upstreams.len() <= MAX_FORWARD_ENDPOINTS / 2 + 32);
+        // A ninth is not, whatever it is.
+        let mut nine = encrypted.to_vec();
+        nine.push("dns-watch");
+        let error = Config::parse(&forward_config("", &nine, 0), Path::new(".")).unwrap_err();
+        assert!(error.contains("at most 8 providers"), "{error}");
+        // The same provider twice is a mistake, not a way to double its weight.
+        let twice = ["quad9-unfiltered", "quad9-unfiltered"];
+        assert!(
+            Config::parse(&forward_config("", &twice, 0), Path::new("."))
+                .unwrap_err()
+                .contains("only once")
+        );
+        // Eight custom upstreams next to providers are fine, nine are not.
+        assert!(Config::parse(&forward_config("", &encrypted[..2], 8), Path::new(".")).is_ok());
+        let error =
+            Config::parse(&forward_config("", &encrypted[..2], 9), Path::new(".")).unwrap_err();
+        assert!(error.contains("custom upstreams"), "{error}");
+        // Provider selections only work in forward mode.
+        assert!(
+            Config::parse(
+                "schema_version = 1\n[[resolver.providers]]\nid = \"quad9-unfiltered\"\nprotocol = \"auto\"\n",
+                Path::new(".")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn only_filtering_changes_can_go_live_without_a_restart() {
+        let base = Config::parse("schema_version = 1\n", Path::new(".")).unwrap();
+        let with = |extra: &str| {
+            Config::parse(&format!("schema_version = 1\n{extra}"), Path::new(".")).unwrap()
+        };
+        // Lists, rules, profiles and schedules are filtering-only.
+        let filtering = with(
+            "[filtering]\nrules = { block = [\"ads.example\"] }\n[[filtering.lists]]\nid = \"a\"\nformat = \"domains\"\ntext = \"x.example\"\n",
+        );
+        assert!(base.same_except_filtering(&filtering));
+        assert!(filtering.same_except_filtering(&base));
+        assert!(base.same_except_filtering(&base));
+        // Anything else needs the listeners to restart.
+        for extra in [
+            "[resolver]\ncache_entries = 100\n",
+            "[listen]\nudp = [\"127.0.0.1:5454\"]\n",
+            "[web]\nmax_connections = 10\n",
+            "metrics = \"127.0.0.1:9153\"\n",
+        ] {
+            assert!(!base.same_except_filtering(&with(extra)), "{extra}");
+        }
     }
 
     #[test]

@@ -213,6 +213,26 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                         let staged = staged_revision.is_some();
                         activity::set_job("checking", "Checking the new configuration");
                         match managed_config(&mut store, staged) {
+                            Ok(next) if config.same_except_filtering(&next) => {
+                                // Only lists, rules, profiles or devices changed: load them in
+                                // the background and swap them in. No listener restarts, no
+                                // connection closes, no cache clears.
+                                activity::set_job("downloading", "Downloading and checking block lists");
+                                match Filter::load(next.filtering.clone()).await {
+                                    Ok(filter) => {
+                                        server.replace_filter(Arc::new(filter));
+                                        config = next;
+                                        if let Some(revision) = staged_revision { let _ = store.promote_staged_config(revision).map_err(io::Error::other)?; }
+                                        store.set_status("running", None).map_err(io::Error::other)?;
+                                        activity::set_job("done", "The new lists and rules are live");
+                                    }
+                                    Err(error) => {
+                                        if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
+                                        activity::set_job("failed", not_applied(&error));
+                                        store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
+                                    }
+                                }
+                            }
                             Ok(next) => {
                                 activity::set_job("downloading", "Downloading and checking block lists");
                                 // Download and validate everything while DNS is still up, then hand the
@@ -221,7 +241,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                     Ok(filter) => filter,
                                     Err(error) => {
                                         if let Some(revision) = staged_revision { store.discard_staged_config(revision).map_err(io::Error::other)?; }
-                                        activity::set_job("failed", format!("Not applied: {error}. The previous settings are still running."));
+                                        activity::set_job("failed", not_applied(&error.to_string()));
                                         store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
                                         continue;
                                     }
@@ -233,7 +253,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                     store.set_status("running", Some(&format!("reload rejected: {error}"))).map_err(io::Error::other)?;
                                     continue;
                                 }
-                                let old_filter = Arc::clone(&server.filter);
+                                let old_filter = server.filter();
                                 server.shutdown().await;
                                 shutdown_api(&mut api).await;
                                 match start_managed(next.clone(), state_path, Some(prepared)).await {
@@ -245,6 +265,7 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                                                 config = next;
                                                 if let Some(revision) = staged_revision { let _ = store.promote_staged_config(revision).map_err(io::Error::other)?; }
                                                 store.set_status("running", None).map_err(io::Error::other)?;
+                                                server.filter().retain_downloads();
                                                 activity::set_job("done", "The new settings are live");
                                                 print_endpoints(&server);
                                                 print_api(api.as_ref());
@@ -286,6 +307,15 @@ async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
                 }
             }
         }
+    }
+}
+
+/// What the console shows when an apply did not happen. A cancel is not an error.
+fn not_applied(error: &str) -> String {
+    if error == "download cancelled" {
+        "Cancelled. Nothing changed: the previous settings are still running.".to_owned()
+    } else {
+        format!("Not applied: {error}. The previous settings are still running.")
     }
 }
 

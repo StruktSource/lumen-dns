@@ -14,7 +14,7 @@ use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -204,7 +204,8 @@ struct Service {
     unsaved: Mutex<Vec<lumen_web::QueryRecord>>,
     config: Arc<Config>,
     resolver: Resolver,
-    filter: Arc<lumen_filter::Filter>,
+    /// Swapped as a whole when lists or rules change, so listeners never restart for that.
+    filter: RwLock<Arc<lumen_filter::Filter>>,
     queries: Arc<Semaphore>,
     connections: Arc<Semaphore>,
     clients: Mutex<ClientRates>,
@@ -212,6 +213,11 @@ struct Service {
 }
 
 impl Service {
+    /// The filter that is live right now.
+    fn filter(&self) -> Arc<lumen_filter::Filter> {
+        Arc::clone(&self.filter.read().expect("filter lock"))
+    }
+
     fn allowed(&self, peer: SocketAddr) -> bool {
         let ip = peer.ip().to_canonical();
         self.config
@@ -260,12 +266,13 @@ impl Service {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let decision = self.filter.decide_dns(
+        let filter = self.filter();
+        let decision = filter.decide_dns(
             query.message.queries[0].name(),
             peer.ip().to_canonical(),
             now,
         );
-        if self.config.filtering.decision_log {
+        if filter.decision_log() {
             let name = query.message.queries[0].name().to_ascii();
             eprintln!(
                 "filter client={} domain={name:?} {decision}",
@@ -352,7 +359,7 @@ impl Service {
             qtype: question.query_type().to_string(),
             client: full.then_some(client),
             device: if full {
-                self.filter.device_of(client)
+                self.filter().device_of(client)
             } else {
                 None
             },
@@ -392,7 +399,8 @@ impl lumen_web::Host for Service {
     fn counters(&self) -> lumen_web::Counters {
         let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
         let m = &self.metrics;
-        let (generation, _) = self.filter.status();
+        let filter = self.filter();
+        let (generation, _) = filter.status();
         lumen_web::Counters {
             queries: load(&m.queries),
             responses: load(&m.responses),
@@ -404,17 +412,17 @@ impl lumen_web::Host for Service {
             transports: std::array::from_fn(|i| load(&m.transports[i])),
             latency: std::array::from_fn(|i| load(&m.latency_buckets[i])),
             rcodes: std::array::from_fn(|i| load(&m.rcodes[i])),
-            blocked: load(&self.filter.metrics.blocked),
-            allowed: load(&self.filter.metrics.allowed),
-            refresh_successes: load(&self.filter.metrics.refresh_successes),
-            refresh_failures: load(&self.filter.metrics.refresh_failures),
-            rollbacks: load(&self.filter.metrics.rollbacks),
+            blocked: load(&filter.metrics.blocked),
+            allowed: load(&filter.metrics.allowed),
+            refresh_successes: load(&filter.metrics.refresh_successes),
+            refresh_failures: load(&filter.metrics.refresh_failures),
+            rollbacks: load(&filter.metrics.rollbacks),
             filter_generation: generation,
         }
     }
 
     fn lists(&self) -> Vec<lumen_web::ListInfo> {
-        self.filter
+        self.filter()
             .status()
             .1
             .into_iter()
@@ -428,7 +436,7 @@ impl lumen_web::Host for Service {
     }
 
     fn explain(&self, domain: &str, client: IpAddr, unix_seconds: u64) -> lumen_web::Explained {
-        let decision = self.filter.explain(domain, client, unix_seconds);
+        let decision = self.filter().explain(domain, client, unix_seconds);
         lumen_web::Explained {
             blocked: decision.blocked,
             rule: decision.rule,

@@ -209,3 +209,6 @@ dialog::backdrop{background:#000a;backdrop-filter:blur(2px)}dialog[open]{animati
 .lang-corner{display:flex;align-items:center;justify-content:flex-end;gap:8px;color:var(--muted);margin-bottom:-6px}
 .side-lang{display:flex;align-items:center;gap:8px;color:#bbb;width:100%}.side-lang .select{flex:1;background-color:transparent;border-color:#4a4a45;color:#ddd}
 .side-tools{flex-wrap:wrap}.seg{flex-wrap:wrap}
+
+/* Ranked providers */
+.rank{display:inline-grid;place-items:center;min-width:28px;height:28px;border:1px solid var(--text);font-family:var(--mono);font-weight:700;font-size:13px}

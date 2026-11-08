@@ -11,7 +11,7 @@ use hickory_proto::{
         rdata::{A, AAAA, SOA},
     },
 };
-use lumen_config::{Config, Mode, Upstream, UpstreamProtocol};
+use lumen_config::{Config, ForwardStrategy, Mode, Upstream, UpstreamProtocol};
 use lumen_core::{ConsoleOptions, RunningServer};
 use rustls::{
     ClientConfig, RootCertStore,
@@ -565,7 +565,7 @@ async fn encrypted_listeners_ipv4_ipv6_and_doh_contract() {
                 .response_code,
             ResponseCode::NXDomain
         );
-        assert_eq!(server.filter.metrics.blocked.load(Ordering::Relaxed), 3);
+        assert_eq!(server.filter().metrics.blocked.load(Ordering::Relaxed), 3);
         connection.close(0_u32.into(), b"done");
         endpoint.close(0_u32.into(), b"done");
         server.shutdown().await;
@@ -907,15 +907,26 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
 #[tokio::test]
 async fn startup_is_atomic_and_load_stays_bounded() {
     let fixture = fixture().await;
-    let bind = address("127.0.0.1");
-    let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut invalid = config(fixture.address, bind);
-    invalid.listen.tcp.push(held.local_addr().unwrap());
-    assert!(RunningServer::start(invalid).await.is_err());
-    let mut cfg = config(fixture.address, bind);
-    cfg.limits.queries_per_second = 1000;
-    cfg.limits.max_in_flight = 16;
-    let mut server = RunningServer::start(cfg).await.unwrap();
+    // Probed ports are free only for an instant. Retry the full atomic-start check with a
+    // fresh port if another parallel test wins that race; a real cleanup leak fails every try.
+    let mut attempt = 0;
+    let (mut server, bind) = loop {
+        let held = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bind = address("127.0.0.1");
+        let mut invalid = config(fixture.address, bind);
+        invalid.listen.tcp.push(held.local_addr().unwrap());
+        assert!(RunningServer::start(invalid).await.is_err());
+        let mut cfg = config(fixture.address, bind);
+        cfg.limits.queries_per_second = 1000;
+        cfg.limits.max_in_flight = 16;
+        match RunningServer::start(cfg).await {
+            Ok(server) => break (server, bind),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && attempt < 5 => {
+                attempt += 1;
+            }
+            Err(error) => panic!("server failed to start after atomic bind check: {error}"),
+        }
+    };
     for batch in 0..32 {
         let mut tasks = JoinSet::new();
         for index in 0..8 {
@@ -1158,5 +1169,179 @@ async fn saved_history_is_opt_in_anonymous_by_choice_and_stops_when_off() {
     let after = rows(&store);
     assert_eq!(after.len(), before);
     assert!(after.iter().all(|q| q.row.domain != "after-off.example"));
+    server.shutdown().await;
+}
+
+/// Several forwarders, end to end: ranked fallback, even spreading, racing, and skipping a
+/// dead provider. Each upstream is a real UDP server that counts what it receives.
+#[tokio::test]
+async fn forward_strategies_fail_over_spread_race_and_skip_dead_upstreams() {
+    let upstreams = [fixture().await, fixture().await, fixture().await];
+    let udp_upstream = |address: SocketAddr| Upstream {
+        address,
+        protocol: UpstreamProtocol::Udp,
+        server_name: None,
+        doh_path: None,
+    };
+    let counts = || -> Vec<usize> {
+        upstreams
+            .iter()
+            .map(|u| u.queries.load(Ordering::Relaxed))
+            .collect()
+    };
+    let ask = async |bind: SocketAddr, tag: &str, count: usize| {
+        for index in 0..count {
+            let reply = udp(
+                bind,
+                &query(&format!("{tag}-{index}.example."), RecordType::A),
+            )
+            .await;
+            assert_eq!(
+                reply.metadata.response_code,
+                ResponseCode::NoError,
+                "{tag}-{index}"
+            );
+        }
+    };
+    let start =
+        async |strategy: Option<ForwardStrategy>, upstream_list: Vec<Upstream>, timeout_ms: u32| {
+            let bind = address("127.0.0.1");
+            let mut cfg = config(upstreams[0].address, bind);
+            cfg.resolver.upstreams = upstream_list;
+            cfg.resolver.strategy = strategy;
+            cfg.resolver.upstream_timeout_ms = timeout_ms;
+            (RunningServer::start(cfg).await.unwrap(), bind)
+        };
+    let live: Vec<Upstream> = upstreams.iter().map(|u| udp_upstream(u.address)).collect();
+
+    // Ranked fallback: the first upstream answers everything and the others stand by.
+    let before = counts();
+    let (mut server, bind) = start(Some(ForwardStrategy::Failover), live.clone(), 2_000).await;
+    ask(bind, "failover", 6).await;
+    server.shutdown().await;
+    let after = counts();
+    assert_eq!(after[0] - before[0], 6);
+    assert_eq!((after[1] - before[1], after[2] - before[2]), (0, 0));
+
+    // Round-robin: every upstream starts the same number of queries.
+    let before = counts();
+    let (mut server, bind) = start(Some(ForwardStrategy::RoundRobin), live.clone(), 2_000).await;
+    ask(bind, "robin", 9).await;
+    server.shutdown().await;
+    let after = counts();
+    let shares: Vec<usize> = (0..3).map(|i| after[i] - before[i]).collect();
+    assert_eq!(shares, [3, 3, 3], "an even spread");
+
+    // Race: every upstream is asked, and the first answer is used.
+    let before = counts();
+    let (mut server, bind) = start(Some(ForwardStrategy::Race), live.clone(), 2_000).await;
+    ask(bind, "race", 4).await;
+    server.shutdown().await;
+    let after = counts();
+    let shares: Vec<usize> = (0..3).map(|i| after[i] - before[i]).collect();
+    assert!(
+        shares.iter().all(|&n| n > 0),
+        "every upstream sees queries: {shares:?}"
+    );
+    assert!(
+        shares.iter().sum::<usize>() > 4,
+        "more than one ask per query: {shares:?}"
+    );
+
+    // Fastest first and the older default ask one upstream per query.
+    for strategy in [Some(ForwardStrategy::Fastest), None] {
+        let before = counts();
+        let (mut server, bind) = start(strategy, live.clone(), 2_000).await;
+        ask(
+            bind,
+            if strategy.is_some() {
+                "fastest"
+            } else {
+                "legacy"
+            },
+            4,
+        )
+        .await;
+        server.shutdown().await;
+        let after = counts();
+        let total: usize = (0..3).map(|i| after[i] - before[i]).sum();
+        assert_eq!(total, 4, "{strategy:?}");
+    }
+
+    // A dead first provider is skipped, so ranked fallback and round-robin still answer.
+    let dead = address("127.0.0.1");
+    for strategy in [
+        ForwardStrategy::Failover,
+        ForwardStrategy::RoundRobin,
+        ForwardStrategy::Race,
+    ] {
+        let list = vec![udp_upstream(dead), udp_upstream(upstreams[1].address)];
+        let before = counts();
+        let (mut server, bind) = start(Some(strategy), list, 300).await;
+        // The first query may wait for the dead provider once. After that it is left alone,
+        // so the rest do not each wait for a timeout.
+        ask(bind, &format!("dead-first-{strategy:?}"), 1).await;
+        let rest = std::time::Instant::now();
+        ask(bind, &format!("dead-then-{strategy:?}"), 3).await;
+        assert!(
+            rest.elapsed() < Duration::from_millis(500),
+            "{strategy:?} kept waiting for the dead provider: {:?}",
+            rest.elapsed()
+        );
+        server.shutdown().await;
+        assert!(
+            counts()[1] - before[1] >= 4,
+            "{strategy:?} reached the live upstream"
+        );
+    }
+}
+
+/// A filtering-only change goes live in the running service: same listeners, no restart.
+#[tokio::test]
+async fn a_new_filter_goes_live_without_restarting_listeners() {
+    use lumen_filter::config::{Config as FilterConfig, Rules};
+
+    let fixture = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut server = RunningServer::start(config(fixture.address, bind))
+        .await
+        .unwrap();
+    let endpoints = server.endpoints.clone();
+    assert_eq!(
+        udp(bind, &query("ads.example.", RecordType::A))
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::NoError,
+        "allowed before the change"
+    );
+    assert_eq!(server.filter().metrics.allowed.load(Ordering::Relaxed), 1);
+
+    let blocking = FilterConfig {
+        rules: Rules {
+            block: vec!["ads.example".into()],
+            ..Rules::default()
+        },
+        ..FilterConfig::default()
+    };
+    let filter = std::sync::Arc::new(lumen_filter::Filter::load(blocking).await.unwrap());
+    server.replace_filter(filter);
+
+    // Blocked at once, on the very same socket.
+    assert_eq!(
+        udp(bind, &query("ads.example.", RecordType::A))
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::NXDomain,
+        "blocked right after the swap"
+    );
+    assert_eq!(
+        server.endpoints, endpoints,
+        "the listeners were not touched"
+    );
+    // The totals carry on instead of starting from zero.
+    assert_eq!(server.filter().metrics.allowed.load(Ordering::Relaxed), 1);
+    assert_eq!(server.filter().metrics.blocked.load(Ordering::Relaxed), 1);
     server.shutdown().await;
 }

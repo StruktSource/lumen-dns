@@ -382,6 +382,7 @@ impl Console {
             ("POST", ["shutdown"]) => {
                 self.control(&mut store, &ctx, Command::Shutdown, "shutdown", "daemon")
             }
+            ("POST", ["activity", "cancel"]) => self.cancel_activity(&mut store, &ctx),
             ("GET", ["audit"]) => audit_json(&store, &request.query),
             ("PUT", ["settings"]) => self.put_settings(&mut store, &ctx),
             ("PUT", ["history"]) => self.put_history(&mut store, &ctx),
@@ -1342,6 +1343,16 @@ impl Console {
         settings_json(store)
     }
 
+    /// Stop the downloads of the change that is being applied. Nothing changes: the previous
+    /// settings and lists stay live.
+    fn cancel_activity(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
+        let cancelled = lumen_filter::activity::request_cancel();
+        if cancelled {
+            Self::actor(store, ctx, "apply.cancel", "block lists");
+        }
+        reply(StatusCode::OK, &json!({ "cancelled": cancelled }))
+    }
+
     // ----- devices -----
 
     fn put_device(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
@@ -1873,6 +1884,7 @@ fn activity_json() -> Value {
     let (job, lists) = lumen_filter::activity::snapshot();
     json!({
         "phase": job.phase, "message": job.message, "since": job.since,
+        "cancellable": matches!(job.phase, "checking" | "downloading"),
         "lists": lists.into_iter().map(|l| json!({
             "id": l.id, "state": l.state, "bytes": l.bytes, "total": l.total, "rules": l.rules, "error": l.error,
         })).collect::<Vec<_>>(),
@@ -2384,6 +2396,107 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn several_providers_keep_their_rank_and_strategy_through_the_form() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let get = || {
+            body(call(
+                &f,
+                Method::GET,
+                "/api/config",
+                session,
+                "",
+                "127.0.0.1",
+            ))
+            .1
+        };
+        let put = |config: &Value| {
+            body(call(
+                &f,
+                Method::PUT,
+                "/api/config",
+                session,
+                &json!({"config": config}).to_string(),
+                "127.0.0.1",
+            ))
+        };
+        let provider = |id: &str| {
+            json!({"id": id, "protocol": "auto", "address_family": "any", "encryption": null,
+                   "transport_priority": ["quic", "https", "tls"]})
+        };
+        let ids = [
+            "quad9-unfiltered",
+            "cloudflare-unfiltered",
+            "dns4eu-unfiltered",
+        ];
+        let mut config = get()["config"].clone();
+        assert!(
+            config["resolver"]["strategy"].is_null(),
+            "no strategy until chosen"
+        );
+        config["resolver"]["mode"] = json!("forward");
+        config["resolver"]["strategy"] = json!("race");
+        config["resolver"]["providers"] =
+            json!(ids.iter().map(|id| provider(id)).collect::<Vec<_>>());
+        let (status, staged) = put(&config);
+        assert_eq!(status, StatusCode::ACCEPTED, "{staged}");
+        let revision = staged["revision"].as_u64().unwrap();
+        let mut store = Store::open(&f.state).unwrap();
+        let source = store.staged_config().unwrap().unwrap().source;
+        assert!(source.contains("strategy = \"race\""), "{source}");
+        let positions: Vec<usize> = ids.iter().map(|id| source.find(id).expect(id)).collect();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "rank order is kept: {source}"
+        );
+        assert!(store.promote_staged_config(revision).unwrap());
+
+        // Read back: rank and strategy survive, and the derived addresses stay hidden.
+        let after = get()["config"].clone();
+        assert_eq!(after["resolver"]["strategy"], "race");
+        let back: Vec<&str> = after["resolver"]["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(back, ids);
+        assert!(
+            after["resolver"]["upstreams"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        // A ninth provider, a repeat, and an unknown strategy are refused.
+        let mut nine = after.clone();
+        let all = [
+            "ffmuc-unfiltered",
+            "libredns-unfiltered",
+            "dns-sb-unfiltered",
+            "uncensoreddns-anycast",
+            "google-public-dns",
+        ];
+        let mut list: Vec<Value> = ids
+            .iter()
+            .chain(all.iter())
+            .map(|id| provider(id))
+            .collect();
+        nine["resolver"]["providers"] = json!(list.clone());
+        assert_eq!(put(&nine).0, StatusCode::ACCEPTED, "eight are fine");
+        list.push(provider("adguard-unfiltered"));
+        nine["resolver"]["providers"] = json!(list);
+        assert_eq!(put(&nine).0, StatusCode::BAD_REQUEST, "nine are not");
+        let mut twice = after.clone();
+        twice["resolver"]["providers"] = json!([provider(ids[0]), provider(ids[0])]);
+        assert_eq!(put(&twice).0, StatusCode::BAD_REQUEST);
+        let mut odd = after;
+        odd["resolver"]["strategy"] = json!("random");
+        assert_eq!(put(&odd).0, StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -3142,6 +3255,53 @@ mod tests {
         );
         f.console.prepare().unwrap();
         assert_eq!(f.host.history_settings().mode, HistoryMode::Off);
+    }
+
+    #[test]
+    fn cancelling_needs_an_administrator_and_does_nothing_when_idle() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let admin = Some((cookie.as_str(), csrf.as_str()));
+        let (status, idle) = body(call(
+            &f,
+            Method::POST,
+            "/api/activity/cancel",
+            admin,
+            "{}",
+            "127.0.0.1",
+        ));
+        assert_eq!(
+            (status, idle["cancelled"].clone()),
+            (StatusCode::OK, false.into())
+        );
+        let (_, state) = body(call(&f, Method::GET, "/api/status", admin, "", "127.0.0.1"));
+        assert_eq!(state["activity"]["cancellable"], false);
+        let (user_cookie, user_csrf) = sign_in(&f, "anna", "anna passphrase 123");
+        let user = Some((user_cookie.as_str(), user_csrf.as_str()));
+        assert_eq!(
+            call(
+                &f,
+                Method::POST,
+                "/api/activity/cancel",
+                user,
+                "{}",
+                "127.0.0.1"
+            )
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &f,
+                Method::POST,
+                "/api/activity/cancel",
+                None,
+                "{}",
+                "127.0.0.1"
+            )
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]

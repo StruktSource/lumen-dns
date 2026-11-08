@@ -5,8 +5,11 @@
 //! no client data and is lost on restart.
 
 use std::{
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 tokio::task_local! {
@@ -49,6 +52,36 @@ static STATE: Mutex<State> = Mutex::new(State {
     lists: Vec::new(),
 });
 
+/// Set by [`request_cancel`], cleared when the next batch begins.
+static CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Ask whatever is downloading or checking lists right now to stop. The change that
+/// started it is then not applied and the previous settings stay live.
+/// Returns whether anything was running to cancel.
+pub fn request_cancel() -> bool {
+    let running = with(|s| busy(s.job.phase));
+    if running {
+        CANCEL.store(true, Ordering::SeqCst);
+    }
+    running
+}
+
+/// Whether a cancel is pending for the current job.
+pub(crate) fn cancel_requested() -> bool {
+    CANCEL.load(Ordering::SeqCst)
+}
+
+fn busy(phase: &str) -> bool {
+    matches!(phase, "checking" | "downloading")
+}
+
+/// Completes when a cancel is requested. Polled slowly: it only runs during downloads.
+pub(crate) async fn cancelled() {
+    while !cancel_requested() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -66,6 +99,10 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 pub fn set_job(phase: &'static str, message: impl Into<String>) {
     let message = message.into();
     with(|s| {
+        // A job that starts from a finished or idle state never inherits an old cancel.
+        if !busy(s.job.phase) {
+            CANCEL.store(false, Ordering::SeqCst);
+        }
         s.job = Job {
             phase,
             message,

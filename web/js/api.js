@@ -58,6 +58,29 @@ const NEEDS = {
 };
 L.loadPage = async page => { await Promise.all((NEEDS[page] ? NEEDS[page]() : []).filter(Boolean)); };
 
+/* Change the lists right away, with no draft and no Apply bar. `mutate(filtering)` edits a filtering
+   section and returns a function that undoes the edit. It runs on the saved settings, so unsaved edits elsewhere
+   are never applied by accident. Lumen downloads in the background and DNS keeps answering; the progress panel
+   shows it and can cancel it. Returns whether the change was handed to Lumen. */
+L.changeLists = async mutate => {
+  try {
+    const status = await L.api('GET', '/api/status');
+    if (status.pending_revision != null || ['checking', 'downloading', 'starting'].includes(status.activity.phase)) {
+      L.toast('Another change is still being applied. Wait for it to finish, or cancel it in the progress panel.', 'bad'); return false;
+    }
+    const saved = await L.api('GET', '/api/config'); const next = L.normalizeConfig(saved.config); mutate(next.filtering);
+    const sent = await L.api('PUT', '/api/config', L.toServer(next));
+    const undo = mutate(L.S.cfg.filtering); if (L.S.draft) mutate(L.S.draft.filtering);
+    L.rerender(); L.activity.poke();
+    L.waitForConfig(sent.revision).then(async result => {
+      if (!result.ok) { undo(L.S.cfg.filtering); if (L.S.draft) undo(L.S.draft.filtering); }
+      try { await L.loadStatus(); } catch { /* shown on the next refresh */ }
+      L.rerender();
+    });
+    return true;
+  } catch (e) { L.toast(e.message, 'bad'); return false; }
+};
+
 /* After a config change the daemon restarts listeners; this console may be unreachable for a moment. */
 L.waitForConfig = async revision => {
   const started = Date.now(), until = started + 300000; let lastError = null, told = false;

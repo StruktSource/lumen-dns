@@ -55,7 +55,7 @@ Rules for upstreams:
 - The address is a fixed IP and port. Lumen does no bootstrap lookup to find it.
 - Encrypted protocols (`tls`, `https`, `quic`) require `server_name`, and Lumen always verifies the certificate chain and name. A private CA bundle (`upstream_ca`) changes which roots are trusted but never skips name checks.
 - `udp` also enables TCP fallback to the same address and port.
-- You can use up to 8 endpoints in total across presets and custom upstreams.
+- You can use up to 8 bundled providers and up to 8 custom upstreams, and choose how they are used. See [Upstream providers](upstream-providers.md#use-several-providers).
 
 Full field list: [Configuration: resolver](../reference/configuration.md#resolver).
 

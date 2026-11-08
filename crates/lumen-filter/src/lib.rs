@@ -2,6 +2,7 @@
 //! Client-aware filtering before DNS cache lookup. Updates are transactional.
 
 pub mod activity;
+mod cache;
 pub mod config;
 mod fetch;
 mod response;
@@ -231,9 +232,14 @@ impl Filter {
     pub async fn load(config: Config) -> Result<Self, String> {
         config.validate()?;
         let mut lists = Vec::new();
+        let mut attempted = Vec::new();
         activity::begin_lists(config.lists.iter().map(|l| l.id.as_str()));
         for source in &config.lists {
-            lists.push(Arc::new(load_list(source).await?));
+            // Lists already downloaded for an earlier config are reused, so changing an
+            // unrelated setting never downloads them again.
+            let (list, fetched) = load_list(source, true).await?;
+            lists.push(list);
+            attempted.push(fetched);
             check_rule_budget(&config, &lists)?;
         }
         let live = Arc::new(compile(&config, lists, 1)?);
@@ -254,7 +260,6 @@ impl Filter {
                     .map(move |ip| (ip.to_canonical(), i))
             })
             .collect();
-        let attempted = vec![Instant::now(); config.lists.len()];
         Ok(Self {
             config,
             global,
@@ -271,6 +276,44 @@ impl Filter {
             }),
             metrics: Metrics::default(),
         })
+    }
+
+    /// Whether decisions are written to the process log (`decision_log`).
+    #[must_use]
+    pub fn decision_log(&self) -> bool {
+        self.config.decision_log
+    }
+
+    /// Carry the aggregate counters of the filter this one replaces, so a live change of
+    /// lists or rules does not reset the totals.
+    pub fn inherit_metrics(&self, old: &Filter) {
+        for (new, old) in [
+            (&self.metrics.blocked, &old.metrics.blocked),
+            (&self.metrics.allowed, &old.metrics.allowed),
+            (
+                &self.metrics.refresh_successes,
+                &old.metrics.refresh_successes,
+            ),
+            (
+                &self.metrics.refresh_failures,
+                &old.metrics.refresh_failures,
+            ),
+            (&self.metrics.rollbacks, &old.metrics.rollbacks),
+        ] {
+            new.store(old.load(Ordering::Relaxed), Ordering::Relaxed);
+        }
+    }
+
+    /// Forget downloaded copies of lists this filter no longer uses. Call once the filter
+    /// is live, never for a candidate that may still be rejected.
+    pub fn retain_downloads(&self) {
+        let keep: Vec<_> = self
+            .config
+            .lists
+            .iter()
+            .filter_map(|list| list.url.clone().map(|url| (url, list.format)))
+            .collect();
+        cache::retain(&keep);
     }
 
     /// Name of the configured device owning this client address, if any.
@@ -486,7 +529,8 @@ impl Filter {
         activity::begin_lists(due.iter().map(|i| self.config.lists[*i].id.as_str()));
         let result = async {
             for i in due {
-                lists[i] = Arc::new(load_list(&self.config.lists[i]).await?);
+                // A refresh always downloads again; that is its job.
+                lists[i] = load_list(&self.config.lists[i], false).await?.0;
                 check_rule_budget(&self.config, &lists)?;
             }
             let config = self.config.clone();
@@ -567,15 +611,48 @@ fn check_rule_budget(config: &Config, lists: &[Arc<ParsedList>]) -> Result<(), S
     }
     Ok(())
 }
-async fn load_list(source: &config::List) -> Result<ParsedList, String> {
+/// What a cancelled apply reports.
+const CANCELLED: &str = "download cancelled";
+
+/// Load one list, from the download cache when allowed. Returns when it was downloaded.
+async fn load_list(
+    source: &config::List,
+    use_cache: bool,
+) -> Result<(Arc<ParsedList>, Instant), String> {
     let id = source.id.clone();
-    activity::state(&id, "downloading");
-    let result = activity::scope(&id, load_list_inner(source)).await;
-    match &result {
-        Ok(parsed) => activity::ready(&id, parsed.rules.len()),
-        Err(error) => activity::failed(&id, error),
+    if activity::cancel_requested() {
+        activity::failed(&id, "cancelled");
+        return Err(CANCELLED.into());
     }
-    result
+    if use_cache && let Some(url) = &source.url {
+        let max_age =
+            (source.refresh_secs != 0).then(|| Duration::from_secs(u64::from(source.refresh_secs)));
+        if let Some(hit) = cache::get(url, source.format, max_age) {
+            activity::ready(&id, hit.list.rules.len());
+            return Ok((hit.list, hit.fetched));
+        }
+    }
+    activity::state(&id, "downloading");
+    let work = activity::scope(&id, load_list_inner(source));
+    let result = tokio::select! {
+        result = work => result,
+        () = activity::cancelled() => Err(CANCELLED.to_owned()),
+    };
+    match result {
+        Ok(parsed) => {
+            activity::ready(&id, parsed.rules.len());
+            let list = Arc::new(parsed);
+            let fetched = match &source.url {
+                Some(url) => cache::put(url, source.format, Arc::clone(&list)),
+                None => Instant::now(),
+            };
+            Ok((list, fetched))
+        }
+        Err(error) => {
+            activity::failed(&id, &error);
+            Err(error)
+        }
+    }
 }
 async fn load_list_inner(source: &config::List) -> Result<ParsedList, String> {
     let source = source.clone();

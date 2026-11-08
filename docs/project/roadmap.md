@@ -2,7 +2,7 @@
 
 Where Lumen is today and where it is going. This page replaces the former separate *progress*, *TODO*, and *product plan* documents.
 
-_Last updated 2026-11-08 for version 0.5.7._
+_Last updated 2026-11-08 for version 0.5.8._
 
 > [!IMPORTANT]
 > Lumen is **pre-release**. A checked box means *implemented, documented, and covered by the checks in the [verification record](verification.md)*. It does **not** mean production-ready, and unrun platform checks or planned features are never marked as shipped.
@@ -19,6 +19,8 @@ _Last updated 2026-11-08 for version 0.5.7._
 - Opt-in query history: recent lookups in memory, or saved for 1 to 90 days, anonymous or with the device
 - An optional authenticated loopback management API with signed webhooks
 - Privacy-safe Prometheus metrics, a Grafana dashboard, and Home Assistant examples
+- Block lists that install in the background without restarting anything, are never downloaded twice by accident, and can be cancelled
+- Forward mode with up to 8 ranked providers and a choice of ranked fallback, fastest first, round-robin, or race
 - Native packages for six platforms and container images for `linux/amd64` and `linux/arm64`
 
 **Still ahead**
@@ -51,7 +53,7 @@ Principles that shape every decision:
 
 ### Foundation
 
-- [x] Rust workspace, Apache-2.0, SemVer (currently `0.5.7`)
+- [x] Rust workspace, Apache-2.0, SemVer (currently `0.5.8`)
 - [x] README, contributor guide, security policy, and code of conduct
 - [x] Architecture, threat model, privacy defaults, and protocol scope
 - [x] CI for Linux, macOS, Windows, lint, tests, and the minimum Rust version
@@ -79,6 +81,8 @@ Principles that shape every decision:
 - [x] Explicit forwarding with UDP, TCP, and verified DoT, DoH, and DoQ upstreams
 - [x] Encrypted-only provider transport selection and connection-failure failover
 - [x] Opt-in recursive timeout fallback with DNSSEC, loop, and deadline guards
+- [x] Up to 8 ranked providers with a strategy (ranked fallback, fastest first, round-robin, race), per-provider timeouts, and a short rest for a failed provider (0.5.8)
+- [x] Lists load in the background, are cached across reloads, can be cancelled, and filtering-only changes go live without restarting listeners (0.5.8)
 - [x] Shared query and connection admission, packet bounds, and client IP rate limits
 - [x] Query, I/O, handshake, and forwarding retry and deadline bounds
 - [x] DNS failure handling, listener failure propagation, and signal shutdown
@@ -160,7 +164,7 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### High priority: do next
 
-1. **Publish release 0.5.7.** It carries opt-in query history and the localized console. Tag `v0.5.7` to run the release pipeline.
+1. **Transport failover when a provider's first transport is silent.** A blocked QUIC port can stall a whole provider today, because the forwarding library gives one query a single deadline. Needs a per-transport budget. See [Upstream providers](../guides/upstream-providers.md#how-failover-works).
 
 ### Medium priority: soon
 
@@ -169,19 +173,22 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### Lower priority: later
 
-4. **Trust-anchor rollover automation and certificate lifecycle tooling.**
-5. **Split DNS, local records, and conditional forwarding.**
-6. **Recursion speed evidence:** a statistically significant cold-query result and an expiry-refresh benchmark (see [Recursion speed](#recursion-speed-issue-9)).
+4. **Faster, lighter list downloads.** Ideas, roughly in order of payoff: conditional requests (`ETag` / `If-Modified-Since`) so an unchanged list costs almost nothing; downloading several lists at once with a bound; asking for compressed transfer; keeping downloaded lists on disk so a restart does not fetch them again; and delta updates for very large lists. Lists already stay in memory across reloads, so changing settings no longer downloads them again.
+5. **Weighted random load balancing** across providers (spreading by recent speed rather than evenly), as some filter apps offer. Round-robin and fastest-first cover most of it today.
+
+6. **Trust-anchor rollover automation and certificate lifecycle tooling.**
+7. **Split DNS, local records, and conditional forwarding.**
+8. **Recursion speed evidence:** a statistically significant cold-query result and an expiry-refresh benchmark (see [Recursion speed](#recursion-speed-issue-9)).
 
 ### Large efforts, before or after 1.0
 
-7. **Independent security review.** Required before a stable release.
-8. **High availability and cluster configuration replication.**
-9. **Optional DNS threat feeds and enterprise policy features.**
+9. **Independent security review.** Required before a stable release.
+10. **High availability and cluster configuration replication.**
+11. **Optional DNS threat feeds and enterprise policy features.**
 
 ### Not now
 
-10. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
+12. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
 
 ## Side projects
 
