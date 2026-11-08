@@ -11,6 +11,7 @@ use std::{
 };
 
 const HELP: &str = "Usage:
+  lumenctl --version
   lumenctl config validate --config FILE
   lumenctl config apply --config FILE --state FILE
   lumenctl config show --state FILE
@@ -31,6 +32,7 @@ Console accounts: `--password stdin` reads one line from standard input, e.g.
 
 #[derive(Debug)]
 enum Command {
+    Version,
     ConfigValidate {
         config: PathBuf,
     },
@@ -89,6 +91,9 @@ fn arguments(args: impl IntoIterator<Item = String>) -> Result<Option<Command>, 
     let args = args.into_iter().collect::<Vec<_>>();
     if args.is_empty() || args == ["--help"] || args == ["-h"] {
         return Ok(None);
+    }
+    if args == ["--version"] || args == ["-V"] {
+        return Ok(Some(Command::Version));
     }
     match args.as_slice() {
         [name, rest @ ..] if name == "config" => config_command(rest),
@@ -296,6 +301,7 @@ async fn main() -> io::Result<()> {
         return Ok(());
     };
     match command {
+        Command::Version => println!("lumenctl {}", env!("CARGO_PKG_VERSION")),
         Command::ConfigValidate { config } => {
             let config = lumen_config::Config::load(&config).map_err(io::Error::other)?;
             lumen_core::RunningServer::check(&config).await?;
@@ -496,6 +502,8 @@ mod tests {
     #[test]
     fn strict_cross_platform_commands() {
         assert!(parse(&["--help"]).unwrap().is_none());
+        assert!(matches!(parse(&["--version"]), Ok(Some(Command::Version))));
+        assert!(matches!(parse(&["-V"]), Ok(Some(Command::Version))));
         assert!(parse(&["reload", "--state", "lumen.db"]).is_ok());
         assert!(
             parse(&[
@@ -538,6 +546,7 @@ mod tests {
                 "bad",
             ],
             vec!["filter", "missing", "--state", "a"],
+            vec!["--version", "status"],
         ] {
             assert!(parse(&args).is_err());
         }

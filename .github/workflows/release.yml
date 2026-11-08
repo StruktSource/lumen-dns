@@ -4,6 +4,10 @@ on:
   push:
     tags: ["v*"]
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -17,7 +21,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Verify tag and release metadata
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+          python scripts/verify-release.py --version "${GITHUB_REF_NAME}"
       - run: rustup toolchain install ${{ env.RUST_VERSION }} --profile minimal --component clippy,rustfmt
       - run: ./scripts/dev.sh check
       - run: cargo +${{ env.RUST_VERSION }} install cargo-audit --version 0.22.1 --locked
@@ -121,6 +131,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -136,6 +148,7 @@ jobs:
         id: meta
         with:
           images: ghcr.io/struktsource/lumen-dns
+          flavor: latest=auto
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -158,13 +171,20 @@ jobs:
       contents: write
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
+          pattern: lumen-*
           path: release-artifacts
           merge-multiple: true
       - name: Verify archives and build checksum manifest
         working-directory: release-artifacts
         run: |
+          test "$(find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 6
+          test "$(find . -maxdepth 1 -type f -name '*.sha256' | wc -l)" -eq 6
+          test -z "$(find . -maxdepth 1 -type f ! -name 'lumen-*')"
           for checksum in *.sha256; do sha256sum --check "$checksum"; done
           cat *.sha256 > SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
@@ -177,4 +197,5 @@ jobs:
         run: |
           flags=()
           if [[ "${GITHUB_REF_NAME}" == *-* ]]; then flags+=(--prerelease); fi
-          gh release create "${GITHUB_REF_NAME}" release-artifacts/* --verify-tag --generate-notes "${flags[@]}"
+          gh release create "${GITHUB_REF_NAME}" release-artifacts/* --verify-tag \
+            --title "Lumen ${GITHUB_REF_NAME#v}" --notes-file RELEASE_NOTES.md "${flags[@]}"
