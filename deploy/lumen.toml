@@ -1,16 +1,18 @@
-# Lumen deployment defaults. Private-network DNS with blank UI hosting.
+# Lumen deployment defaults for containers and services: private-network DNS and the web console.
 # Full reference: ../docs/reference/configuration.md
+# Console settings (language, query history, accounts, sessions) are saved in the state database,
+# not in this file. Change them in the console or with `lumenctl`.
 schema_version = 1
 # Optional local aggregate metrics. Disabled by default.
 # metrics = "127.0.0.1:9153"
 
-# Blank embedded UI. Compose publishes it on host loopback only.
+# Web console. Compose publishes it on host loopback only. First-run setup asks for the code in the logs.
 [web]
 http = ["0.0.0.0:8080"]
 https = []
 max_connections = 64
 
-# Local DNS listeners. Change both addresses and allow_clients for LAN use.
+# DNS listeners. Lumen only answers clients inside allow_clients.
 [listen]
 udp = ["0.0.0.0:5353", "[::]:5353"]
 tcp = ["0.0.0.0:5353", "[::]:5353"]
@@ -18,7 +20,7 @@ tcp = ["0.0.0.0:5353", "[::]:5353"]
 dot = []
 doh = []
 doq = []
-# Only this host may query Lumen by default.
+# This host and private networks may query Lumen. Never add the whole internet.
 allow_clients = [
     "127.0.0.0/8",
     "::1/128",
