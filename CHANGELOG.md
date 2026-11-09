@@ -2,6 +2,20 @@
 
 All notable user-facing changes are listed here. Lumen is still pre-release.
 
+## [0.6.0] - 2026-11-09
+
+### Added
+
+- **Live view on Activity.** A *Live* switch adds new lookups to the list every 2 seconds, with a short highlight on new rows. The choice is remembered in the browser, so it stays on until you switch it off.
+
+### Changed
+
+- The Overview now reloads every 10 seconds (it was 5).
+
+### Fixed
+
+- Choosing *Use another resolver* (Quad9) in the setup wizard now sticks. The stock config enabled recursive-only zone warm-up, which made the forward config invalid, so Lumen silently stayed in recursive mode.
+
 ## [0.5.9] - 2026-11-09
 
 ### Fixed

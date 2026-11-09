@@ -2,7 +2,7 @@
 
 Where Lumen is today and where it is going. This page replaces the former separate *progress*, *TODO*, and *product plan* documents.
 
-_Last updated 2026-11-09 for version 0.5.9._
+_Last updated 2026-11-09 for version 0.6.0._
 
 > [!IMPORTANT]
 > Lumen is **pre-release**. A checked box means *implemented, documented, and covered by the checks in the [verification record](verification.md)*. It does **not** mean production-ready, and unrun platform checks or planned features are never marked as shipped.
@@ -53,7 +53,7 @@ Principles that shape every decision:
 
 ### Foundation
 
-- [x] Rust workspace, Apache-2.0, SemVer (currently `0.5.9`)
+- [x] Rust workspace, Apache-2.0, SemVer (currently `0.6.0`)
 - [x] README, contributor guide, security policy, and code of conduct
 - [x] Architecture, threat model, privacy defaults, and protocol scope
 - [x] CI for Linux, macOS, Windows, lint, tests, and the minimum Rust version
