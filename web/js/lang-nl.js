@@ -634,5 +634,7 @@ L.i18n.add('nl', {
 "Every bundled provider is in use": "Alle meegeleverde providers zijn in gebruik",
 "Remove one above to add another.": "Verwijder er hierboven een om een andere toe te voegen.",
 "No encrypted transport": "Geen versleuteld transport",
-"At most {n} here.": "Hier maximaal {n}."
+"At most {n} here.": "Hier maximaal {n}.",
+"Live": "Live",
+"Live view adds new lookups to the list as they happen.": "De live-weergave voegt nieuwe opzoekingen direct aan de lijst toe."
 });

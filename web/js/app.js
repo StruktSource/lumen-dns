@@ -72,9 +72,9 @@ addEventListener('hashchange', () => { L.render(); scrollTo(0, 0); });
   await L.render();
 })();
 
-/* Keep the overview live. */
+/* Keep the overview live: it reloads every 10 seconds. */
 setInterval(async () => {
   if (document.hidden || !L.session || L.route().page !== 'overview' || L.$('dialog[open]')) return;
   try { await Promise.all([L.loadStatus(), L.loadSeries()]); L.paintMain(); } catch { /* next tick */ }
-}, 5000);
+}, 10000);
 })();

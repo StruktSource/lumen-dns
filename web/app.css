@@ -212,3 +212,7 @@ dialog::backdrop{background:#000a;backdrop-filter:blur(2px)}dialog[open]{animati
 
 /* Ranked providers */
 .rank{display:inline-grid;place-items:center;min-width:28px;height:28px;border:1px solid var(--text);font-family:var(--mono);font-weight:700;font-size:13px}
+
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--text-2);display:inline-block}.live-dot.on{background:var(--ok);animation:livepulse 1.6s ease-in-out infinite}@keyframes livepulse{50%{opacity:.35}}
+.tbl tr.fresh td{animation:freshrow 2.4s ease-out}@keyframes freshrow{from{background:color-mix(in srgb,var(--ok) 22%,transparent)}}
+@media(prefers-reduced-motion:reduce){.live-dot.on,.tbl tr.fresh td{animation:none}}

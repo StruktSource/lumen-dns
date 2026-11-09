@@ -634,5 +634,7 @@ L.i18n.add('es', {
 "Every bundled provider is in use": "Todos los proveedores incluidos están en uso",
 "Remove one above to add another.": "Quita uno arriba para añadir otro.",
 "No encrypted transport": "Sin transporte cifrado",
-"At most {n} here.": "Aquí, como máximo {n}."
+"At most {n} here.": "Aquí, como máximo {n}.",
+"Live": "En vivo",
+"Live view adds new lookups to the list as they happen.": "La vista en vivo añade las nuevas consultas a la lista al instante."
 });

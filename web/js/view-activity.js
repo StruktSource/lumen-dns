@@ -3,6 +3,10 @@
 'use strict';
 const L = window.L, h = L.h;
 let q = { search: '', filter: 'all' }, timer = null, form = null, working = false;
+/* Live view: remembered in this browser, so it does not have to be switched on again after every visit. */
+const LIVE_KEY = 'lumen.activity.live', LIVE_MS = 2000;
+const liveSaved = () => { try { return localStorage.getItem(LIVE_KEY) === '1'; } catch { return false; } };
+let live = liveSaved(), polling = false, newest = 0;
 
 const MODES = [
   ['off', 'Off', 'Only counters are kept. No lookups are recorded.'],
@@ -16,14 +20,29 @@ const reload = async more => {
 
 const table = () => {
   const H = L.S.history, rows = H.items, anon = H.detail === 'anonymous';
+  const seen = newest; newest = rows.length ? Math.max(...rows.map(r => r.t)) : newest;
   return h('div', { id: 'hist-body' },
     h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Time (UTC)', 'Domain', 'Type', 'Device', 'Result', 'Latency'].map((x, i) => h('th', { class: i === 5 ? 'r' : '' }, x)))),
-      h('tbody', {}, rows.length ? rows.map(r => h('tr', {}, h('td', { class: 'mono-c' }, new Date(r.t).toISOString().slice(11, 19)), h('td', {}, r.domain), h('td', { class: 'mono-c' }, r.type),
+      h('tbody', {}, rows.length ? rows.map(r => h('tr', { class: live && seen && r.t > seen ? 'fresh' : '' }, h('td', { class: 'mono-c' }, new Date(r.t).toISOString().slice(11, 19)), h('td', {}, r.domain), h('td', { class: 'mono-c' }, r.type),
         h('td', {}, r.device || r.client || h('span', { class: 'muted', title: 'Anonymous history does not record who asked.' }, '—'), r.device && r.client ? h('div', { class: 'hint mono' }, r.client) : null),
         h('td', {}, h('span', { class: 'pill ' + (r.blocked ? 'bad' : r.rcode === 'SERVFAIL' ? 'warn' : 'ok') }, r.blocked ? 'Blocked' : r.rcode === 'NOERROR' ? 'Allowed' : r.rcode)), h('td', { class: 'mono-c r' }, r.ms.toFixed(1) + ' ms')))
         : h('tr', {}, h('td', { colspan: 6, class: 'muted' }, q.search || q.filter !== 'all' ? 'No matching entries.' : 'No queries yet. They appear here as devices look things up.'))))),
     H.next_before ? h('div', { class: 'card-b row', style: 'justify-content:center' }, h('button', { class: 'btn', onclick: () => reload(true) }, 'Show more')) : null,
     anon && rows.length ? h('div', { class: 'card-b hint' }, 'This history is anonymous: it does not record which device asked.') : null);
+};
+
+/* One quiet refresh of the first page. Only the list is swapped, so typing in the search box is never interrupted. */
+const livePoll = async () => {
+  if (!live || polling || document.hidden || !L.session || L.route().page !== 'activity' || L.$('dialog[open]') || working) return;
+  const H = L.S.history; if (!H || (H.mode === 'off' && !(H.saved?.rows > 0))) return;
+  polling = true;
+  try { await L.loadHistory(q); if (live && L.route().page === 'activity') L.$('#hist-body')?.replaceWith(table()); } catch { /* next tick */ }
+  polling = false;
+};
+setInterval(livePoll, LIVE_MS);
+const toggleLive = () => {
+  live = !live; try { localStorage.setItem(LIVE_KEY, live ? '1' : '0'); } catch { /* storage blocked */ }
+  if (live) { newest = 0; reload(false).then(() => L.rerender()); } else L.rerender();
 };
 
 const apply = async () => {
@@ -76,7 +95,9 @@ const controls = () => {
 L.views.activity = () => {
   const H = L.S.history, showTable = H.mode !== 'off' || (H.saved?.rows || 0) > 0;
   const head = L.pageHead('Activity', H.mode === 'saved' ? 'Newest first. Saved in the state database.' : 'Which devices asked for what, and what happened to it.',
-    showTable ? h('button', { class: 'btn', onclick: () => reload(false) }, L.ic('refresh'), 'Refresh') : null);
+    showTable ? h('div', { class: 'row' },
+      h('button', { class: 'btn' + (live ? ' primary' : ''), 'aria-pressed': String(live), title: 'Live view adds new lookups to the list as they happen.', onclick: toggleLive }, h('i', { class: 'live-dot' + (live ? ' on' : ''), 'aria-hidden': 'true' }), 'Live'),
+      h('button', { class: 'btn', onclick: () => reload(false) }, L.ic('refresh'), 'Refresh')) : null);
   if (!showTable) return [head, controls(), h('div', { class: 'card', style: 'margin-top:16px' }, L.empty('Query history is off', 'Per-domain activity is opt-in. While it is off, the Overview still shows rates, blocked share, latency and answers, none of which identify a person.'))];
   return [head, controls(),
     h('div', { class: 'card', style: 'margin-top:16px' }, h('div', { class: 'card-h' },
