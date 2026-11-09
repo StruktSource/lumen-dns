@@ -33,7 +33,73 @@ Day-to-day:
 | Task | Command |
 | :--- | :--- |
 | Stop | `docker compose down` |
-| Upgrade | Change the pinned tag, `docker compose pull`, check with `docker compose run --rm lumen --check`, then `docker compose up -d` |
+| Upgrade | Back up the state volume, change the pinned tag, validate, and recreate the container as shown below. |
+
+## Update without losing data
+
+Lumen keeps accounts, console settings, devices, saved query history, and the active configuration in `/var/lib/lumen`. The Compose file stores that directory in the `lumen-state` volume. Recreating the container keeps the volume. Running `docker compose down -v` deletes it, so never use `-v` during an update.
+
+Run these commands from the directory that contains `docker-compose.yml`:
+
+1. Pull the small backup helper and the new Lumen image while the old container still runs:
+
+   ```sh
+   docker pull busybox:1.37
+   # First change the pinned Lumen tag in docker-compose.yml.
+   docker compose pull lumen
+   docker compose config --quiet
+   ```
+
+2. Stop Lumen, then make a consistent archive of its state volume:
+
+   ```sh
+   docker compose stop lumen
+   lumen_container="$(docker compose ps -a -q lumen)"
+   mkdir -p backups
+   docker run --rm --volumes-from "${lumen_container}:ro" \
+     -v "$PWD/backups:/backup" busybox:1.37 \
+     tar -czf /backup/lumen-state-before-update.tar.gz -C /var/lib/lumen .
+   ```
+
+3. Check the new image and start it with the same volume:
+
+   ```sh
+   docker compose run --rm --no-deps lumen \
+     --config /etc/lumen/lumen.toml --check
+   docker compose up -d lumen
+   docker compose logs --tail 100 lumen
+   ```
+
+4. Test UDP and TCP DNS before pointing more clients at it:
+
+   ```sh
+   dig @127.0.0.1 example.com A
+   dig @127.0.0.1 example.com A +tcp
+   ```
+
+If both replies are `NOERROR`, the update is done. `docker compose up -d` replaces only the container. It does not replace the named state volume or the bind-mounted `lumen.toml`.
+
+### Roll back
+
+First put the old pinned tag back in `docker-compose.yml`, then run:
+
+```sh
+docker compose pull lumen
+docker compose up -d lumen
+```
+
+Lumen may migrate its state database during an update. An older release cannot always read a newer schema. If the old release reports a schema error, stop it and restore the backup before starting it again:
+
+```sh
+docker compose stop lumen
+lumen_container="$(docker compose ps -a -q lumen)"
+docker run --rm --volumes-from "${lumen_container}" \
+  -v "$PWD/backups:/backup:ro" busybox:1.37 \
+  sh -c 'find /var/lib/lumen -mindepth 1 -maxdepth 1 -delete && tar -xzf /backup/lumen-state-before-update.tar.gz -C /var/lib/lumen'
+docker compose up -d lumen
+```
+
+Restoring removes the newer state first. Keep the backup until the old release starts and both DNS tests pass.
 
 ## Plain Docker
 
@@ -49,7 +115,7 @@ docker run --name lumen --read-only --user 65532:65532 \
   ghcr.io/struktsource/lumen-dns:0.5.8
 ```
 
-Stop with `docker stop --time 15 lumen`. Upgrade by replacing the container with a newer **pinned** version.
+Stop with `docker stop --time 15 lumen`. To upgrade, stop and remove only the container, then create it again with a newer **pinned** image and the same `lumen-state:/var/lib/lumen` volume. Never remove the volume. Back it up first with the same `--volumes-from` method above.
 
 ## Things to know
 
