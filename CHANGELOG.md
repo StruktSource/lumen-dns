@@ -2,6 +2,16 @@
 
 All notable user-facing changes are listed here. Lumen is still pre-release.
 
+## [0.5.9] - 2026-11-09
+
+### Fixed
+
+- Forwarding now tries the next provider when an upstream returns SERVFAIL. The failing provider rests for 10 seconds, which avoids repeated failures and delay without overriding usable DNS answers or local DNSSEC failures.
+
+### Documentation
+
+- Added a Docker and Compose update guide with a consistent state backup, UDP/TCP smoke tests, rollback, and database restore steps.
+
 ## [0.5.8] - 2026-11-08
 
 ### Added
@@ -66,6 +76,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 - Added a supported v1 configuration fixture and initial six-platform release packages.
 - Added stricter DNSSEC policy handling and release checks.
 
+[0.5.9]: https://github.com/StruktSource/lumen-dns/compare/v0.5.8...v0.5.9
 [0.5.8]: https://github.com/StruktSource/lumen-dns/compare/v0.5.7...v0.5.8
 [0.5.7]: https://github.com/StruktSource/lumen-dns/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/StruktSource/lumen-dns/compare/v0.5.5...v0.5.6

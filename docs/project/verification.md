@@ -153,6 +153,13 @@ Local macOS ARM64 checks for the new code only. No hosted CI result is claimed h
 - **Console.** The real scripts were rendered in a stubbed DOM for the new provider screen (one, two and eight providers, a plain-only provider, validation of mixed transports, strategy sent only in forward mode) and the Lists tab. The translation test still passes with the new strings in all four languages.
 - **Not covered.** No real browser session, no cancel of a real in-flight download (it needs a public HTTPS host that stalls), no test against real public providers, and no check of a provider whose first transport is silently blocked (a known limit, see the roadmap). Translations have not been reviewed by native speakers.
 
+### 2026-11-09: SERVFAIL provider fallback and 0.5.9 candidate
+
+- A live 0.5.8 Docker setup returned SERVFAIL for common Google A and HTTPS queries while direct DoH queries to each configured provider returned NOERROR. Its first provider response was final, so later providers were never asked.
+- Unit coverage checks both Hickory SERVFAIL error forms. An end-to-end test runs a SERVFAIL UDP provider before a working provider, proves the working answer is returned, and proves the failing provider rests for later queries. NXDOMAIN and local DNSSEC failures remain final.
+- `scripts/verify-release.py --version v0.5.9`, locked Cargo and fuzz metadata, `./scripts/dev.sh check`, Docker Compose validation, and `git diff --check` passed locally on macOS ARM64.
+- This is candidate evidence only. No tag or release was created, and hosted PR CI remains required.
+
 ### 2026-11-08: query history, localization, and release 0.5.7
 
 Local macOS ARM64 checks. These cover the new code only, and no hosted CI result is claimed here.

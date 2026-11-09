@@ -1,13 +1,12 @@
-# Lumen 0.5.8
+# Lumen 0.5.9
 
-Lumen 0.5.8 makes block lists painless and lets forward mode use several providers at once.
+Lumen 0.5.9 makes multi-provider forwarding recover from upstream SERVFAIL responses and documents safe container updates.
 
 ## Highlights
 
-- **Lists install in the background.** Installing, removing, adding or editing a list asks you to confirm, then loads without a draft or an *Apply* bar. DNS keeps working, and nothing restarts: no listener restart, no closed connections, no cleared caches.
-- **No more re-downloading.** Changing the resolver mode, an upstream, or another list no longer downloads the lists you already have. Only new, changed or due lists are fetched.
-- **Cancel a download.** The progress panel has a *Cancel* button. Nothing changes if you press it, and what was already downloaded is kept.
-- **Up to 8 providers, ranked.** Pick several bundled providers, rank them, and choose *ranked fallback*, *fastest first*, *round-robin*, or *race*. A provider that is down is skipped for a short while.
+- **SERVFAIL provider fallback.** When one upstream provider returns SERVFAIL, Lumen asks the next configured provider instead of returning the failure to the client.
+- **Less repeat delay.** A provider that returns SERVFAIL rests for 10 seconds, so each repeated query does not pay for the same failed path.
+- **Safe Docker updates.** The Docker guide now backs up the stopped state volume, validates the new image, tests UDP and TCP, and explains rollback when a database schema changed.
 
 ## Check the download
 
@@ -15,7 +14,7 @@ Download the archive for your system plus `SHA256SUMS`, then run:
 
 ```sh
 sha256sum --check SHA256SUMS --ignore-missing
-gh attestation verify lumen-v0.5.8-<platform>.<extension> --repo StruktSource/lumen-dns
+gh attestation verify lumen-v0.5.9-<platform>.<extension> --repo StruktSource/lumen-dns
 ```
 
 On macOS, use `shasum -a 256 -c` with the matching `.sha256` file if `sha256sum` is not installed.
@@ -24,11 +23,9 @@ While a release is still publishing, its page lists only the platforms that are 
 
 ## Upgrade notes
 
-- No configuration or data changes since 0.5.7. Existing forward settings keep their old behavior until you choose a strategy.
-- Downloaded lists are kept in memory only, so the first start after an upgrade downloads them once.
+- No configuration or database schema changes since 0.5.8.
 - Replace both `lumen` and `lumenctl` from the same archive.
-- Container and Helm users should pin image tag `0.5.8`.
-- Known limit: if a provider's *first* transport is silently blocked (for example a firewall dropping QUIC), that provider can fail as a whole. Other providers still answer. Choose HTTPS or TLS for it on such a network.
-- Some longer help texts on the DNS settings and Filtering pages are not translated yet and appear in English.
+- Container and Helm users should pin image tag `0.5.9` and back up `/var/lib/lumen` before recreating the container.
+- NXDOMAIN, usable DNS answers, and local DNSSEC validation failures remain final. Only an upstream SERVFAIL joins connection and timeout errors as a reason to try another provider.
 
 Lumen remains pre-release software. Test it on the target network before wider use. See `CHANGELOG.md` for the full summary.

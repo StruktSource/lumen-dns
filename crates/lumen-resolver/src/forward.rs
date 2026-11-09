@@ -10,13 +10,16 @@
 //! - **Round-robin** starts each query at the next provider in turn.
 //! - **Race** asks every provider at once and takes the first answer.
 //!
-//! Only connection errors and timeouts move on to another provider. A DNS answer, including
-//! NXDOMAIN, SERVFAIL and a DNSSEC failure, is final: asking a second provider for a
-//! different answer would let it override a validation result.
+//! Connection errors, timeouts, and an upstream SERVFAIL move on to another provider. A usable
+//! DNS answer, including NXDOMAIN, and a local DNSSEC failure are final: asking a second provider
+//! for a different answer would let it override a validation result.
 
 use hickory_server::{
-    net::{NetError, runtime::RuntimeProvider},
-    proto::rr::{Name, RecordType},
+    net::{DnsError, NetError, NoRecords, runtime::RuntimeProvider},
+    proto::{
+        op::ResponseCode,
+        rr::{Name, RecordType},
+    },
     resolver::{Resolver, lookup::Lookup},
 };
 use lumen_config::ForwardStrategy;
@@ -90,6 +93,13 @@ fn try_next_provider(error: &NetError) -> bool {
             | NetError::RustlsError(_)
             | NetError::QueryCaseMismatch
             | NetError::Truncated
+            | NetError::Dns(
+                DnsError::ResponseCode(ResponseCode::ServFail)
+                    | DnsError::NoRecordsFound(NoRecords {
+                        response_code: ResponseCode::ServFail,
+                        ..
+                    }),
+            )
     )
 }
 
@@ -262,20 +272,25 @@ mod tests {
 
     #[test]
     fn only_unreachable_providers_move_on_never_dns_answers() {
-        use hickory_server::net::DnsError;
         assert!(try_next_provider(&NetError::Timeout));
         assert!(try_next_provider(&NetError::NoConnections));
         assert!(try_next_provider(&NetError::Io(std::sync::Arc::new(
             std::io::Error::other("refused")
         ))));
-        // A DNS answer, even a negative one, ends the lookup.
-        let nxdomain = NetError::from(DnsError::ResponseCode(
-            hickory_server::proto::op::ResponseCode::NXDomain,
-        ));
+        // A usable DNS answer, even a negative one, ends the lookup.
+        let nxdomain = NetError::from(DnsError::ResponseCode(ResponseCode::NXDomain));
         assert!(!try_next_provider(&nxdomain));
-        let servfail = NetError::from(DnsError::ResponseCode(
-            hickory_server::proto::op::ResponseCode::ServFail,
-        ));
-        assert!(!try_next_provider(&servfail));
+        // SERVFAIL says this provider could not answer. It carries no usable data and is not a
+        // local validation result, so another provider may answer without weakening DNSSEC.
+        let servfail = NetError::from(DnsError::ResponseCode(ResponseCode::ServFail));
+        assert!(try_next_provider(&servfail));
+        let no_records = NetError::from(DnsError::NoRecordsFound(NoRecords::new(
+            Box::new(hickory_server::proto::op::Query::query(
+                Name::from_ascii("example.").unwrap(),
+                RecordType::A,
+            )),
+            ResponseCode::ServFail,
+        )));
+        assert!(try_next_provider(&no_records));
     }
 }
