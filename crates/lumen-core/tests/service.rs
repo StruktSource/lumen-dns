@@ -152,6 +152,14 @@ impl Drop for Fixture {
 }
 
 async fn fixture() -> Fixture {
+    fixture_with_servfail(false).await
+}
+
+async fn servfail_fixture() -> Fixture {
+    fixture_with_servfail(true).await
+}
+
+async fn fixture_with_servfail(servfail: bool) -> Fixture {
     // The UDP port with the same number as a fresh TCP port can already be taken by another
     // test's socket, so retry with a new TCP port until both protocols bind.
     let (tcp, udp, address) = loop {
@@ -185,7 +193,7 @@ async fn fixture() -> Fixture {
                 continue;
             }
             let limit = request.max_payload();
-            let response = mock_response(request, false);
+            let response = mock_response(request, false, servfail);
             let mut bytes = vec![];
             let mut encoder = BinEncoder::new(&mut bytes);
             encoder.set_max_size(limit);
@@ -219,7 +227,7 @@ async fn fixture() -> Fixture {
                         // Never answer "slow" names, so a TCP retry cannot rescue them.
                         continue;
                     }
-                    let response = mock_response(request, true).to_vec().unwrap();
+                    let response = mock_response(request, true, servfail).to_vec().unwrap();
                     if stream
                         .write_u16(u16::try_from(response.len()).unwrap())
                         .await
@@ -242,7 +250,7 @@ async fn fixture() -> Fixture {
     }
 }
 
-fn mock_response(request: Message, tcp: bool) -> Message {
+fn mock_response(request: Message, tcp: bool, servfail: bool) -> Message {
     let mut response = Message::response(request.metadata.id, request.metadata.op_code);
     response.metadata.authoritative = true;
     response.metadata.recursion_available = true;
@@ -252,6 +260,10 @@ fn mock_response(request: Message, tcp: bool) -> Message {
     let q = &response.queries[0];
     let name = q.name().clone();
     let text = name.to_ascii().to_lowercase();
+    if servfail {
+        response.metadata.response_code = ResponseCode::ServFail;
+        return response;
+    }
     if text.starts_with("tcp.") && !tcp {
         response.metadata.truncation = true;
         return response;
@@ -1294,6 +1306,30 @@ async fn forward_strategies_fail_over_spread_race_and_skip_dead_upstreams() {
             "{strategy:?} reached the live upstream"
         );
     }
+
+    // SERVFAIL from an upstream is not useful DNS data and is not a local DNSSEC failure. Try
+    // the next provider, then rest the failing one so it cannot add delay to every lookup.
+    let servfail = servfail_fixture().await;
+    let list = vec![
+        udp_upstream(servfail.address),
+        udp_upstream(upstreams[1].address),
+    ];
+    let before_live = upstreams[1].queries.load(Ordering::Relaxed);
+    let (mut server, bind) = start(Some(ForwardStrategy::Failover), list, 2_000).await;
+    ask(bind, "servfail-first", 1).await;
+    let bad_after_first = servfail.queries.load(Ordering::Relaxed);
+    ask(bind, "servfail-rested", 3).await;
+    assert_eq!(
+        servfail.queries.load(Ordering::Relaxed),
+        bad_after_first,
+        "SERVFAIL provider should rest after the first failure"
+    );
+    assert_eq!(
+        upstreams[1].queries.load(Ordering::Relaxed) - before_live,
+        4,
+        "the next provider should answer every query"
+    );
+    server.shutdown().await;
 }
 
 /// A filtering-only change goes live in the running service: same listeners, no restart.

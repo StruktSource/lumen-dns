@@ -61,7 +61,7 @@ Full field list: [Configuration: resolver](../reference/configuration.md#resolve
 
 ### Encrypted transport failover
 
-With `protocol = "auto"`, Lumen builds an encrypted-only list for a provider, in the order you set (default: QUIC, then HTTPS, then TLS). It moves to the next transport **only** after a connection, transport, or timeout error. It never fails over because of a DNS answer (including NXDOMAIN or SERVFAIL) or a DNSSEC failure, and it never falls back to plain text.
+With `protocol = "auto"`, Lumen builds an encrypted-only list for a provider, in the order you set (default: QUIC, then HTTPS, then TLS). It moves to the next transport **only** after a connection, transport, or timeout error. An upstream SERVFAIL can move to the next configured provider, but a usable DNS answer (including NXDOMAIN) or local DNSSEC failure is final. It never falls back to plain text.
 
 ## Which should I choose?
 

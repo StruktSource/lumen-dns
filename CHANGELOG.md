@@ -2,6 +2,12 @@
 
 All notable user-facing changes are listed here. Lumen is still pre-release.
 
+## [Unreleased]
+
+### Fixed
+
+- Forwarding now tries the next provider when an upstream returns SERVFAIL. The failing provider rests for 10 seconds, which avoids repeated failures and delay without overriding usable DNS answers or local DNSSEC failures.
+
 ## [0.5.8] - 2026-11-08
 
 ### Added

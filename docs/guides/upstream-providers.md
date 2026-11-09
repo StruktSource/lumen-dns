@@ -71,7 +71,7 @@ If you know load balancing from other filter apps: *Load balancing* corresponds 
 
 ### How failover works
 
-Each provider is its own forwarder with its own timeout. Lumen moves to the next provider only after a **connection, transport, or timeout** failure. A DNS answer, including NXDOMAIN or SERVFAIL, and a local DNSSEC failure, ends the lookup: another provider is never asked for a different answer.
+Each provider is its own forwarder with its own timeout. Lumen moves to the next provider after a **connection, transport, timeout, or upstream SERVFAIL** failure. SERVFAIL has no usable DNS data, so the next provider may still answer. A usable DNS answer, including NXDOMAIN, and a local DNSSEC failure ends the lookup: another provider is never asked for a different answer.
 
 - A provider that **just failed** is left alone for 10 seconds and then tried again at its rank, so every query does not wait for it. If every provider fails, all of them are tried again.
 - A provider that accepts connections but never answers costs **one timeout** (`upstream_timeout_ms`, 2 seconds by default) the first time. Lower it if you want quicker fallback.
