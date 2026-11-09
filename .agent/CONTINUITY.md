@@ -61,3 +61,6 @@
 - 2026-11-09T08:00:39+01:00 [USER] [DECISIONS] Do not run security scans for this project.
 - 2026-11-09T08:00:39+01:00 [CODE] [OUTCOMES] Forward pools now treat upstream SERVFAIL as a provider failure, try the next provider, and rest the failing provider for 10 seconds; NXDOMAIN, usable answers, and local DNSSEC failures remain final. Docker docs now cover state backup, upgrade, smoke tests, rollback, and schema restore.
 - 2026-11-09T08:00:39+01:00 [TOOL] [OUTCOMES] Live 0.5.8 Docker diagnosis reproduced Google A/HTTPS SERVFAIL while direct DoH providers answered NOERROR. Full `./scripts/dev.sh check`, regression tests, Compose config/check, formatting, Clippy, doc tests, and diff checks passed; live container and state were not changed.
+- 2026-11-09T08:07:45+01:00 [USER] [PLANS] Bump the fix to 0.5.9 and open an update PR without creating a release.
+- 2026-11-09T08:07:45+01:00 [CODE] [PROGRESS] Workspace, Cargo/fuzz lockfiles, Helm, Compose, current container examples, changelog, release notes, and roadmap now identify 0.5.9. Release workflow remains tag-only and was not changed or invoked.
+- 2026-11-09T08:07:45+01:00 [TOOL] [PROGRESS] Local 0.5.9 release-metadata, locked metadata, full check, Compose config, and diff checks pass. Hosted PR CI is pending.

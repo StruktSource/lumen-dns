@@ -112,7 +112,7 @@ docker run --name lumen --read-only --user 65532:65532 \
   -p 53:5353/udp -p 53:5353/tcp \
   -p 127.0.0.1:8080:8080/tcp \
   -v "$PWD/deploy/lumen.toml:/etc/lumen/lumen.toml:ro" \
-  ghcr.io/struktsource/lumen-dns:0.5.8
+  ghcr.io/struktsource/lumen-dns:0.5.9
 ```
 
 Stop with `docker stop --time 15 lumen`. To upgrade, stop and remove only the container, then create it again with a newer **pinned** image and the same `lumen-state:/var/lib/lumen` volume. Never remove the volume. Back it up first with the same `--volumes-from` method above.
