@@ -601,6 +601,16 @@ impl Console {
                 .as_table_mut()
                 .ok_or("bad resolver table")?;
             resolver.insert("mode".into(), toml::Value::String(mode.into()));
+            if mode == "forward" {
+                // Warm-up, prefetch, fallback and hedging are recursive-only. The stock config
+                // enables warm-up, so leaving it on would make the forward config invalid.
+                resolver.remove("hedge_ms");
+                for key in ["warm", "prefetch", "fallback"] {
+                    if let Some(toml::Value::Table(section)) = resolver.get_mut(key) {
+                        section.insert("enabled".into(), toml::Value::Boolean(false));
+                    }
+                }
+            }
             if mode == "forward"
                 && !resolver.contains_key("providers")
                 && !resolver.contains_key("upstreams")
@@ -2298,6 +2308,43 @@ mod tests {
             .status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[test]
+    fn setup_forward_choice_survives_the_stock_recursive_only_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state.db");
+        let mut store = Store::open(&state).unwrap();
+        // The shipped config turns zone warm-up on, which forward mode rejects.
+        store
+            .set_config(
+                "schema_version = 1\n[resolver]\nmode = \"recursive\"\n[resolver.warm]\nenabled = true\nzones = [\"com\"]\n",
+                directory.path(),
+            )
+            .unwrap();
+        let host = Arc::new(Stub::default());
+        let console = Console::new(state.clone(), host.clone(), "test");
+        let f = Fixture {
+            console,
+            host,
+            _directory: directory,
+            state,
+        };
+        let (status, json) = body(call(
+            &f,
+            Method::POST,
+            "/api/setup",
+            None,
+            &json!({"username": "owner", "password": "correct horse battery", "mode": "forward"})
+                .to_string(),
+            "127.0.0.1",
+        ));
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let staged = Store::open(&f.state).unwrap().staged_config().unwrap();
+        let source = staged.expect("forward config staged").source;
+        assert!(source.contains("mode = \"forward\""), "{source}");
+        assert!(source.contains("quad9-unfiltered"), "{source}");
+        assert!(!source.contains("enabled = true"), "{source}");
     }
 
     #[test]
