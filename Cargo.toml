@@ -45,3 +45,7 @@ pedantic = { level = "warn", priority = -1 }
 # Local fix for a DNSSEC validation loop on shared parent/child name servers (see vendor/README.md).
 [patch.crates-io]
 hickory-net = { path = "vendor/hickory-net" }
+
+# Portable cross-crate optimization. Keep unwinding and the target's baseline CPU.
+[profile.release]
+lto = "thin"
