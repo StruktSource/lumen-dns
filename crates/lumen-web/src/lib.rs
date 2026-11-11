@@ -77,9 +77,9 @@ const ASSETS: &[Asset] = &[
     asset!("/assets/js/view-trafficmap.js", JS, "js/view-trafficmap.js"),
     asset!("/assets/js/view-filtering.js", JS, "js/view-filtering.js"),
     asset!("/assets/js/view-dns.js", JS, "js/view-dns.js"),
-    asset!("/assets/js/view-access.js", JS, "js/view-access.js"),
+    asset!("/assets/js/view-users.js", JS, "js/view-users.js"),
+    asset!("/assets/js/view-console.js", JS, "js/view-console.js"),
     asset!("/assets/js/view-system.js", JS, "js/view-system.js"),
-    asset!("/assets/js/view-account.js", JS, "js/view-account.js"),
     asset!("/assets/js/activity-bar.js", JS, "js/activity-bar.js"),
     asset!("/assets/js/app.js", JS, "js/app.js"),
 ];

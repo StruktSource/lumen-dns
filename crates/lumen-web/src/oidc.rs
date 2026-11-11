@@ -174,6 +174,30 @@ impl Flows {
     }
 }
 
+/// What a provider check found out, for the settings page.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Checked {
+    pub issuer: String,
+    /// The provider offers a logout page, so single logout can work.
+    pub logout: bool,
+}
+
+/// Contact the provider the way a sign-in would, without signing anyone in: discovery must
+/// answer for the configured issuer, and a configured secret file must be readable.
+pub(crate) fn check(config: &Oidc) -> Result<Checked, String> {
+    if let Some(path) = &config.client_secret_file {
+        let secret = read_bounded(path, 4096).map_err(|_| "cannot read the client secret file")?;
+        if String::from_utf8_lossy(&secret).trim().is_empty() {
+            return Err("the client secret file is empty".into());
+        }
+    }
+    let provider = block(discover(config))?;
+    Ok(Checked {
+        issuer: provider.issuer,
+        logout: provider.end_session_endpoint.is_some(),
+    })
+}
+
 /// Run a future from a blocking thread (or a test thread with no runtime).
 fn block<F: Future>(future: F) -> F::Output {
     match tokio::runtime::Handle::try_current() {
@@ -584,6 +608,30 @@ pub(crate) mod tests {
         // The same state cannot be replayed, and an unknown one is refused.
         assert!(flows.finish(&config, &state, "the-code").is_err());
         assert!(flows.finish(&config, "unknown", "c").is_err());
+    }
+
+    #[test]
+    fn a_provider_check_reports_discovery_and_logout_without_signing_anyone_in() {
+        let provider = mock_provider("s", "lumen");
+        let config = config(&provider.base);
+        let checked = check(&config).unwrap();
+        assert!(checked.logout);
+        assert_eq!(checked.issuer, provider.base);
+        let mut wrong = config.clone();
+        wrong.issuer = "http://127.0.0.1:9/".into();
+        assert!(check(&wrong).is_err(), "nothing answers there");
+        let mut missing = config;
+        missing.client_secret_file = Some("/nonexistent/secret".into());
+        assert!(check(&missing).unwrap_err().contains("client secret"));
+        assert!(
+            !provider
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.starts_with("POST")),
+            "a check never asks for tokens"
+        );
     }
 
     #[test]

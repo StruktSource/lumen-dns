@@ -13,7 +13,7 @@ function gettingStarted(cfg, st, f, c) {
   const items = [
     [traffic, 'Point a device at Lumen', L.t('Set the DNS server of a device or your router to {addr}{port}. This ticks when the first query arrives.', { addr, port: listen && /:(?!53$)\d+$/.test(listen) ? L.t(' (non-standard port: most routers need port 53, see Listeners)') : '' }), null],
     [hasLists, 'Install block lists', 'One click installs Hagezi, OISD and more.', ['Open lists', () => L.go('filtering', 'lists')]],
-    [!!L.session.totp_enabled, 'Protect your account with two-step verification', 'An authenticator app makes a stolen password useless.', ['Set up', () => L.go('account')]],
+    [!!L.session.totp_enabled, 'Protect your account with two-step verification', 'An authenticator app makes a stolen password useless.', ['Set up', () => L.go('users', 'me')]],
     [L.S.devices.length > 0, 'Name your devices', 'Optional. Named devices get their own profile and readable stats.', ['Devices', () => L.go('devices')]]];
   const done = items.filter(i => i[0]).length;
   return h('div', { class: 'welcome', role: 'region', 'aria-label': 'Getting started' }, h('div', { class: 'welcome-h' }, h('h2', {}, 'Getting started'), h('span', { class: 'mono' }, L.t('{a} of {b}', { a: done, b: items.length })), h('span', { class: 'sp' }), h('button', { class: 'btn sm', onclick: () => { localStorage.setItem('lumen.welcome.done:' + L.session.name, '1'); L.paintMain(); } }, 'Dismiss')),

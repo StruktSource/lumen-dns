@@ -155,12 +155,9 @@ fn reply(status: StatusCode, body: &Value) -> Reply {
     response
 }
 
-/// The external-login choice of the setup wizard, checked against the stored configuration
-/// exactly as a configuration change would be. `None` when the wizard did not ask for it.
-fn setup_oidc(store: &Store, body: &Value) -> Result<Option<lumen_config::Oidc>, String> {
-    let Some(item) = body.get("oidc").filter(|value| value.is_object()) else {
-        return Ok(None);
-    };
+/// Read external-login settings from JSON, as sent by the setup wizard and the settings page.
+/// Empty text means "not set", so the defaults apply.
+fn oidc_from_json(item: &Value, enabled: bool) -> lumen_config::Oidc {
     let get = |key: &str| {
         text(item, key)
             .map(str::trim)
@@ -168,20 +165,25 @@ fn setup_oidc(store: &Store, body: &Value) -> Result<Option<lumen_config::Oidc>,
             .map(str::to_owned)
     };
     let flag = |key: &str| item.get(key).and_then(Value::as_bool).unwrap_or(false);
-    let mut oidc = lumen_config::Oidc {
-        enabled: true,
+    let defaults = lumen_config::Oidc::default();
+    lumen_config::Oidc {
+        enabled,
+        label: get("label").unwrap_or(defaults.label),
         issuer: get("issuer").unwrap_or_default(),
         client_id: get("client_id").unwrap_or_default(),
         redirect_url: get("redirect_url").unwrap_or_default(),
         client_secret_file: get("client_secret_file").map(PathBuf::from),
+        ca_file: get("ca_file").map(PathBuf::from),
+        username_claim: get("username_claim").unwrap_or(defaults.username_claim),
+        groups_claim: get("groups_claim").unwrap_or(defaults.groups_claim),
         admin_group: get("admin_group"),
         sync_role: flag("sync_role"),
         single_logout: flag("single_logout"),
-        ..lumen_config::Oidc::default()
-    };
-    if let Some(label) = get("label") {
-        oidc.label = label;
     }
+}
+
+/// Check `oidc` against the stored configuration exactly as a configuration change would be.
+fn check_oidc(store: &Store, oidc: &lumen_config::Oidc) -> Result<(), String> {
     let mut config = match store.config()? {
         Some(stored) => Config::parse(&stored.source, Path::new(&stored.base_dir))?,
         None => Config {
@@ -190,7 +192,17 @@ fn setup_oidc(store: &Store, body: &Value) -> Result<Option<lumen_config::Oidc>,
         },
     };
     config.web.oidc = oidc.clone();
-    config.validate()?;
+    config.validate()
+}
+
+/// The external-login choice of the setup wizard, checked against the stored configuration
+/// exactly as a configuration change would be. `None` when the wizard did not ask for it.
+fn setup_oidc(store: &Store, body: &Value) -> Result<Option<lumen_config::Oidc>, String> {
+    let Some(item) = body.get("oidc").filter(|value| value.is_object()) else {
+        return Ok(None);
+    };
+    let oidc = oidc_from_json(item, true);
+    check_oidc(store, &oidc)?;
     Ok(Some(oidc))
 }
 
@@ -484,6 +496,8 @@ impl Console {
             }
             ("POST", ["activity", "cancel"]) => self.cancel_activity(&mut store, &ctx),
             ("GET", ["audit"]) => audit_json(&store, &request.query),
+            ("PUT", ["oidc"]) => self.put_oidc(&mut store, &ctx),
+            ("POST", ["oidc", "test"]) => self.test_oidc(&store, &ctx),
             ("PUT", ["settings"]) => self.put_settings(&mut store, &ctx),
             ("PUT", ["modules"]) => self.put_module(&mut store, &ctx),
             ("PUT", ["history"]) => self.put_history(&mut store, &ctx),
@@ -1930,6 +1944,79 @@ impl Console {
         }
     }
 
+    /// Save the external-login settings into the stored configuration and apply them, like any
+    /// other configuration change. Turning it off keeps the other fields for next time.
+    fn put_oidc(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
+        let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
+            return bad("invalid JSON");
+        };
+        let enabled = body
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let oidc = oidc_from_json(&body, enabled);
+        if let Err(message) = check_oidc(store, &oidc) {
+            return bad(&message);
+        }
+        let Ok(Some(stored)) = store.config() else {
+            return unavailable();
+        };
+        let Ok(mut table) = toml::from_str::<toml::Table>(&stored.source) else {
+            return unavailable();
+        };
+        let Some(web) = table
+            .entry("web")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+            .as_table_mut()
+        else {
+            return unavailable();
+        };
+        let Ok(value) = toml::Value::try_from(&oidc) else {
+            return unavailable();
+        };
+        web.insert("oidc".into(), value);
+        let Ok(source) = toml::to_string(&table) else {
+            return unavailable();
+        };
+        if let Err(message) = Config::parse(&source, Path::new(&stored.base_dir)) {
+            return bad(&message);
+        }
+        let staged =
+            store.stage_config_by(&source, Path::new(&stored.base_dir), &ctx.session.user.name);
+        match staged.and_then(|revision| {
+            store
+                .enqueue(Command::ConfigReload(revision))
+                .map(|_| revision)
+        }) {
+            Ok(revision) => {
+                Self::actor(store, ctx, "sso.update", if enabled { "on" } else { "off" });
+                reply(
+                    StatusCode::ACCEPTED,
+                    &json!({ "revision": revision, "reload": "queued" }),
+                )
+            }
+            Err(_) => unavailable(),
+        }
+    }
+
+    /// Ask the provider whether these settings can work, without saving or signing anyone in.
+    fn test_oidc(&self, store: &Store, ctx: &Ctx<'_>) -> Reply {
+        let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
+            return bad("invalid JSON");
+        };
+        let oidc = oidc_from_json(&body, true);
+        if let Err(message) = check_oidc(store, &oidc) {
+            return reply(StatusCode::OK, &json!({ "ok": false, "error": message }));
+        }
+        match crate::oidc::check(&oidc) {
+            Ok(found) => reply(
+                StatusCode::OK,
+                &json!({ "ok": true, "issuer": found.issuer, "logout": found.logout }),
+            ),
+            Err(message) => reply(StatusCode::OK, &json!({ "ok": false, "error": message })),
+        }
+    }
+
     fn restore_config(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
         let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
             return bad("invalid JSON");
@@ -2127,7 +2214,17 @@ fn users_json(store: &Store) -> Reply {
     match store.users() {
         Ok(users) => reply(
             StatusCode::OK,
-            &Value::Array(users.iter().map(user_json).collect()),
+            &Value::Array(
+                users
+                    .iter()
+                    .map(|user| {
+                        let mut json = user_json(user);
+                        // Tied to a provider identity, so people can see who signs in that way.
+                        json["sso"] = Value::Bool(store.oidc_linked(user.id).unwrap_or(false));
+                        json
+                    })
+                    .collect(),
+            ),
         ),
         Err(_) => unavailable(),
     }
@@ -3154,6 +3251,140 @@ mod tests {
                 .any(|e| e.action == "user.oidc-link" && e.outcome == "rejected")
         );
         assert!(audit.iter().any(|e| e.action == "user.oidc-unlink"));
+    }
+
+    #[test]
+    fn administrators_save_and_check_external_login_from_the_console() {
+        use crate::oidc::tests::mock_provider;
+        let f = fixture();
+        let provider = mock_provider("s", "lumen");
+        // The console tests' config has no web listener; add one so the settings can be valid.
+        {
+            let mut store = Store::open(&f.state).unwrap();
+            store
+                .set_config(
+                    "schema_version = 1\n[web]\nhttp = ['127.0.0.1:8080']\n",
+                    f.state.parent().unwrap(),
+                )
+                .unwrap();
+        }
+        let (admin, admin_csrf) = sign_in(&f, "admin", "correct horse battery");
+        let (user, user_csrf) = sign_in(&f, "anna", "anna passphrase 123");
+        let settings = |enabled: bool, issuer: &str| {
+            json!({
+                "enabled": enabled, "label": "Authentik", "issuer": issuer, "client_id": "lumen",
+                "redirect_url": "http://127.0.0.1:8080/api/login/oidc/callback",
+                "admin_group": "lumen-admins", "sync_role": true, "single_logout": true
+            })
+            .to_string()
+        };
+        let put = |who: (&str, &str), body: String| {
+            call(&f, Method::PUT, "/api/oidc", Some(who), &body, "127.0.0.1")
+        };
+        // People who are not administrators cannot read or change it.
+        assert_eq!(
+            put((&user, &user_csrf), settings(true, &provider.base)).status(),
+            StatusCode::FORBIDDEN
+        );
+        let who = (admin.as_str(), admin_csrf.as_str());
+
+        // The provider check is answered in the body, and never saves anything.
+        let (status, checked) = body(call(
+            &f,
+            Method::POST,
+            "/api/oidc/test",
+            Some(who),
+            &settings(true, &provider.base),
+            "127.0.0.1",
+        ));
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (checked["ok"].as_bool(), checked["logout"].as_bool()),
+            (Some(true), Some(true))
+        );
+        let (_, failed) = body(call(
+            &f,
+            Method::POST,
+            "/api/oidc/test",
+            Some(who),
+            &settings(true, "https://id.example/"),
+            "127.0.0.1",
+        ));
+        assert_eq!(failed["ok"], false);
+        let (_, invalid) = body(call(
+            &f,
+            Method::POST,
+            "/api/oidc/test",
+            Some(who),
+            &settings(true, "http://remote.example/"),
+            "127.0.0.1",
+        ));
+        assert!(
+            invalid["error"].as_str().unwrap().contains("issuer"),
+            "{invalid}"
+        );
+        assert!(
+            Store::open(&f.state)
+                .unwrap()
+                .staged_config()
+                .unwrap()
+                .is_none()
+        );
+
+        // Invalid settings are refused; valid ones are staged as a new revision and queued.
+        assert_eq!(
+            put(who, settings(true, "http://remote.example/")).status(),
+            StatusCode::BAD_REQUEST
+        );
+        let (status, saved) = body(put(who, settings(true, &provider.base)));
+        assert_eq!(status, StatusCode::ACCEPTED, "{saved}");
+        let staged = Store::open(&f.state)
+            .unwrap()
+            .staged_config()
+            .unwrap()
+            .unwrap();
+        assert_eq!(staged.revision, saved["revision"].as_u64().unwrap());
+        let config = Config::parse(&staged.source, Path::new("/etc/lumen")).unwrap();
+        assert!(
+            config.web.oidc.enabled && config.web.oidc.sync_role && config.web.oidc.single_logout
+        );
+        assert_eq!(config.web.oidc.label, "Authentik");
+        assert_eq!(config.web.http.len(), 1, "the rest of the config is kept");
+        let audit = Store::open(&f.state).unwrap().audit_events(50).unwrap();
+        assert!(
+            audit
+                .iter()
+                .any(|e| e.action == "sso.update" && e.target == "on")
+        );
+
+        // Turning it off is always allowed and keeps the other fields.
+        let (status, _) = body(put(who, settings(false, "")));
+        assert_eq!(status, StatusCode::ACCEPTED);
+
+        // The people list says who is tied to a provider identity.
+        let mut store = Store::open(&f.state).unwrap();
+        let anna = store.user_with_record("anna").unwrap().unwrap().0;
+        store
+            .oidc_link(anna.id, "https://id.example/", "x")
+            .unwrap();
+        let (_, users) = body(call(
+            &f,
+            Method::GET,
+            "/api/users",
+            Some(who),
+            "",
+            "127.0.0.1",
+        ));
+        let flag = |name: &str| {
+            users
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|u| u["name"] == name)
+                .unwrap()["sso"]
+                .as_bool()
+        };
+        assert_eq!((flag("anna"), flag("admin")), (Some(true), Some(false)));
     }
 
     #[test]

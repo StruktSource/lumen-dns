@@ -2,14 +2,16 @@
 'use strict';
 const L = window.L, h = L.h, F = L.fmt;
 const act = async (path, msg, opt) => { if (await L.confirm(opt)) { try { await L.api('POST', path); L.toast(msg); setTimeout(() => L.refreshPage(), 1800); } catch (e) { L.toast(e.message, 'bad'); } } };
-L.views.system = () => {
+L.views.system = sub => {
+  const tab = sub === 'console' ? 'console' : 'status'; const tabs = L.tabs([['status', 'Status'], ['console', 'Console']], tab, id => L.go('system', id));
+  if (tab === 'console') return [L.pageHead('System', 'How the console is served and how it behaves.'), tabs, L.consoleTab()];
   const s = L.S.status, cfg = L.S.cfg, revs = L.S.revisions;
   const restore = async r => {
     if (!(await L.confirm({ title: L.t('Restore revision {n}', { n: r.revision }), text: 'This applies those settings as a new revision. Lumen restarts its listeners and clears DNS caches. Devices are not changed.', label: 'Restore and reload' }))) return;
     try { const out = await L.api('POST', '/api/config/restore', { revision: r.revision }); L.toast(L.t('Applying revision {n}…', { n: out.revision })); const res = await L.waitForConfig(out.revision); L.S.draft = null; if (res.ok) L.toast('Restored.'); else L.toast(res.error || 'Lumen refused those settings.', 'bad'); await L.refreshPage(); } catch (e) { L.toast(e.message, 'bad'); }
   };
   return [L.pageHead('System', 'Daemon status, control actions and configuration history.', h('span', { class: 'pill ' + (s.daemon === 'running' ? 'ok' : 'bad') }, s.daemon === 'running' ? 'Healthy' : s.daemon)),
-    h('div', { class: 'grid g2' },
+    tabs, h('div', { class: 'grid g2' },
       h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h3', {}, 'Daemon')), h('div', { class: 'card-b' }, h('dl', { class: 'kv' },
         h('dt', {}, 'Version'), h('dd', {}, 'Lumen ' + s.version), h('dt', {}, 'Uptime'), h('dd', {}, F.dur(s.uptime_secs)), h('dt', {}, 'State'), h('dd', {}, s.daemon), h('dt', {}, 'Active revision'), h('dd', {}, '#' + s.revision),
         s.pending_revision ? [h('dt', {}, 'Applying'), h('dd', {}, '#' + s.pending_revision)] : null, h('dt', {}, 'Last control message'), h('dd', {}, s.last_error || 'none'),

@@ -52,11 +52,10 @@ const NEEDS = {
   filtering: () => [L.loadStatus(), L.loadDevices(), L.S.draft ? null : L.loadConfig()],
   devices: () => [L.loadDevices(), L.can('admin') ? (L.S.draft ? null : L.loadConfig()) : null],
   dns: () => [L.loadProviders(), L.S.draft ? null : L.loadConfig()],
-  access: () => [L.loadUsers(), L.loadSettings(), L.loadAudit(), L.S.draft ? null : L.loadConfig()],
-  system: () => [L.loadStatus(), L.loadRevisions(), L.S.draft ? null : L.loadConfig()],
+  users: () => [L.loadSettings(), L.can('admin') ? L.loadUsers() : null, L.can('admin') ? L.loadAudit() : null, L.can('admin') && !L.S.draft ? L.loadConfig() : null],
+  system: () => [L.loadStatus(), L.loadRevisions(), L.loadSettings(), L.S.draft ? null : L.loadConfig()],
   /* The map's code is only fetched, and its data only loaded, while the module is on and its page is open. */
-  trafficmap: () => [L.moduleOn('traffic-map') ? L.lazy('/assets/js/view-trafficmap.js').then(() => L.loadTraffic()) : null],
-  account: () => [L.loadSettings()]
+  trafficmap: () => [L.moduleOn('traffic-map') ? L.lazy('/assets/js/view-trafficmap.js').then(() => L.loadTraffic()) : null]
 };
 /* Load a script once, on demand. */
 const scripts = new Map();

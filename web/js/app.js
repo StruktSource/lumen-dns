@@ -3,7 +3,7 @@
 'use strict';
 const L = window.L, h = L.h;
 const PAGES = [['overview', 'Overview', 'overview', 'user'], ['activity', 'Activity', 'activity', 'user'], ['filtering', 'Filtering', 'filter', 'admin'], ['devices', 'Devices', 'devices', 'user'],
-  ['dns', 'DNS settings', 'server', 'admin'], ['access', 'Users & access', 'key', 'admin'], ['system', 'System', 'settings', 'admin'], ['account', 'My account', 'user', 'user', true],
+  ['dns', 'DNS settings', 'server', 'admin'], ['users', 'Users', 'user', 'user'], ['system', 'System', 'settings', 'admin'],
   /* Pages that belong to a module (6th entry) show in the sidebar only while it is on. */
   ['modules', 'Modules', 'modules', 'user'], ['trafficmap', 'Traffic map', 'map', 'user', false, 'traffic-map']];
 const root = () => L.$('#root');
@@ -24,7 +24,7 @@ let gen = 0;
 /* ---------- session ---------- */
 L.signedIn = data => {
   L.session = data.user; L.csrf = data.csrf;
-  location.hash = data.user.must_change ? '#/account' : '#/overview'; L.render();
+  location.hash = data.user.must_change ? '#/users/me' : '#/overview'; L.render();
 };
 L.logout = async () => { let r = null; try { r = await L.api('POST', '/api/logout'); } catch { /* already gone */ } L.session = null; L.csrf = ''; L.S.draft = null; L.meta = await L.api('GET', '/api/state').catch(() => L.meta); /* Signed in through the provider: end its session too. */ if (r?.redirect) { location.href = r.redirect; return; } location.hash = '#/login'; L.render(); };
 L.onSignedOut = () => { L.toast('Your session ended. Sign in again.', 'bad'); location.hash = '#/login'; L.render(); };
@@ -35,7 +35,7 @@ function shell(content, page) {
     h('div', { class: 'brand' }, h('b', {}, '✦'), 'LUMEN', h('small', {}, 'v' + (L.meta?.version || ''))),
     h('nav', { class: 'nav', 'aria-label': 'Main' }, PAGES.filter(p => !p[4] && L.can(p[3]) && (!p[5] || L.moduleOn(p[5]))).map(([id, label, icon]) => h('a', { href: '#/' + id, 'aria-current': id === page ? 'page' : null, onclick: () => side.classList.remove('open') }, L.ic(icon), label))),
     h('div', { class: 'side-foot' },
-      h('a', { class: 'who', href: '#/account', title: 'My account', onclick: () => side.classList.remove('open') }, h('div', { class: 'av' }, L.session.name[0].toUpperCase()), h('div', {}, h('strong', {}, L.session.name), h('span', {}, L.ROLE_LABEL[L.session.role]))),
+      h('a', { class: 'who', href: '#/users/me', title: 'My account', onclick: () => side.classList.remove('open') }, h('div', { class: 'av' }, L.session.name[0].toUpperCase()), h('div', {}, h('strong', {}, L.session.name), h('span', {}, L.ROLE_LABEL[L.session.role]))),
       h('div', { class: 'side-tools' },
         h('div', { class: 'side-lang' }, L.ic('globe', 16), L.langSelect()),
         h('button', { class: 'btn sp', title: 'Toggle theme', onclick: () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = t; localStorage.setItem('lumen-theme', t); L.render(); } }, L.ic(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon'), document.documentElement.dataset.theme === 'dark' ? 'Light' : 'Dark'),
@@ -52,10 +52,14 @@ function shell(content, page) {
   return app;
 }
 
+/* Earlier versions had separate pages; old links and bookmarks land on the new ones. */
+const MOVED = { account: ['users', 'me'], access: ['users', 'people'] };
 const current = () => { const { page, sub } = L.route(); const def = PAGES.find(p => p[0] === page) || PAGES[0]; return { def, sub }; };
 const draw = () => {
+  const moved = MOVED[L.route().page];
+  if (moved) { const sub = L.route().sub; L.go(...(moved[0] === 'users' && sub === 'audit' ? ['users', 'audit'] : moved[1] === 'people' && sub === 'console' ? ['system', 'console'] : moved)); return; }
   const { def, sub } = current();
-  if (L.session.must_change && def[0] !== 'account') { location.hash = '#/account'; return; }
+  if (L.session.must_change && !(def[0] === 'users' && sub === 'me')) { location.hash = '#/users/me'; return; }
   const view = !L.can(def[3]) ? [L.pageHead(def[1]), L.lockPage()]
     : def[5] && !L.moduleOn(def[5]) ? [L.pageHead(def[1]), L.empty('This module is off', 'Turn it on under Modules to use it.', h('button', { class: 'btn primary', onclick: () => L.go('modules') }, 'Open Modules'))]
     : L.views[def[0]](sub);
@@ -94,7 +98,7 @@ addEventListener('hashchange', () => { L.render(); scrollTo(0, 0); });
 
 /* Keep the overview live. How often it reloads is a per-browser choice (default 10 s, or off), set with the slider on the Overview. */
 L.RELOAD_STEPS = [1, 2, 5, 10, 30, 60, 0];
-/* Saved on the server (Users & access > Console), so it is the same for every user and browser. */
+/* Saved on the server (System > Console), so it is the same for every user and browser. */
 L.reloadSecs = () => { const v = L.S.settings?.overview_reload_secs; return L.RELOAD_STEPS.includes(v) ? v : 10; };
 L.setReloadSecs = async secs => { L.S.settings = await L.api('PUT', '/api/settings', { overview_reload_secs: secs }); scheduleReload(); };
 let reloadTimer = 0;
