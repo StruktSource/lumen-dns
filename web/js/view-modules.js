@@ -11,14 +11,14 @@ L.MODULES = [
     text: 'An interactive tree of your DNS traffic: Lumen at the top, then every top-level domain, then the domains and services under it. See at a glance where queries go and what gets blocked.',
     needs: 'Needs query history. Turn it on under Activity.' }];
 
-L.loadModules = async () => { L.S.modules = await L.api('GET', '/api/modules'); };
+L.loadModules = async () => { L.S.modules = await L.api('GET', '/api/modules'); L.S.modulesAt = Date.now(); };
 L.moduleOn = id => !!L.S.modules?.enabled?.includes(id);
 
 let busy = '';
 
 const toggle = async (m, on) => {
   busy = m.id; L.rerender();
-  try { L.S.modules = await L.api('PUT', '/api/modules', { id: m.id, enabled: on }); L.toast(L.t(on ? '{name} is on.' : '{name} is off.', { name: L.t(m.name) })); }
+  try { L.S.modules = await L.api('PUT', '/api/modules', { id: m.id, enabled: on }); L.S.modulesAt = Date.now(); if (!on) L.stopModule?.(m.id); L.toast(L.t(on ? '{name} is on.' : '{name} is off.', { name: L.t(m.name) })); }
   catch (e) { L.toast(e.message, 'bad'); }
   busy = ''; L.rerender();
 };

@@ -25,7 +25,7 @@ svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke
 
 /* ---------- shell ---------- */
 .app{display:grid;grid-template-columns:var(--side) minmax(0,1fr);min-height:100vh}
-.side{position:sticky;top:0;height:100vh;background:var(--ink);color:#f8f8f5;display:flex;flex-direction:column;padding:20px 14px;gap:6px;z-index:30}
+.side{position:sticky;top:0;height:100vh;width:var(--side);overflow:hidden auto;will-change:transform;background:var(--ink);color:#f8f8f5;display:flex;flex-direction:column;padding:20px 14px;gap:6px;z-index:30}
 .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 22px;font-weight:700;letter-spacing:-.06em;font-size:22px}
 .brand b{color:var(--acid);font-size:20px}.brand small{font:11px var(--mono);letter-spacing:.04em;color:#8d8d84;margin-left:auto;text-transform:uppercase}
 .nav{display:flex;flex-direction:column;gap:2px}
@@ -233,12 +233,13 @@ dialog::backdrop{background:#000a;backdrop-filter:blur(2px)}dialog[open]{animati
 .tm-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:16px;align-items:start}
 @media(max-width:1100px){.tm-grid{grid-template-columns:minmax(0,1fr)}}
 .tm-card{overflow:hidden}.tm-legend{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--rule);font:11px var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--text-2)}
-.tm-legend .lg{display:inline-block;width:14px;height:4px;margin-right:7px;vertical-align:middle}.lg.ok{background:var(--text-2)}.lg.bad{background:var(--bad)}.lg.line{background:var(--text);height:6px}
-.tm-svg .edge-base{stroke:var(--text-2);opacity:.55;stroke-linecap:round;stroke-linejoin:round;transition:opacity .2s,stroke .2s}
-.tm-svg .edge.mixed .edge-base{stroke:var(--warn)}.tm-svg .edge.blocked .edge-base{stroke:var(--bad)}.tm-svg .edge.spine .edge-base{opacity:.4}
-.tm-svg .edge-flow{stroke:var(--accent-text);stroke-linecap:round;stroke-dasharray:1 16;opacity:.9;animation:tm-flow 1.4s linear infinite}
-.tm-svg .edge.blocked .edge-flow{stroke:var(--bad)}.tm-svg .edge.mixed .edge-flow{stroke:var(--warn)}
-.tm-svg .node{cursor:pointer;outline:0}.tm-svg .node-box{fill:var(--surface);stroke:var(--rule);stroke-width:1.2;transition:stroke .2s,fill .2s}
+.tm-legend .lg{display:inline-block;width:14px;height:4px;margin-right:7px;vertical-align:middle}.lg.bad{background:var(--bad)}.lg.line{background:var(--text-2);height:6px}.lg.live{background:var(--acid);box-shadow:0 0 6px var(--acid),0 0 0 1px var(--accent-text)}
+.tm-svg .edge-base{stroke:var(--text-2);opacity:.5;stroke-linecap:round;stroke-linejoin:round;transition:opacity .3s,stroke .5s}.tm-svg .edge.spine .edge-base{opacity:.4}
+/* A line rests until lookups travel it. Then it lights up, and a bright pulse runs down it from Lumen to the domain. */
+.tm-svg .edge-flow{stroke:var(--acid);stroke-linecap:round;stroke-dasharray:.16 1;stroke-dashoffset:.16;opacity:0;transition:opacity .8s ease}
+.tm-svg .edge.live .edge-base{stroke:var(--accent-text);opacity:1;transition:opacity .15s,stroke .15s}
+.tm-svg .edge.live .edge-flow{opacity:1;transition:opacity .15s;filter:drop-shadow(0 0 3px var(--acid));animation:tm-pulse 1.15s linear infinite}
+.tm-svg .node{cursor:pointer;outline:0;transition:transform .5s var(--ease),opacity .2s}.tm-svg .node-box{fill:var(--surface);stroke:var(--rule);stroke-width:1.2;transition:stroke .2s,fill .2s}
 .tm-svg .node:hover .node-box,.tm-svg .node:focus-visible .node-box{stroke:var(--text)}.tm-svg .node:focus-visible .node-box{stroke:var(--focus);stroke-width:2.5}
 .tm-svg .node.tld .node-box{stroke:var(--text-2)}.tm-svg .node.mixed .node-box{stroke:var(--warn)}.tm-svg .node.blocked .node-box{stroke:var(--bad)}
 .tm-svg .node.sel .node-box{stroke:var(--text);stroke-width:2.5;fill:var(--surface-2)}
@@ -246,20 +247,27 @@ dialog::backdrop{background:#000a;backdrop-filter:blur(2px)}dialog[open]{animati
 .tm-svg .n-title{fill:var(--text);font:600 13px var(--sans);letter-spacing:-.02em}.tm-svg .n-sub{fill:var(--text-2);font:10.5px var(--mono)}.tm-svg .n-more{fill:var(--text-2);font:600 11.5px var(--sans)}
 .tm-svg .node.more .node-box{fill:transparent;stroke-dasharray:4 3;stroke:var(--text-2)}.tm-svg .node.more:hover .node-box{fill:var(--surface-2)}
 .tm-svg .chev{stroke:var(--text);stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transform:translate(-8px,0)}
-.tm-svg .bar-bg{fill:var(--surface-2);stroke:var(--rule);stroke-width:.5}.tm-svg .bar-bad{fill:var(--bad)}
-.tm-svg .pulse{fill:var(--acid)}.tm-svg .pulse-ring{fill:none;stroke:var(--acid);stroke-width:1.5;transform-box:fill-box;transform-origin:center;animation:tm-ring 2.2s ease-out infinite}
-.tm-svg.has-hot .node:not(.hot),.tm-svg.has-hot .edge:not(.hot){opacity:.28}.tm-svg .node,.tm-svg .edge{transition:opacity .2s}
+.tm-svg .pulse{fill:var(--acid)}.tm-svg .pulse-ring{fill:none;stroke:var(--acid);stroke-width:1.5;transform-box:fill-box;transform-origin:center;opacity:0}
+.tm-svg .node.root.live .pulse-ring{animation:tm-ring 1.6s ease-out infinite}
+.tm-svg .node.live .node-box{stroke:var(--accent-text);stroke-width:2.2}
+.tm-svg.has-hot .node:not(.hot),.tm-svg.has-hot .edge:not(.hot){opacity:.28}.tm-svg .edge{transition:opacity .2s}
 .tm-svg .edge.hot .edge-base{opacity:1}
-.tm-svg.intro .edge-base{stroke-dasharray:1;stroke-dashoffset:1;animation:tm-draw .75s var(--ease) var(--d) forwards}
-.tm-svg.intro .edge-flow{opacity:0;animation:tm-flow 1.4s linear infinite,tm-fade .5s ease var(--d) forwards}
-.tm-svg.intro .node-in{opacity:0;animation:tm-in .55s var(--ease) var(--d) forwards}
-.tm-panel .card-h h3.ellip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}.tm-panel .bar-row{grid-template-columns:minmax(80px,.9fr) 1fr minmax(64px,.6fr)}
-.tm-panel .t-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.tm-panel .chip b{font-weight:600;color:var(--text)}
+.tm-svg .edge.enter .edge-base{stroke-dasharray:1;stroke-dashoffset:1;animation:tm-draw .75s var(--ease) var(--d) forwards}
+.tm-svg .node.enter .node-in{opacity:0;animation:tm-in .55s var(--ease) var(--d) forwards}
+.tm-svg .node.leave,.tm-svg .edge.leave{opacity:0!important;pointer-events:none;transition:opacity .22s}
+.tm-panel .card-h h3.ellip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+/* One bar per row: the name and the number sit inside it, and the fill shows the share against the busiest row. */
+.hbar{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px;height:30px;padding:0 10px;overflow:hidden;background:var(--surface-2);border:1px solid var(--rule);font-size:12px}
+.hbar i{position:absolute;inset:0 auto 0 0;background:color-mix(in srgb,var(--acid) 36%,transparent);border-right:2px solid var(--acid);transform-origin:left;animation:hb-grow .7s var(--ease) both;transition:width .6s var(--ease)}
+.hbar.bad i{background:color-mix(in srgb,var(--bad) 30%,transparent);border-right-color:var(--bad)}
+.hbar span,.hbar b{position:relative}.hb-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)}.hb-n{flex:none;font:600 12px var(--mono);font-variant-numeric:tabular-nums}
+@keyframes hb-grow{from{transform:scaleX(0)}}
+.tm-panel .chip b{font-weight:600;color:var(--text)}
 .lbl{color:var(--text-2)}
-@keyframes tm-draw{to{stroke-dashoffset:0}}@keyframes tm-fade{to{opacity:.9}}
+@keyframes tm-draw{to{stroke-dashoffset:0}}@keyframes tm-pulse{from{stroke-dashoffset:.16}to{stroke-dashoffset:-1}}
 @keyframes tm-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-@keyframes tm-flow{to{stroke-dashoffset:-34}}@keyframes tm-ring{from{opacity:.9;transform:scale(1)}to{opacity:0;transform:scale(3.4)}}
-@media(prefers-reduced-motion:reduce){.tm-svg .edge-flow,.tm-svg .pulse-ring,.mod.on .mod-edge{animation:none}.tm-svg.intro .edge-base{stroke-dashoffset:0}.tm-svg.intro .node-in{opacity:1}.tm-svg.intro .edge-flow{opacity:.9}.mod:hover{transform:none}}
+@keyframes tm-ring{from{opacity:.9;transform:scale(1)}to{opacity:0;transform:scale(3.4)}}
+@media(prefers-reduced-motion:reduce){.tm-svg .edge-flow,.tm-svg .pulse-ring,.mod.on .mod-edge{animation:none}.tm-svg .edge.enter .edge-base{stroke-dashoffset:0}.tm-svg .node.enter .node-in{opacity:1}.tm-svg .edge.live .edge-flow{stroke-dasharray:none;opacity:.55}.mod:hover{transform:none}}
 
 /* ---------- hide / show the sidebar ---------- */
 .app{transition:grid-template-columns .3s var(--ease)}

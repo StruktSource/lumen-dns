@@ -54,11 +54,23 @@ const NEEDS = {
   dns: () => [L.loadProviders(), L.S.draft ? null : L.loadConfig()],
   access: () => [L.loadUsers(), L.loadSettings(), L.loadAudit(), L.S.draft ? null : L.loadConfig()],
   system: () => [L.loadStatus(), L.loadRevisions(), L.S.draft ? null : L.loadConfig()],
-  trafficmap: () => [L.moduleOn('traffic-map') ? L.loadTraffic() : null],
+  /* The map's code is only fetched, and its data only loaded, while the module is on and its page is open. */
+  trafficmap: () => [L.moduleOn('traffic-map') ? L.lazy('/assets/js/view-trafficmap.js').then(() => L.loadTraffic()) : null],
   account: () => [L.loadSettings()]
 };
-/* Modules load first: a module page decides from them whether it has anything to fetch. */
-L.loadPage = async page => { await L.loadModules(); await Promise.all((NEEDS[page] ? NEEDS[page]() : []).filter(Boolean)); };
+/* Load a script once, on demand. */
+const scripts = new Map();
+L.lazy = src => {
+  if (!scripts.has(src)) scripts.set(src, new Promise((ok, no) => {
+    const s = document.createElement('script'); s.src = src; s.onload = ok;
+    s.onerror = () => { scripts.delete(src); no(new Error('Could not load this part of the console.')); };
+    document.head.append(s);
+  }));
+  return scripts.get(src);
+};
+/* Modules load first: a module page decides from them whether it has anything to fetch. They change rarely, so a
+   recent answer is reused instead of asking on every page change. */
+L.loadPage = async page => { if (!L.S.modules || page === 'modules' || Date.now() - (L.S.modulesAt || 0) > 60000) await L.loadModules(); await Promise.all((NEEDS[page] ? NEEDS[page]() : []).filter(Boolean)); };
 
 /* Change the lists right away, with no draft and no Apply bar. `mutate(filtering)` edits a filtering
    section and returns a function that undoes the edit. It runs on the saved settings, so unsaved edits elsewhere
