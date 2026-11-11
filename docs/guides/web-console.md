@@ -152,3 +152,17 @@ The console talks to `/api/*` on the same listener. This is an **internal interf
 - [Filtering](filtering.md)
 - [Threat model](../design/threat-model.md)
 - Working on the UI itself? See [`web/README.md`](../../web/README.md).
+
+## Modules
+
+Modules are big, optional features. Each one is **off until an administrator turns it on** under **Modules**, and a module that is off adds nothing to the sidebar. The choice is stored in the state database and applies to everyone who uses the console.
+
+### Traffic map
+
+An interactive tree of your DNS traffic: the Lumen server at the top, then domain endings (`.com`, `.co.uk`), then the domains under each one.
+
+- Line thickness shows how many lookups; red means mostly blocked. Moving dots show live traffic.
+- Click an ending to open or close its branch. Click a domain to see its lookups, blocked share, speed, record types, names under it, and (with full history) which devices asked.
+- Filter by result, time window, or search; zoom, drag to move around, and switch the live refresh on or off.
+
+The map is drawn from the [query history](query-history.md), so it needs history turned on (it offers to switch on *recent only*). It uses the newest 1,000 lookups in memory mode, or up to 5,000 saved lookups, and it reads nothing beyond what the Activity page already shows.

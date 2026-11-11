@@ -5,7 +5,9 @@ Lumen 0.6.0 adds a live view to Activity and fixes the setup wizard ignoring the
 ## Highlights
 
 - **Live view.** Switch on *Live* in Activity to watch lookups arrive as they happen. The switch is remembered in your browser.
-- **Overview refreshes every 10 seconds, and you can change that.** An *Auto reload* slider offers 1, 2, 5, 10, 30, 60 seconds or off.
+- **Modules and a Traffic map.** Turn on optional modules under *Modules*. The Traffic map shows your DNS traffic as a tree you can drag and zoom: server, domain endings, then domains.
+- **A sidebar you can hide.** Press `[` or use the button in the sidebar header to get more room.
+- **Overview refreshes every 10 seconds, and you can change that.** An *Auto reload* slider under *Users & access → Console* offers 1, 2, 5, 10, 30, 60 seconds or off, saved on the server for everyone.
 - **Setup keeps your resolver choice.** Picking *Use another resolver* (Quad9) now results in forward mode instead of falling back to recursive.
 
 ## Check the download

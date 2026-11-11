@@ -7,10 +7,12 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 ### Added
 
 - **Live view on Activity.** A *Live* switch adds new lookups to the list every 2 seconds, with a short highlight on new rows. The choice is remembered in the browser, so it stays on until you switch it off.
+- **Modules and the Traffic map.** A new *Modules* page lists big, optional features. Each is off until an administrator turns it on, and the choice is saved on the server. The first module, *Traffic map*, draws your DNS traffic as an interactive tree: the Lumen server, then domain endings, then the domains under them. You can drag, zoom, search, filter and open any domain for details. It needs query history.
+- **Hide the sidebar.** A button in the sidebar header (or the `[` key) hides it for more room, and a tab on the left edge brings it back. The choice is remembered in the browser.
 
 ### Changed
 
-- The Overview now reloads every 10 seconds (it was 5). A new *Auto reload* slider on the Overview lets each browser choose 1, 2, 5, 10, 30 or 60 seconds, or off. The choice is remembered in the browser.
+- The Overview now reloads every 10 seconds (it was 5). A new *Auto reload* slider under *Users & access → Console* lets an administrator choose 1, 2, 5, 10, 30 or 60 seconds, or off. The choice is saved on the server and applies to everyone.
 
 ### Fixed
 

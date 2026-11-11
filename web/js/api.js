@@ -47,16 +47,18 @@ L.loadRevisions = async () => { L.S.revisions = await L.api('GET', '/api/config/
 
 /* What each page needs before it can draw. The draft config is only (re)loaded when it is clean. */
 const NEEDS = {
-  overview: () => [L.loadStatus(), L.loadSeries(), L.can('admin') ? L.loadConfig() : null],
+  overview: () => [L.loadStatus(), L.loadSeries(), L.loadSettings(), L.can('admin') ? L.loadConfig() : null],
   activity: () => [L.loadStatus(), L.loadHistory()],
   filtering: () => [L.loadStatus(), L.loadDevices(), L.S.draft ? null : L.loadConfig()],
   devices: () => [L.loadDevices(), L.can('admin') ? (L.S.draft ? null : L.loadConfig()) : null],
   dns: () => [L.loadProviders(), L.S.draft ? null : L.loadConfig()],
   access: () => [L.loadUsers(), L.loadSettings(), L.loadAudit(), L.S.draft ? null : L.loadConfig()],
   system: () => [L.loadStatus(), L.loadRevisions(), L.S.draft ? null : L.loadConfig()],
+  trafficmap: () => [L.moduleOn('traffic-map') ? L.loadTraffic() : null],
   account: () => [L.loadSettings()]
 };
-L.loadPage = async page => { await Promise.all((NEEDS[page] ? NEEDS[page]() : []).filter(Boolean)); };
+/* Modules load first: a module page decides from them whether it has anything to fetch. */
+L.loadPage = async page => { await L.loadModules(); await Promise.all((NEEDS[page] ? NEEDS[page]() : []).filter(Boolean)); };
 
 /* Change the lists right away, with no draft and no Apply bar. `mutate(filtering)` edits a filtering
    section and returns a function that undoes the edit. It runs on the saved settings, so unsaved edits elsewhere

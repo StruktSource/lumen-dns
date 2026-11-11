@@ -50,6 +50,7 @@ function consoleTab() {
       h('div', { class: 'fgrid' }, f.field('Max connections', f.num(w, 'max_connections', 'web.max_connections'))),
       h('div', { class: 'note warn' }, L.ic('alert'), h('p', {}, 'Careful: if you remove the address you are using right now, you lose access to this console. Sign-in over plain HTTP is only safe on this machine. For other devices, use HTTPS or a reverse proxy.'))),
     sessionCard(),
+    reloadCard(),
     languageCard(),
     card('Monitoring', null, h('div', { class: 'fgrid' }, f.field('Prometheus & health endpoint', f.text(c, 'metrics', { mono: true, placeholder: '127.0.0.1:9153 (empty = off)' }), 'Loopback only. Counts by transport; never domains or devices.'))));
 }
@@ -59,6 +60,17 @@ const languageCard = () => card('Language', null, f.field('Default language for 
   'Used on the sign-in page and by everyone who has not chosen a language of their own. Each person can change theirs under My account.'));
 const sessionCard = () => { const st = { v: String(L.S.settings.session_idle_minutes) }; const opts = [[15, '15 minutes'], [30, '30 minutes'], [60, '1 hour'], [240, '4 hours']]; if (!opts.some(o => String(o[0]) === st.v)) opts.push([+st.v, L.t('{n} minutes', { n: st.v })]);
   return card('Sessions', null, h('div', { class: 'fgrid' }, f.field('Sign out after inactivity', f.sel(st, 'v', opts.map(([v, t]) => [String(v), t]), { onChange: async () => { try { L.S.settings = await L.api('PUT', '/api/settings', { session_idle_minutes: +st.v }); L.toast('Saved'); } catch (e) { L.toast(e.message, 'bad'); } } }), 'Applies to everyone. Saved immediately.'))); };
+
+/* How often the Overview reloads its numbers. One choice for everyone, saved on the server. */
+const reloadCard = () => {
+  const steps = L.RELOAD_STEPS, label = secs => secs ? L.t('{n} s', { n: secs }) : L.t('Off');
+  const out = h('output', { class: 'mono' }, label(L.reloadSecs()));
+  return card('Overview', null, f.field('Auto reload', h('div', { class: 'reload-pick' },
+    h('input', { class: 'reload-range', type: 'range', min: 0, max: steps.length - 1, step: 1, value: steps.indexOf(L.reloadSecs()), 'aria-label': 'Auto reload',
+      oninput: e => { out.textContent = label(steps[e.target.value]); },
+      onchange: async e => { try { await L.setReloadSecs(steps[e.target.value]); L.toast('Saved'); } catch (err) { L.toast(err.message, 'bad'); L.rerender(); } } }), out),
+    'How often the Overview reloads its numbers. Applies to everyone. Saved immediately.'));
+};
 
 /* ---------- audit ---------- */
 let af = { q: '', outcome: 'all' };

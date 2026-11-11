@@ -341,6 +341,7 @@ impl Console {
             ("GET", ["devices"]) => return devices_json(&store),
             ("GET", ["history"]) => return self.history(&store, request),
             ("GET", ["settings"]) => return settings_json(&store),
+            ("GET", ["modules"]) => return modules_json(&store),
             _ => {}
         }
         if !admin {
@@ -385,6 +386,7 @@ impl Console {
             ("POST", ["activity", "cancel"]) => self.cancel_activity(&mut store, &ctx),
             ("GET", ["audit"]) => audit_json(&store, &request.query),
             ("PUT", ["settings"]) => self.put_settings(&mut store, &ctx),
+            ("PUT", ["modules"]) => self.put_module(&mut store, &ctx),
             ("PUT", ["history"]) => self.put_history(&mut store, &ctx),
             ("DELETE", ["history"]) => self.clear_history(&mut store, &ctx),
             _ => error(StatusCode::NOT_FOUND, "route not found"),
@@ -1289,6 +1291,37 @@ impl Console {
         )
     }
 
+    /// Switch one optional module on or off. Modules are off until an administrator turns them on.
+    fn put_module(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
+        let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
+            return bad("invalid JSON");
+        };
+        let Some(id) = body.get("id").and_then(Value::as_str) else {
+            return bad("id is required");
+        };
+        let Some(&id) = MODULES.iter().find(|m| **m == id) else {
+            return bad("unknown module");
+        };
+        let Some(on) = body.get("enabled").and_then(Value::as_bool) else {
+            return bad("enabled must be true or false");
+        };
+        let mut enabled = enabled_modules(store);
+        enabled.retain(|m| *m != id);
+        if on {
+            enabled.push(id);
+        }
+        if store.set_setting("modules", &enabled.join(",")).is_err() {
+            return unavailable();
+        }
+        Self::actor(
+            store,
+            ctx,
+            "module.update",
+            &format!("{id} {}", if on { "on" } else { "off" }),
+        );
+        modules_json(store)
+    }
+
     fn clear_history(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
         let Ok(removed) = store.clear_query_log() else {
             return unavailable();
@@ -1305,9 +1338,18 @@ impl Console {
         };
         let idle = body.get("session_idle_minutes");
         let language = body.get("language");
-        if idle.is_none() && language.is_none() {
+        let reload = body.get("overview_reload_secs");
+        if idle.is_none() && language.is_none() && reload.is_none() {
             return bad("nothing to change");
         }
+        // How often every console reloads the Overview. 0 means never.
+        let reload_secs = match reload {
+            None => None,
+            Some(value) => match value.as_u64().filter(|s| OVERVIEW_RELOAD_STEPS.contains(s)) {
+                Some(secs) => Some(secs),
+                None => return bad("overview_reload_secs must be 0, 1, 2, 5, 10, 30 or 60"),
+            },
+        };
         let minutes = match idle {
             None => None,
             Some(value) => match value.as_u64().filter(|m| (5..=1440).contains(m)) {
@@ -1325,6 +1367,20 @@ impl Console {
                 None => return bad("language is not available"),
             },
         };
+        if let Some(secs) = reload_secs {
+            if store
+                .set_setting("overview_reload_secs", &secs.to_string())
+                .is_err()
+            {
+                return unavailable();
+            }
+            Self::actor(
+                store,
+                ctx,
+                "settings.update",
+                &format!("overview reload {secs} s"),
+            );
+        }
         if let Some(minutes) = minutes {
             if store
                 .set_setting("session_idle_minutes", &minutes.to_string())
@@ -1684,11 +1740,48 @@ fn language(store: &Store) -> Option<String> {
         .filter(|code| LANGUAGES.contains(&code.as_str()))
 }
 
+/// Optional features an administrator can switch on. Every module is off by default.
+const MODULES: &[&str] = &["traffic-map"];
+
+/// The enabled modules, in catalog order. Unknown names in storage are ignored.
+fn enabled_modules(store: &Store) -> Vec<&'static str> {
+    let saved = store.setting("modules").ok().flatten().unwrap_or_default();
+    MODULES
+        .iter()
+        .copied()
+        .filter(|m| saved.split(',').any(|s| s == *m))
+        .collect()
+}
+
+fn modules_json(store: &Store) -> Reply {
+    reply(
+        StatusCode::OK,
+        &json!({
+            "available": MODULES,
+            "enabled": enabled_modules(store),
+        }),
+    )
+}
+
+/// The seconds between Overview reloads the console offers. 0 turns it off.
+const OVERVIEW_RELOAD_STEPS: [u64; 7] = [1, 2, 5, 10, 30, 60, 0];
+
+fn overview_reload_secs(store: &Store) -> u64 {
+    store
+        .setting("overview_reload_secs")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| OVERVIEW_RELOAD_STEPS.contains(s))
+        .unwrap_or(10)
+}
+
 fn settings_json(store: &Store) -> Reply {
     reply(
         StatusCode::OK,
         &json!({
             "session_idle_minutes": Console::idle_secs(store) / 60,
+            "overview_reload_secs": overview_reload_secs(store),
             "language": language(store),
             "languages": LANGUAGES,
         }),
@@ -2907,6 +3000,96 @@ mod tests {
                 && text.contains("user.password")
         );
         assert!(!text.contains("passphrase") && !text.contains("csrf"));
+    }
+
+    #[test]
+    fn overview_reload_interval_is_saved_for_everyone() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let get = || {
+            body(call(
+                &f,
+                Method::GET,
+                "/api/settings",
+                session,
+                "",
+                "127.0.0.1",
+            ))
+            .1
+        };
+        assert_eq!(get()["overview_reload_secs"], 10);
+        let put = |payload: &str| {
+            call(
+                &f,
+                Method::PUT,
+                "/api/settings",
+                session,
+                payload,
+                "127.0.0.1",
+            )
+        };
+        assert_eq!(
+            put(r#"{"overview_reload_secs":3}"#).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            put(r#"{"overview_reload_secs":"5"}"#).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            body(put(r#"{"overview_reload_secs":30}"#)).1["overview_reload_secs"],
+            30
+        );
+        assert_eq!(get()["overview_reload_secs"], 30);
+        assert_eq!(
+            body(put(r#"{"overview_reload_secs":0}"#)).1["overview_reload_secs"],
+            0
+        );
+        assert_eq!(get()["overview_reload_secs"], 0);
+    }
+
+    #[test]
+    fn modules_are_off_until_an_administrator_turns_them_on() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let get = || {
+            body(call(
+                &f,
+                Method::GET,
+                "/api/modules",
+                session,
+                "",
+                "127.0.0.1",
+            ))
+            .1
+        };
+        assert_eq!(get()["enabled"], json!([]));
+        assert_eq!(get()["available"], json!(["traffic-map"]));
+        let put = |payload: &str| {
+            call(
+                &f,
+                Method::PUT,
+                "/api/modules",
+                session,
+                payload,
+                "127.0.0.1",
+            )
+        };
+        assert_eq!(
+            put(r#"{"id":"nope","enabled":true}"#).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            put(r#"{"id":"traffic-map"}"#).status(),
+            StatusCode::BAD_REQUEST
+        );
+        let (_, on) = body(put(r#"{"id":"traffic-map","enabled":true}"#));
+        assert_eq!(on["enabled"], json!(["traffic-map"]));
+        assert_eq!(get()["enabled"], json!(["traffic-map"]));
+        let (_, off) = body(put(r#"{"id":"traffic-map","enabled":false}"#));
+        assert_eq!(off["enabled"], json!([]));
     }
 
     #[test]
