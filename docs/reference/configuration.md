@@ -45,6 +45,7 @@ lumen --config FILE --check
 | `web.https` | Empty. When set, serves direct TLS 1.3 with HTTP/2 and HTTP/1.1 |
 | `web.certificate`, `web.private_key` | Required together when `web.https` is set |
 | `web.max_connections` | `64`. Shared web connection limit, 1 to 1024 |
+| `web.oidc` | Optional external console login, off by default: [External login](../guides/external-login.md) |
 | `listen` | Listener and client-access settings: [below](#listeners) |
 | `resolver` | Mode, cache, DNSSEC, and upstreams: [below](#resolver) |
 | `limits` | Shared admission and I/O limits: [below](#limits) |

@@ -1,6 +1,8 @@
 /* Italiano (it). Keys are the English texts of the console. A text without an entry here stays English.
    One "English": "translation" pair per line, strict JSON, so the catalogs can be checked by a test. */
 L.i18n.add('it', {
+"Sign in with {name}": "Accedi con {name}",
+"Single sign-on did not work. Try again, or use your username and password.": "L’accesso unico non è riuscito. Riprova oppure usa nome utente e password.",
 "Overview": "Panoramica",
 "Activity": "Attività",
 "Filtering": "Filtri",

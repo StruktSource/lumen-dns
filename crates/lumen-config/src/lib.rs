@@ -5,7 +5,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -34,6 +34,73 @@ pub struct Web {
     pub certificate: Option<PathBuf>,
     pub private_key: Option<PathBuf>,
     pub max_connections: u16,
+    /// Optional external sign-in for the console (`OpenID` Connect). Off by default.
+    pub oidc: Oidc,
+}
+
+/// Where the console redirects the browser after an external sign-in.
+pub const OIDC_CALLBACK_PATH: &str = "/api/login/oidc/callback";
+
+/// External console login through any `OpenID` Connect provider (Authentik, Authelia, Pocket ID,
+/// Octelium, Keycloak, and similar). Disabled by default; the built-in login always stays.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Oidc {
+    pub enabled: bool,
+    /// Text of the sign-in button, for example `Authentik`.
+    pub label: String,
+    /// Issuer URL. `https://` only, except `http://` on a loopback address.
+    pub issuer: String,
+    pub client_id: String,
+    /// File holding the client secret. Leave unset for a public client (PKCE only).
+    pub client_secret_file: Option<PathBuf>,
+    /// Must end in [`OIDC_CALLBACK_PATH`] and be registered with the provider.
+    pub redirect_url: String,
+    /// Extra CA certificates (PEM) for a provider with a private certificate authority.
+    pub ca_file: Option<PathBuf>,
+    /// Claim used to name a new account.
+    pub username_claim: String,
+    /// Claim that lists a person's groups.
+    pub groups_claim: String,
+    /// New accounts of members of this group start as administrators; others start as users.
+    pub admin_group: Option<String>,
+}
+
+impl Default for Oidc {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            label: "Single sign-on".into(),
+            issuer: String::new(),
+            client_id: String::new(),
+            client_secret_file: None,
+            redirect_url: String::new(),
+            ca_file: None,
+            username_claim: "preferred_username".into(),
+            groups_claim: "groups".into(),
+            admin_group: None,
+        }
+    }
+}
+
+/// `https://` URLs, or `http://` only when the host is a loopback address or `localhost`.
+#[must_use]
+pub fn oidc_url_ok(value: &str) -> bool {
+    if value.len() > 2048 || value.bytes().any(|b| b <= 0x20 || b == 0x7f) || value.contains('#') {
+        return false;
+    }
+    if value.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = value.strip_prefix("http://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?']).next().unwrap_or("");
+    let host = host.strip_prefix('[').map_or_else(
+        || host.rsplit_once(':').map_or(host, |(name, _)| name),
+        |ipv6| ipv6.split(']').next().unwrap_or(""),
+    );
+    host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 impl Default for Web {
@@ -44,6 +111,7 @@ impl Default for Web {
             certificate: None,
             private_key: None,
             max_connections: 64,
+            oidc: Oidc::default(),
         }
     }
 }
@@ -487,6 +555,8 @@ impl Config {
             &mut config.resolver.upstream_ca,
             &mut config.web.certificate,
             &mut config.web.private_key,
+            &mut config.web.oidc.client_secret_file,
+            &mut config.web.oidc.ca_file,
         ]
         .into_iter()
         .flatten()
@@ -727,6 +797,51 @@ impl Config {
                 .any(|other| socket_conflicts(address, other))
         }) {
             return Err("web listener conflicts with another TCP listener".into());
+        }
+        self.validate_oidc()
+    }
+
+    fn validate_oidc(&self) -> Result<(), String> {
+        let oidc = &self.web.oidc;
+        let claim_ok = |name: &str| {
+            (1..=64).contains(&name.len())
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b':' | b'.'))
+        };
+        if !oidc.enabled {
+            return Ok(());
+        }
+        if self.web.http.is_empty() && self.web.https.is_empty() {
+            return Err("web.oidc needs a web listener".into());
+        }
+        if !oidc_url_ok(&oidc.issuer) {
+            return Err("web.oidc.issuer must be an https URL (http only on loopback)".into());
+        }
+        if !oidc_url_ok(&oidc.redirect_url) || !oidc.redirect_url.ends_with(OIDC_CALLBACK_PATH) {
+            return Err(format!(
+                "web.oidc.redirect_url must be an https URL ending in {OIDC_CALLBACK_PATH}"
+            ));
+        }
+        if oidc.client_id.is_empty()
+            || oidc.client_id.len() > 256
+            || oidc.client_id.chars().any(char::is_control)
+        {
+            return Err("web.oidc.client_id must be 1..=256 characters".into());
+        }
+        if oidc.label.trim().is_empty()
+            || oidc.label.chars().count() > 40
+            || oidc.label.chars().any(char::is_control)
+        {
+            return Err("web.oidc.label must be 1..=40 characters".into());
+        }
+        if !claim_ok(&oidc.username_claim) || !claim_ok(&oidc.groups_claim) {
+            return Err("web.oidc claim names must be 1..=64 simple characters".into());
+        }
+        if oidc.admin_group.as_ref().is_some_and(|group| {
+            group.is_empty() || group.len() > 256 || group.chars().any(char::is_control)
+        }) {
+            return Err("web.oidc.admin_group must be 1..=256 characters".into());
         }
         Ok(())
     }
@@ -1488,5 +1603,60 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn oidc_config(extra: &str) -> Result<Config, String> {
+        Config::parse(
+            &format!(
+                "schema_version = 1\n[web]\nhttp = ['127.0.0.1:8080']\n[web.oidc]\nenabled = true\nissuer = 'https://id.example/application/o/lumen/'\nclient_id = 'lumen'\nredirect_url = 'https://dns.example/api/login/oidc/callback'\n{extra}"
+            ),
+            Path::new("/etc/lumen"),
+        )
+    }
+
+    #[test]
+    fn external_login_is_off_by_default_and_validated_when_on() {
+        let default = Config {
+            schema_version: 1,
+            ..Config::default()
+        };
+        assert!(!default.web.oidc.enabled);
+        default.validate().unwrap();
+
+        let config = oidc_config("client_secret_file = 'secret'\nca_file = '/ca.pem'\n").unwrap();
+        config.validate().unwrap();
+        // Relative files resolve beside the config file.
+        assert_eq!(
+            config.web.oidc.client_secret_file.as_deref(),
+            Some(Path::new("/etc/lumen/secret"))
+        );
+        assert_eq!(config.web.oidc.username_claim, "preferred_username");
+
+        for bad in [
+            "label = ''\n",
+            "username_claim = 'a b'\n",
+            "admin_group = ''\n",
+            "client_id = ''\n",
+            "unknown = 1\n",
+        ] {
+            let result = oidc_config(bad).and_then(|config| {
+                config.validate()?;
+                Ok(())
+            });
+            assert!(result.is_err(), "{bad}");
+        }
+        let mut config = oidc_config("").unwrap();
+        config.web.oidc.issuer = "http://id.example/".into();
+        assert!(config.validate().is_err(), "plain http to a remote issuer");
+        config.web.oidc.issuer = "http://127.0.0.1:9000/".into();
+        config.validate().unwrap();
+        config.web.oidc.issuer = "http://localhost.evil.example/".into();
+        assert!(config.validate().is_err());
+        config.web.oidc.issuer = "https://id.example/".into();
+        config.web.oidc.redirect_url = "https://dns.example/somewhere".into();
+        assert!(config.validate().is_err(), "callback path is fixed");
+        config.web.oidc.redirect_url = "https://dns.example/api/login/oidc/callback".into();
+        config.web.http.clear();
+        assert!(config.validate().is_err(), "needs a web listener");
     }
 }

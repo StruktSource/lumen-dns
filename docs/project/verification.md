@@ -283,3 +283,17 @@ validators stripped of control characters, damaged, truncated and bad-header fil
 removed, oversized lists refused, and the 128-entry cap. Not covered: the 512 MiB byte cap,
 a decompression bomb, Windows file-permission behavior of the cache folder (Unix modes only),
 a live public list server, and disk-full behavior.
+
+## 2026-11-11 — optional external login (OpenID Connect)
+
+Unit and console tests run the whole flow against a standards-shaped provider on loopback:
+discovery, redirect with PKCE (S256), state bound to the browser by a `Lax` cookie, single-use
+state, direct code exchange, and rejection of a wrong issuer, audience, `azp`, expiry, future
+issue time, nonce, missing subject, and a replayed callback. They also show the feature is off
+by default, a failed attempt sets no session, an admin-group member starts as an administrator
+and the role never changes on later sign-ins, a provider name that matches the local `anna` gets
+a separate account, identities go away with their account, and waiting sign-ins and discovery
+bodies are bounded. Config validation covers URL, callback path, claim and label limits.
+Not verified: live Authentik, Authelia, Pocket ID, Octelium, or Keycloak servers; a provider
+behind a private CA; TLS to a real provider; behavior behind a reverse proxy that rewrites the
+host. The ID token signature is deliberately not checked (see the guide).

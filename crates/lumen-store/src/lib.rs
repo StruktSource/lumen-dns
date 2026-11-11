@@ -12,7 +12,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Hard cap on saved query history rows, whatever the retention says.
 pub const QUERY_LOG_MAX_ROWS: u64 = 500_000;
@@ -35,6 +35,18 @@ const MIGRATION_6: &str = "CREATE TABLE query_log (
                 );
                 CREATE INDEX query_log_t ON query_log(t);
                 PRAGMA user_version = 6;";
+
+/// Stable OIDC subjects map to ordinary local accounts. Provider tokens are never stored.
+const MIGRATION_7: &str = "CREATE TABLE oidc_identities (
+                    issuer TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (issuer, subject),
+                    UNIQUE (user_id)
+                );
+                CREATE INDEX oidc_identities_user ON oidc_identities(user_id);
+                PRAGMA user_version = 7;";
 
 /// Two-step verification (TOTP secret, replay guard, hashed recovery codes).
 const MIGRATION_5: &str = "ALTER TABLE users ADD COLUMN totp_secret TEXT;
@@ -422,6 +434,11 @@ impl Store {
         if version < 6 {
             transaction
                 .execute_batch(MIGRATION_6)
+                .map_err(database_error)?;
+        }
+        if version < 7 {
+            transaction
+                .execute_batch(MIGRATION_7)
                 .map_err(database_error)?;
         }
         transaction.commit().map_err(database_error)
@@ -1140,6 +1157,61 @@ impl Store {
             .map_err(database_error)
     }
 
+    /// Find a stable `OIDC` identity or create a local account for its first login with `role`.
+    /// The role is not changed on later logins, and existing local usernames are never linked
+    /// implicitly.
+    ///
+    /// # Errors
+    /// Returns an error for invalid claims, password hashing, or database access.
+    pub fn oidc_user(
+        &mut self,
+        issuer: &str,
+        subject: &str,
+        preferred_name: Option<&str>,
+        role: Role,
+    ) -> Result<(User, bool), String> {
+        if issuer.is_empty()
+            || issuer.len() > 2048
+            || subject.is_empty()
+            || subject.len() > 512
+            || issuer.chars().any(char::is_control)
+            || subject.chars().any(char::is_control)
+        {
+            return Err("invalid OIDC identity claims".into());
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let existing = transaction
+            .query_row(
+                &format!(
+                    "{USER_COLUMNS} WHERE id = (SELECT user_id FROM oidc_identities
+                     WHERE issuer = ?1 AND subject = ?2)"
+                ),
+                params![issuer, subject],
+                read_user,
+            )
+            .optional()
+            .map_err(database_error)?;
+        if let Some(user) = existing {
+            transaction.commit().map_err(database_error)?;
+            return Ok((user, false));
+        }
+        let name = available_oidc_name(&transaction, preferred_name, issuer, subject)?;
+        let record = password::hash(&password::random_hex(32)?)?;
+        let user = insert_user(&transaction, &name, role, &record, false)?;
+        transaction
+            .execute(
+                "INSERT INTO oidc_identities(issuer, subject, user_id, created_at)
+                 VALUES(?1, ?2, ?3, ?4)",
+                params![issuer, subject, user.id, now()?],
+            )
+            .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
+        Ok((user, true))
+    }
+
     /// Change a role. The last administrator cannot be demoted.
     ///
     /// # Errors
@@ -1206,6 +1278,12 @@ impl Store {
         transaction
             .execute(
                 "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE name = ?1)",
+                [name],
+            )
+            .map_err(database_error)?;
+        transaction
+            .execute(
+                "DELETE FROM oidc_identities WHERE user_id = (SELECT id FROM users WHERE name = ?1)",
                 [name],
             )
             .map_err(database_error)?;
@@ -1540,6 +1618,64 @@ fn valid_username(name: &str) -> bool {
         && chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
+fn available_oidc_name(
+    connection: &Connection,
+    preferred: Option<&str>,
+    issuer: &str,
+    subject: &str,
+) -> Result<String, String> {
+    let candidate = preferred
+        .unwrap_or("oidc-user")
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let candidate = candidate.trim_matches(['.', '_', '-']);
+    let mut base = if candidate
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase())
+    {
+        candidate.to_owned()
+    } else {
+        format!("oidc-{candidate}")
+    };
+    base.truncate(32);
+    if valid_username(&base) && !username_exists(connection, &base)? {
+        return Ok(base);
+    }
+    let suffix = password::sha256_hex(&format!("{issuer}\0{subject}"));
+    base.truncate(23);
+    while base.ends_with(['.', '_', '-']) {
+        base.pop();
+    }
+    if base.len() < 3 || !base.starts_with(|c: char| c.is_ascii_lowercase()) {
+        base = "oidc-user".into();
+    }
+    let candidate = format!("{base}-{}", &suffix[..8]);
+    if username_exists(connection, &candidate)? {
+        return Err("OIDC username collision".into());
+    }
+    Ok(candidate)
+}
+
+fn username_exists(connection: &Connection, name: &str) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE name = ?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(database_error)
 }
 
 fn insert_user(
@@ -2023,6 +2159,62 @@ mod tests {
     }
 
     #[test]
+    fn external_identities_map_to_separate_accounts_and_go_with_the_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&directory.path().join("state.db")).unwrap();
+        store
+            .create_first_admin("admin", "pbkdf2-sha256$1$aa$bb")
+            .unwrap();
+        let issuer = "https://id.example/";
+        let (external, created) = store
+            .oidc_user(issuer, "stable-subject", Some("admin"), Role::User)
+            .unwrap();
+        assert!(created);
+        assert_eq!(external.role, Role::User);
+        assert_ne!(
+            external.name, "admin",
+            "OIDC must not claim a local account"
+        );
+        assert!(valid_username(&external.name));
+        let (same, created) = store
+            .oidc_user(issuer, "stable-subject", Some("renamed"), Role::Admin)
+            .unwrap();
+        assert!(!created);
+        assert_eq!(same.id, external.id);
+        assert_eq!(
+            same.role,
+            Role::User,
+            "a later login never changes the role"
+        );
+        // Another subject with the same wanted name gets its own account, and odd names are cleaned.
+        let (other, _) = store
+            .oidc_user(issuer, "second", Some("Admin"), Role::Admin)
+            .unwrap();
+        assert_ne!(other.id, external.id);
+        assert_eq!(other.role, Role::Admin);
+        let (odd, _) = store
+            .oidc_user(issuer, "third", Some("  ../Zoë Müller!! "), Role::User)
+            .unwrap();
+        assert!(valid_username(&odd.name), "{}", odd.name);
+        let (nameless, _) = store.oidc_user(issuer, "fourth", None, Role::User).unwrap();
+        assert!(valid_username(&nameless.name));
+        for (issuer, subject) in [("", "s"), (issuer, ""), (issuer, "bad\nsubject")] {
+            assert!(
+                store
+                    .oidc_user(issuer, subject, Some("x"), Role::User)
+                    .is_err()
+            );
+        }
+        // The identity is removed with its account, so a new login starts fresh.
+        assert!(store.delete_user(&external.name).unwrap());
+        let (again, created) = store
+            .oidc_user(issuer, "stable-subject", Some("admin"), Role::User)
+            .unwrap();
+        assert!(created);
+        assert_ne!(again.id, external.id);
+    }
+
+    #[test]
     fn schema_five_upgrades_to_six_without_touching_settings() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.db");
@@ -2032,7 +2224,9 @@ mod tests {
         }
         let connection = Connection::open(&path).unwrap();
         connection
-            .execute_batch("DROP TABLE query_log; PRAGMA user_version = 5;")
+            .execute_batch(
+                "DROP TABLE query_log; DROP TABLE oidc_identities; PRAGMA user_version = 5;",
+            )
             .unwrap();
         drop(connection);
         let store = Store::open(&path).unwrap();

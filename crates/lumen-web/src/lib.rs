@@ -6,6 +6,7 @@
 
 mod console;
 mod host;
+mod oidc;
 pub use console::Console;
 pub use host::{
     Counters, Explained, HistoryDetail, HistoryMode, HistorySettings, Host, ListInfo, QueryRecord,
@@ -501,6 +502,7 @@ mod tests {
             certificate: None,
             private_key: None,
             max_connections: 4,
+            ..Web::default()
         }
     }
 
@@ -685,6 +687,7 @@ mod tests {
             certificate: Some(directory.path().join("cert.pem")),
             private_key: Some(directory.path().join("key.pem")),
             max_connections: 4,
+            ..Web::default()
         };
         let tls = tls_config(&config).unwrap();
         assert_eq!(tls.alpn_protocols, [b"h2".to_vec(), b"http/1.1".to_vec()]);

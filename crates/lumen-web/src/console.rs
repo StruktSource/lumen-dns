@@ -29,6 +29,9 @@ use std::{
 pub(crate) type Reply = Response<Full<Bytes>>;
 
 const COOKIE_NAME: &str = "lumen_session";
+/// Carries the sign-in state through the provider's redirect. `Lax`, because the provider's
+/// redirect back is a cross-site navigation that a `Strict` cookie would not survive.
+const OIDC_COOKIE: &str = "lumen_oidc";
 const MAX_SESSION_SECS: u64 = 12 * 3600;
 const DEFAULT_IDLE_MINUTES: u64 = 30;
 const SERIES_POINTS: usize = 60;
@@ -104,6 +107,7 @@ pub struct Console {
     series: Mutex<VecDeque<Point>>,
     last: Mutex<Option<(Instant, Counters)>>,
     challenges: Mutex<HashMap<String, Challenge>>,
+    oidc: crate::oidc::Flows,
 }
 
 /// A password was accepted; the second step is still owed.
@@ -149,6 +153,51 @@ fn reply(status: StatusCode, body: &Value) -> Reply {
     response
 }
 
+/// A 302 to a fixed or provider-supplied location. Never built from request input.
+fn redirect(location: &str) -> Reply {
+    let mut response = Response::new(Full::new(Bytes::new()));
+    *response.status_mut() = StatusCode::FOUND;
+    if let Ok(value) = HeaderValue::from_str(location) {
+        response
+            .headers_mut()
+            .insert(hyper::header::LOCATION, value);
+    }
+    response
+}
+
+fn clear_oidc_cookie(tls: bool) -> HeaderValue {
+    let secure = if tls { "; Secure" } else { "" };
+    HeaderValue::from_str(&format!(
+        "{OIDC_COOKIE}=; Path=/api/login/oidc; HttpOnly; SameSite=Lax; Max-Age=0{secure}"
+    ))
+    .expect("static cookie")
+}
+
+/// Decode `%XX` and `+` in a query value without the length cut of [`percent_decode`], so long
+/// authorization codes survive. Invalid escapes are kept as they are.
+fn decode_component(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 3 <= bytes.len() => {
+                let hex = value.get(i + 1..i + 3);
+                if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    out.push(byte);
+                    i += 2;
+                } else {
+                    out.push(b'%');
+                }
+            }
+            other => out.push(other),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn error(status: StatusCode, message: &str) -> Reply {
     reply(status, &json!({ "error": message }))
 }
@@ -190,6 +239,7 @@ impl Console {
             series: Mutex::default(),
             last: Mutex::default(),
             challenges: Mutex::default(),
+            oidc: crate::oidc::Flows::default(),
         }
     }
 
@@ -289,6 +339,7 @@ impl Console {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)] // One route table, public routes first.
     pub(crate) fn handle(&self, request: &Request) -> Reply {
         let Ok(mut store) = Store::open(&self.state) else {
             return unavailable();
@@ -307,6 +358,10 @@ impl Console {
             ("POST", ["setup", "code"]) => return self.setup_code(&store, request),
             ("POST", ["login"]) => return self.login(&mut store, request),
             ("POST", ["login", "2fa"]) => return self.login_second_step(&mut store, request),
+            ("GET", ["login", "oidc"]) => return self.oidc_begin(request),
+            ("GET", ["login", "oidc", "callback"]) => {
+                return self.oidc_callback(&mut store, request);
+            }
             _ => {}
         }
         let Some((token_hash, session)) = self.session(&store, request) else {
@@ -484,6 +539,7 @@ impl Console {
                 "setup_code_required": setup && !request.peer.ip().to_canonical().is_loopback(),
                 "language": language(store),
                 "languages": LANGUAGES,
+                "oidc": self.host.oidc().map(|oidc| json!({ "label": oidc.label })),
                 "user": signed_in,
             }),
         )
@@ -941,6 +997,141 @@ impl Console {
         if let Ok(value) = HeaderValue::from_str(&cookie) {
             response.headers_mut().insert(SET_COOKIE, value);
         }
+        response
+    }
+
+    // ----- external sign-in (OpenID Connect) -----
+
+    /// Where a failed external sign-in lands: the login page with a short, generic notice.
+    fn oidc_failed(&self, tls: bool) -> Reply {
+        let mut response = redirect("/?sso=failed#/login");
+        response
+            .headers_mut()
+            .append(SET_COOKIE, clear_oidc_cookie(tls));
+        response
+    }
+
+    fn oidc_begin(&self, request: &Request) -> Reply {
+        let Some(config) = self.host.oidc() else {
+            return error(StatusCode::NOT_FOUND, "external sign-in is off");
+        };
+        let keys = vec![format!("i:{}", request.peer.ip())];
+        if self
+            .throttle
+            .lock()
+            .expect("throttle")
+            .locked(&keys)
+            .is_some()
+        {
+            return error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many attempts. Try again soon.",
+            );
+        }
+        // Every start counts toward the address limit; a successful sign-in clears it.
+        self.throttle.lock().expect("throttle").fail(&keys);
+        let Ok((url, state)) = self.oidc.begin(&config) else {
+            return self.oidc_failed(request.tls);
+        };
+        let secure = if request.tls { "; Secure" } else { "" };
+        let mut response = redirect(&url);
+        if let Ok(value) = HeaderValue::from_str(&format!(
+            "{OIDC_COOKIE}={state}; Path=/api/login/oidc; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
+            crate::oidc::FLOW_SECS
+        )) {
+            response.headers_mut().insert(SET_COOKIE, value);
+        }
+        response
+    }
+
+    fn oidc_callback(&self, store: &mut Store, request: &Request) -> Reply {
+        let Some(config) = self.host.oidc() else {
+            return error(StatusCode::NOT_FOUND, "external sign-in is off");
+        };
+        let keys = vec![format!("i:{}", request.peer.ip())];
+        if self
+            .throttle
+            .lock()
+            .expect("throttle")
+            .locked(&keys)
+            .is_some()
+        {
+            return error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many attempts. Try again soon.",
+            );
+        }
+        let param = |name: &str| {
+            request.query.split('&').find_map(|pair| {
+                let (key, value) = pair.split_once('=')?;
+                (key == name).then(|| decode_component(value))
+            })
+        };
+        // The browser must be the one that started the sign-in.
+        let state = param("state").unwrap_or_default();
+        let bound = cookie(&request.headers, OIDC_COOKIE).is_some_and(|c| same(c, &state));
+        let outcome = if !bound {
+            Err("sign-in was not started in this browser".to_owned())
+        } else if let Some(code) = param("code").filter(|_| param("error").is_none()) {
+            self.oidc.finish(&config, &state, &code)
+        } else {
+            Err("provider returned an error".to_owned())
+        };
+        let identity = match outcome {
+            Ok(identity) => identity,
+            Err(reason) => {
+                Self::audit(
+                    store,
+                    "-",
+                    "-",
+                    "session.start",
+                    &format!("sso: {reason}"),
+                    false,
+                    &request.peer,
+                );
+                return self.oidc_failed(request.tls);
+            }
+        };
+        let role = if config
+            .admin_group
+            .as_ref()
+            .is_some_and(|group| identity.groups.contains(group))
+        {
+            Role::Admin
+        } else {
+            Role::User
+        };
+        let Ok((user, _created)) = store.oidc_user(
+            &identity.issuer,
+            &identity.subject,
+            identity.username.as_deref(),
+            role,
+        ) else {
+            return self.oidc_failed(request.tls);
+        };
+        self.throttle.lock().expect("throttle").clear(&keys);
+        let _ = store.record_login(user.id);
+        Self::audit(
+            store,
+            &user.name,
+            user.role.as_str(),
+            "session.start",
+            "sso",
+            true,
+            &request.peer,
+        );
+        let Ok((session_cookie, _csrf)) =
+            self.start_session(store, &user, &request.peer, request.tls)
+        else {
+            return unavailable();
+        };
+        let mut response = redirect("/");
+        if let Ok(value) = HeaderValue::from_str(&session_cookie) {
+            response.headers_mut().append(SET_COOKIE, value);
+        }
+        response
+            .headers_mut()
+            .append(SET_COOKIE, clear_oidc_cookie(request.tls));
         response
     }
 
@@ -2064,8 +2255,12 @@ mod tests {
         settings: Mutex<HistorySettings>,
         recent: Mutex<Vec<QueryRecord>>,
         unsaved: Mutex<Vec<QueryRecord>>,
+        oidc: Mutex<Option<lumen_config::Oidc>>,
     }
     impl Host for Stub {
+        fn oidc(&self) -> Option<lumen_config::Oidc> {
+            self.oidc.lock().unwrap().clone()
+        }
         fn counters(&self) -> Counters {
             Counters {
                 queries: 7,
@@ -2230,6 +2425,169 @@ mod tests {
             .unwrap()
             .to_owned();
         (token, json["csrf"].as_str().unwrap().to_owned())
+    }
+
+    #[test]
+    fn external_sign_in_is_off_by_default_bound_to_the_browser_and_single_use() {
+        use crate::oidc::tests::{config as oidc_config, mock_provider, nonce_of};
+        let f = fixture();
+        let go = |path: &str, cookie: Option<&str>, from: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(HOST, HeaderValue::from_static("lumen.test"));
+            if let Some(cookie) = cookie {
+                headers.insert(COOKIE, HeaderValue::from_str(cookie).unwrap());
+            }
+            let (path, query) = path.split_once('?').unwrap_or((path, ""));
+            f.console.handle(&Request {
+                method: Method::GET,
+                path: path.into(),
+                query: query.into(),
+                headers,
+                body: Bytes::new(),
+                peer: peer(from),
+                tls: false,
+            })
+        };
+        let cookies = |reply: &Reply| -> Vec<String> {
+            reply
+                .headers()
+                .get_all(SET_COOKIE)
+                .iter()
+                .map(|v| v.to_str().unwrap().to_owned())
+                .collect()
+        };
+        let location = |reply: &Reply| {
+            reply.headers()[hyper::header::LOCATION]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+
+        // Off: no route, nothing advertised.
+        assert_eq!(
+            go("/api/login/oidc", None, "127.0.0.1").status(),
+            StatusCode::NOT_FOUND
+        );
+        let (_, state) = body(call(&f, Method::GET, "/api/state", None, "", "127.0.0.1"));
+        assert!(state["oidc"].is_null());
+
+        let provider = mock_provider("subject-7", "lumen");
+        let mut config = oidc_config(&provider.base);
+        config.label = "Authentik".into();
+        config.admin_group = Some("lumen-admins".into());
+        *f.host.oidc.lock().unwrap() = Some(config);
+        let (_, state) = body(call(&f, Method::GET, "/api/state", None, "", "127.0.0.1"));
+        assert_eq!(state["oidc"]["label"], "Authentik");
+
+        // Start: a redirect to the provider plus a Lax, HttpOnly flow cookie.
+        let started = go("/api/login/oidc", None, "127.0.0.1");
+        assert_eq!(started.status(), StatusCode::FOUND);
+        let url = location(&started);
+        assert!(
+            url.starts_with(&format!("{}/authorize?", provider.base)),
+            "{url}"
+        );
+        let flow_cookie = cookies(&started).remove(0);
+        assert!(flow_cookie.contains("HttpOnly") && flow_cookie.contains("SameSite=Lax"));
+        assert!(!flow_cookie.contains("Strict"));
+        let pair = flow_cookie.split(';').next().unwrap().to_owned();
+        let state_value = pair.trim_start_matches("lumen_oidc=").to_owned();
+        *provider.nonce.lock().unwrap() = nonce_of(&url);
+
+        // Without the cookie, or with a different browser's state, nothing signs in.
+        for (cookie, from) in [(None, "127.0.0.1"), (Some("lumen_oidc=other"), "127.0.0.1")] {
+            let failed = go(
+                &format!("/api/login/oidc/callback?code=abc&state={state_value}"),
+                cookie,
+                from,
+            );
+            assert_eq!(failed.status(), StatusCode::FOUND);
+            assert_eq!(location(&failed), "/?sso=failed#/login");
+            assert!(
+                cookies(&failed)
+                    .iter()
+                    .all(|c| !c.starts_with("lumen_session=") || c.contains("Max-Age=0"))
+            );
+        }
+        // A provider error is refused as well.
+        let refused = go(
+            &format!("/api/login/oidc/callback?error=access_denied&state={state_value}"),
+            Some(&pair),
+            "127.0.0.1",
+        );
+        assert_eq!(location(&refused), "/?sso=failed#/login");
+
+        // The flow state was spent by none of the failures above, except the error one above
+        // only checks it; start again for the real sign-in.
+        let started = go("/api/login/oidc", None, "127.0.0.1");
+        let url = location(&started);
+        *provider.nonce.lock().unwrap() = nonce_of(&url);
+        let pair = cookies(&started)
+            .remove(0)
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let state_value = pair.trim_start_matches("lumen_oidc=").to_owned();
+        let done = go(
+            &format!("/api/login/oidc/callback?code=the-code&state={state_value}"),
+            Some(&pair),
+            "127.0.0.1",
+        );
+        assert_eq!(done.status(), StatusCode::FOUND);
+        assert_eq!(location(&done), "/");
+        let set = cookies(&done);
+        let session = set
+            .iter()
+            .find(|c| c.starts_with("lumen_session="))
+            .expect("session cookie");
+        assert!(session.contains("HttpOnly") && session.contains("SameSite=Strict"));
+        assert!(
+            set.iter()
+                .any(|c| c.starts_with("lumen_oidc=;") && c.contains("Max-Age=0"))
+        );
+        let token = session
+            .trim_start_matches("lumen_session=")
+            .split(';')
+            .next()
+            .unwrap();
+
+        // The session works, the group made this first login an administrator, and the console
+        // hands the page its CSRF token through /api/state.
+        let (status, state) = body(go(
+            "/api/state",
+            Some(&format!("lumen_session={token}")),
+            "127.0.0.1",
+        ));
+        assert_eq!(status, StatusCode::OK);
+        let name = state["user"]["user"]["name"].as_str().unwrap();
+        assert!(
+            name.starts_with("anna-"),
+            "{name}: the local anna is not taken over"
+        );
+        assert_eq!(state["user"]["user"]["role"], "admin");
+        assert!(
+            state["user"]["csrf"]
+                .as_str()
+                .is_some_and(|c| !c.is_empty())
+        );
+
+        // Replaying the callback fails: the state was single use.
+        let replay = go(
+            &format!("/api/login/oidc/callback?code=the-code&state={state_value}"),
+            Some(&pair),
+            "127.0.0.1",
+        );
+        assert_eq!(location(&replay), "/?sso=failed#/login");
+
+        // The local account "anna" was never linked: the SSO person is a separate account.
+        let store = Store::open(&f.state).unwrap();
+        let users = store.users().unwrap();
+        assert_eq!(
+            users.iter().filter(|u| u.name.starts_with("anna")).count(),
+            2
+        );
+        assert!(store.user_with_record("anna").unwrap().unwrap().0.role == Role::User);
     }
 
     #[test]

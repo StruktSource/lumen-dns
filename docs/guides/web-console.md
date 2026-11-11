@@ -85,6 +85,8 @@ The console is available in English, German, Italian, Spanish, and Dutch. The se
 - **The last administrator** can be neither deleted nor demoted.
 - **Audit log:** sign-in, setup, user changes, configuration, device, filter, and control actions are recorded (newest 10,000). Passwords, tokens, and request bodies never are.
 
+Administrators can also let people sign in with Authentik, Authelia, Pocket ID, or another OpenID Connect provider: [External login](external-login.md). It is off by default and this login always stays.
+
 Forgot a password:
 
 ```sh

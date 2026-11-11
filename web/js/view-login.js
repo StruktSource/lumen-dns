@@ -34,6 +34,8 @@ function codeStep() {
 function signIn() {
   if (pending) return codeStep();
   const f = { name: '', pw: '' }; const err = h('div', { class: 'err', role: 'alert' }); const btn = h('button', { class: 'btn primary', type: 'submit', style: 'padding:13px' }, 'Sign in');
+  /* A failed external sign-in lands here as ?sso=failed. Show one generic notice and tidy the address. */
+  if (new URLSearchParams(location.search).get('sso') === 'failed') { err.textContent = L.t('Single sign-on did not work. Try again, or use your username and password.'); history.replaceState(null, '', location.pathname + location.hash); }
   const submit = async e => {
     e.preventDefault(); err.textContent = ''; btn.disabled = true;
     try { const r = await L.api('POST', '/api/login', { username: f.name.trim(), password: f.pw }); if (r.needs_2fa) { pending = { challenge: r.challenge }; L.$('#root').replaceChildren(L.views.login()); return; } L.signedIn(r); }
@@ -45,6 +47,7 @@ function signIn() {
       h('h2', {}, 'Sign in'),
       L.f.field('Username', h('input', { class: 'input', autocomplete: 'username', spellcheck: false, autocapitalize: 'none', id: 'u', oninput: e => { f.name = e.target.value; } })),
       L.pwField(f, 'pw', { label: 'Password', meter: false, autocomplete: 'current-password', id: 'p' }), err, btn,
+      L.meta.oidc ? h('a', { class: 'btn', href: '/api/login/oidc', style: 'padding:13px;text-align:center;text-decoration:none' }, L.t('Sign in with {name}', { name: L.meta.oidc.label })) : null,
       h('details', { class: 'hint' }, h('summary', { style: 'cursor:pointer' }, 'Forgot your password?'), h('p', { style: 'margin:8px 0 0' }, 'Ask an administrator to reset it under ', h('b', {}, 'Users & access'), '. If you are the only administrator, run ', h('code', {}, 'lumenctl user reset-password --state FILE --name NAME --password generate'), ' on the server.'))));
 }
 

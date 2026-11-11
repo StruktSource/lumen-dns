@@ -1,6 +1,8 @@
 /* Deutsch (de). Keys are the English texts of the console. A text without an entry here stays English.
    One "English": "translation" pair per line, strict JSON, so the catalogs can be checked by a test. */
 L.i18n.add('de', {
+"Sign in with {name}": "Mit {name} anmelden",
+"Single sign-on did not work. Try again, or use your username and password.": "Die einmalige Anmeldung hat nicht geklappt. Versuche es erneut oder nutze deinen Benutzernamen und dein Passwort.",
 "Overview": "Übersicht",
 "Activity": "Aktivität",
 "Filtering": "Filter",

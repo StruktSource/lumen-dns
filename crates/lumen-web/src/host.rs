@@ -85,4 +85,8 @@ pub trait Host: Send + Sync + 'static {
     /// Saved mode only: lookups waiting to be written to the database, oldest first.
     /// Each lookup is returned once.
     fn take_unsaved_history(&self) -> Vec<QueryRecord>;
+    /// External sign-in settings when the operator turned them on.
+    fn oidc(&self) -> Option<lumen_config::Oidc> {
+        None
+    }
 }

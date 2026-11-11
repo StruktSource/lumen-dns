@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64 = "0.23"
 bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "http2", "server"] }
@@ -14,9 +15,12 @@ hyper-util = { version = "0.1", features = ["http1", "http2", "server-auto", "to
 lumen-config = { path = "../lumen-config" }
 lumen-filter = { path = "../lumen-filter" }
 lumen-store = { path = "../lumen-store" }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
+sha2.workspace = true
 serde_json.workspace = true
 subtle.workspace = true
 toml = "1.1"
+webpki-roots = "1"
 rustls.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

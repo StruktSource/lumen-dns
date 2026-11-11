@@ -1256,6 +1256,7 @@ dependencies = [
 name = "lumen-web"
 version = "0.6.0"
 dependencies = [
+ "base64",
  "bytes",
  "http-body-util",
  "hyper",
@@ -1264,13 +1265,16 @@ dependencies = [
  "lumen-filter",
  "lumen-store",
  "rcgen",
+ "reqwest",
  "rustls",
  "serde_json",
+ "sha2",
  "subtle",
  "tempfile",
  "tokio",
  "tokio-rustls",
  "toml",
+ "webpki-roots",
 ]
 
 [[package]]

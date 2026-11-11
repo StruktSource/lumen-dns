@@ -9,6 +9,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 - **Live view on Activity.** A *Live* switch adds new lookups to the list every 2 seconds, with a short highlight on new rows. The choice is remembered in the browser, so it stays on until you switch it off.
 - **Modules and the Traffic map.** A new *Modules* page lists big, optional features. Each is off until an administrator turns it on, and the choice is saved on the server. The first module, *Traffic map*, draws your DNS traffic as an interactive tree: the Lumen server, then domain endings, then the domains under them. You can drag, zoom, search, filter and open any domain for details. It needs query history.
 - **Hide the sidebar.** A button in the sidebar header (or the `[` key) hides it for more room, and a tab on the left edge brings it back. The choice is remembered in the browser.
+- **External login (optional).** Administrators can add a *Sign in with …* button for Authentik, Authelia, Pocket ID, Octelium, or any OpenID Connect provider under `[web.oidc]`. It is off by default, the built-in login always stays, each person gets their own account tied to the provider's stable identity (never to a username), and the provider handles any second factor. See [External login](docs/guides/external-login.md).
 
 ### Resolver and build updates
 

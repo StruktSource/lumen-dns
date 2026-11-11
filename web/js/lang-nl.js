@@ -1,6 +1,8 @@
 /* Nederlands (nl). Keys are the English texts of the console. A text without an entry here stays English.
    One "English": "translation" pair per line, strict JSON, so the catalogs can be checked by a test. */
 L.i18n.add('nl', {
+"Sign in with {name}": "Inloggen met {name}",
+"Single sign-on did not work. Try again, or use your username and password.": "Eenmalig inloggen is niet gelukt. Probeer het opnieuw of gebruik je gebruikersnaam en wachtwoord.",
 "Overview": "Overzicht",
 "Activity": "Activiteit",
 "Filtering": "Filteren",

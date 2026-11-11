@@ -21,6 +21,7 @@ _Last updated 2026-11-11 for version 0.6.0._
 - Privacy-safe Prometheus metrics, a Grafana dashboard, and Home Assistant examples
 - Block lists that install in the background without restarting anything, are never downloaded twice by accident, and can be cancelled
 - Forward mode with up to 8 ranked providers and a choice of ranked fallback, fastest first, round-robin, or race
+- Optional external console login through OpenID Connect providers (off by default)
 - Native packages for six platforms and container images for `linux/amd64` and `linux/arm64`
 
 **Still ahead**
@@ -171,7 +172,7 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### Medium priority: soon
 
-5. **Optional external login.** Let administrators opt in to Authentik, Authelia, Octelium, and similar self-hosted identity or access platforms as console login methods. Keep Lumen's built-in login available and keep external login disabled by default.
+5. **Optional external login: first version done in 0.6.0** ([guide](../guides/external-login.md)). Authorization code with PKCE for any OpenID Connect provider, off by default, built-in login kept. Still open: linking an existing local account, group-to-role sync on every sign-in, single logout, a setup-wizard step, and a check against live Authentik, Authelia, Pocket ID, and Octelium installations.
 6. **CSS themes** for the console.
 7. **Finish the translations:** the remaining long help texts, and more languages.
 
