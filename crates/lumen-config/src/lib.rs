@@ -54,7 +54,10 @@ pub struct Oidc {
     pub client_id: String,
     /// File holding the client secret. Leave unset for a public client (PKCE only).
     pub client_secret_file: Option<PathBuf>,
-    /// Must end in [`OIDC_CALLBACK_PATH`] and be registered with the provider.
+    /// Optional override. Empty (the default) means Lumen builds the callback address from the
+    /// address the browser used to reach the console, so it works with a name, an IP address,
+    /// `http` or `https`. Register that address with the provider. Set this only when a reverse
+    /// proxy hides the real address; it must then end in [`OIDC_CALLBACK_PATH`].
     pub redirect_url: String,
     /// Extra CA certificates (PEM) for a provider with a private certificate authority.
     pub ca_file: Option<PathBuf>,
@@ -827,9 +830,12 @@ impl Config {
         if !oidc_url_ok(&oidc.issuer) {
             return Err("web.oidc.issuer must be an https URL (http only on loopback)".into());
         }
-        if !oidc_url_ok(&oidc.redirect_url) || !oidc.redirect_url.ends_with(OIDC_CALLBACK_PATH) {
+        if !oidc.redirect_url.is_empty()
+            && (!oidc_url_ok(&oidc.redirect_url)
+                || !oidc.redirect_url.ends_with(OIDC_CALLBACK_PATH))
+        {
             return Err(format!(
-                "web.oidc.redirect_url must be an https URL ending in {OIDC_CALLBACK_PATH}"
+                "web.oidc.redirect_url, when set, must be an https URL ending in {OIDC_CALLBACK_PATH}"
             ));
         }
         if oidc.client_id.is_empty()
@@ -1666,7 +1672,12 @@ mod tests {
         assert!(config.validate().is_err());
         config.web.oidc.issuer = "https://id.example/".into();
         config.web.oidc.redirect_url = "https://dns.example/somewhere".into();
-        assert!(config.validate().is_err(), "callback path is fixed");
+        assert!(
+            config.validate().is_err(),
+            "an override needs the callback path"
+        );
+        config.web.oidc.redirect_url = String::new();
+        config.validate().unwrap();
         config.web.oidc.redirect_url = "https://dns.example/api/login/oidc/callback".into();
         config.web.oidc.sync_role = true;
         assert!(config.validate().is_err(), "role sync needs a group");

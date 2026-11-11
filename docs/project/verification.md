@@ -286,6 +286,9 @@ a live public list server, and disk-full behavior.
 
 ## 2026-11-11 — optional external login (OpenID Connect)
 
+> Later change: `redirect_url` became an optional override. By default the callback address is built from the `Host` header and `X-Forwarded-Proto` of each request, and the token request repeats the address the sign-in started with. Tests cover `orb.local`-style names, IPv4 with a port, bracketed IPv6, `X-Forwarded-Proto`, rejected `Host` values (slash, space, `@`, `?`), the override, and the setup and settings forms showing it read-only. Behind a real reverse proxy this is untested.
+
+
 Unit and console tests run the whole flow against a standards-shaped provider on loopback:
 discovery, redirect with PKCE (S256), state bound to the browser by a `Lax` cookie, single-use
 state, direct code exchange, and rejection of a wrong issuer, audience, `azp`, expiry, future

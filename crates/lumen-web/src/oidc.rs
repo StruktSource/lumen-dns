@@ -55,6 +55,8 @@ struct Pending {
     at: Instant,
     /// Set when a signed-in person is linking their existing account instead of signing in.
     link: Option<i64>,
+    /// The callback address sent to the provider, which the token request must repeat exactly.
+    redirect: String,
 }
 
 /// Discovery cache and the sign-ins that are waiting for their browser to come back.
@@ -71,6 +73,7 @@ impl Flows {
         &self,
         config: &Oidc,
         link: Option<i64>,
+        redirect: &str,
     ) -> Result<(String, String), String> {
         let provider = self.provider(config)?;
         let state = password::random_hex(16)?;
@@ -82,7 +85,7 @@ impl Flows {
         url.query_pairs_mut()
             .append_pair("response_type", "code")
             .append_pair("client_id", &config.client_id)
-            .append_pair("redirect_uri", &config.redirect_url)
+            .append_pair("redirect_uri", redirect)
             .append_pair("scope", "openid profile email groups")
             .append_pair("state", &state)
             .append_pair("nonce", &nonce)
@@ -107,6 +110,7 @@ impl Flows {
                 nonce,
                 at: Instant::now(),
                 link,
+                redirect: redirect.to_owned(),
             },
         );
         Ok((url.into(), state))
@@ -131,7 +135,13 @@ impl Flows {
             return Err("invalid authorization code".into());
         }
         let provider = self.provider(config)?;
-        let token = block(exchange(config, &provider, code, &flow.verifier))?;
+        let token = block(exchange(
+            config,
+            &provider,
+            code,
+            &flow.verifier,
+            &flow.redirect,
+        ))?;
         let id_token = token
             .get("id_token")
             .and_then(Value::as_str)
@@ -146,14 +156,10 @@ impl Flows {
 
     /// The provider's logout address for a person who signed in through it, if it has one.
     /// Best effort: `None` means signing out of the console is all that happens.
-    pub(crate) fn logout_url(&self, config: &Oidc) -> Option<String> {
+    pub(crate) fn logout_url(&self, config: &Oidc, origin: &str) -> Option<String> {
         let provider = self.provider(config).ok()?;
         let mut url = Url::parse(provider.end_session_endpoint.as_deref()?).ok()?;
-        let back = Url::parse(&config.redirect_url)
-            .ok()?
-            .origin()
-            .ascii_serialization()
-            + "/";
+        let back = format!("{origin}/");
         url.query_pairs_mut()
             .append_pair("client_id", &config.client_id)
             .append_pair("post_logout_redirect_uri", &back);
@@ -171,6 +177,16 @@ impl Flows {
         *self.provider.lock().expect("oidc provider") =
             Some((Instant::now(), Arc::clone(&provider)));
         Ok(provider)
+    }
+}
+
+/// The callback address for a sign-in: the operator's override, or else one built from the
+/// address the browser used (`origin` is `scheme://host[:port]`).
+pub(crate) fn callback_for(config: &Oidc, origin: &str) -> String {
+    if config.redirect_url.is_empty() {
+        format!("{origin}{}", lumen_config::OIDC_CALLBACK_PATH)
+    } else {
+        config.redirect_url.clone()
     }
 }
 
@@ -324,6 +340,7 @@ async fn exchange(
     provider: &Provider,
     code: &str,
     verifier: &str,
+    redirect: &str,
 ) -> Result<Value, String> {
     let secret = match &config.client_secret_file {
         Some(path) => Some(
@@ -337,7 +354,7 @@ async fn exchange(
     let mut form = format!(
         "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
         encoded(code),
-        encoded(&config.redirect_url),
+        encoded(redirect),
         encoded(&config.client_id),
         encoded(verifier)
     );
@@ -448,6 +465,8 @@ pub(crate) mod tests {
         io::{Read, Write},
         net::TcpListener,
     };
+
+    const CALLBACK: &str = "http://127.0.0.1:1/api/login/oidc/callback";
 
     pub(crate) fn config(issuer: &str) -> Oidc {
         Oidc {
@@ -580,7 +599,7 @@ pub(crate) mod tests {
         let provider = mock_provider("subject-1", "lumen");
         let config = config(&provider.base);
         let flows = Flows::default();
-        let (url, state) = flows.begin(&config, None).unwrap();
+        let (url, state) = flows.begin(&config, None, CALLBACK).unwrap();
         let parsed = Url::parse(&url).unwrap();
         assert_eq!(parsed.path(), "/authorize");
         let query: HashMap<_, _> = parsed.query_pairs().into_owned().collect();
@@ -608,6 +627,61 @@ pub(crate) mod tests {
         // The same state cannot be replayed, and an unknown one is refused.
         assert!(flows.finish(&config, &state, "the-code").is_err());
         assert!(flows.finish(&config, "unknown", "c").is_err());
+    }
+
+    #[test]
+    fn the_callback_follows_the_address_people_use_unless_overridden() {
+        let mut config = config("https://id.example/");
+        config.redirect_url = String::new();
+        for origin in [
+            "https://lumen.dns.orb.local",
+            "http://192.168.1.2:8080",
+            "http://[fd00::2]:8080",
+        ] {
+            assert_eq!(
+                callback_for(&config, origin),
+                format!("{origin}/api/login/oidc/callback")
+            );
+        }
+        config.redirect_url = "https://dns.example/api/login/oidc/callback".into();
+        assert_eq!(
+            callback_for(&config, "http://10.0.0.5:8080"),
+            "https://dns.example/api/login/oidc/callback",
+            "an override wins"
+        );
+    }
+
+    #[test]
+    fn the_token_request_repeats_the_callback_the_sign_in_started_with() {
+        let provider = mock_provider("subject-3", "lumen");
+        let config = config(&provider.base);
+        let flows = Flows::default();
+        let started = "http://192.168.1.2:8080/api/login/oidc/callback";
+        let (url, state) = flows.begin(&config, None, started).unwrap();
+        let sent = Url::parse(&url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "redirect_uri")
+            .unwrap()
+            .1
+            .into_owned();
+        assert_eq!(sent, started);
+        *provider.nonce.lock().unwrap() = nonce_of(&url);
+        flows.finish(&config, &state, "code").unwrap();
+        let token_request = provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.starts_with("POST /token"))
+            .cloned()
+            .unwrap();
+        assert!(
+            token_request.contains(
+                "redirect_uri=http%3A%2F%2F192.168.1.2%3A8080%2Fapi%2Flogin%2Foidc%2Fcallback"
+            ),
+            "{token_request}"
+        );
     }
 
     #[test]
@@ -639,12 +713,12 @@ pub(crate) mod tests {
         let provider = mock_provider("subject-9", "lumen");
         let config = config(&provider.base);
         let flows = Flows::default();
-        let (url, state) = flows.begin(&config, Some(42)).unwrap();
+        let (url, state) = flows.begin(&config, Some(42), CALLBACK).unwrap();
         *provider.nonce.lock().unwrap() = nonce_of(&url);
         let (who, link) = flows.finish(&config, &state, "code").unwrap();
         assert_eq!((who.subject.as_str(), link), ("subject-9", Some(42)));
 
-        let logout = Url::parse(&flows.logout_url(&config).unwrap()).unwrap();
+        let logout = Url::parse(&flows.logout_url(&config, "http://127.0.0.1:1").unwrap()).unwrap();
         assert_eq!(logout.path(), "/logout");
         let query: HashMap<_, _> = logout.query_pairs().into_owned().collect();
         assert_eq!(query["client_id"], "lumen");
@@ -656,7 +730,7 @@ pub(crate) mod tests {
         let provider = mock_provider("subject-1", "someone-else");
         let config = config(&provider.base);
         let flows = Flows::default();
-        let (url, state) = flows.begin(&config, None).unwrap();
+        let (url, state) = flows.begin(&config, None, CALLBACK).unwrap();
         *provider.nonce.lock().unwrap() = nonce_of(&url);
         assert!(flows.finish(&config, &state, "code").is_err());
 
@@ -664,7 +738,7 @@ pub(crate) mod tests {
         let provider = mock_provider("subject-1", "lumen");
         let mut config = self::config(&provider.base);
         config.issuer = "http://127.0.0.1:9/".into();
-        assert!(Flows::default().begin(&config, None).is_err());
+        assert!(Flows::default().begin(&config, None, CALLBACK).is_err());
     }
 
     #[test]
@@ -673,7 +747,7 @@ pub(crate) mod tests {
         let config = config(&provider.base);
         let flows = Flows::default();
         for _ in 0..MAX_PENDING + 20 {
-            flows.begin(&config, None).unwrap();
+            flows.begin(&config, None, CALLBACK).unwrap();
         }
         assert_eq!(flows.pending.lock().unwrap().len(), MAX_PENDING);
     }

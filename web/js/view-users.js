@@ -142,12 +142,14 @@ function meTab() {
 }
 
 /* ---------- sign-in (admin): single sign-on and sessions ---------- */
-const ssoCheck = (st, key, text, hint) => h('label', { class: 'pick' }, h('input', { type: 'checkbox', checked: !!st[key], onchange: e => { st[key] = e.target.checked; L.rerender(); } }), h('div', {}, h('b', {}, text), hint ? h('div', { class: 'hint' }, hint) : null));
+/* The console's standard switch, with the hint underneath. No re-render: that would rebuild the form from the saved settings and drop the change. */
+const ssoSwitch = (st, key, text, hint) => h('div', {}, f.sw(st, key, text), hint ? h('div', { class: 'hint', style: 'margin-top:6px' }, hint) : null);
 function ssoSettings() {
   const c = L.S.cfg?.web?.oidc || {};
   const st = { enabled: !!c.enabled, label: c.label || 'Single sign-on', issuer: c.issuer || '', client_id: c.client_id || '', client_secret_file: c.client_secret_file || '',
-    redirect_url: c.redirect_url || (location.origin + '/api/login/oidc/callback'), ca_file: c.ca_file || '', username_claim: c.username_claim || 'preferred_username',
+    redirect_url: c.redirect_url || '', ca_file: c.ca_file || '', username_claim: c.username_claim || 'preferred_username',
     groups_claim: c.groups_claim || 'groups', admin_group: c.admin_group || '', sync_role: !!c.sync_role, single_logout: !!c.single_logout };
+  const callback = location.origin + '/api/login/oidc/callback';
   const result = h('div', { class: 'hint', role: 'status' });
   const test = async e => {
     e.target.disabled = true; result.className = 'hint'; result.textContent = L.t('Checking…');
@@ -172,17 +174,19 @@ function ssoSettings() {
   };
   return card('Single sign-on', h('span', { class: 'pill ' + (c.enabled ? 'ok' : 'off') }, c.enabled ? 'On' : 'Off'),
     h('p', { class: 'hint', style: 'margin:0' }, 'Let people sign in with Authentik, Authelia, Pocket ID, Octelium, or another OpenID Connect provider. The username and password login always stays available.'),
-    ssoCheck(st, 'enabled', 'Turn on single sign-on'),
+    ssoSwitch(st, 'enabled', 'Turn on single sign-on'),
     h('div', { class: 'fgrid' }, f.field('Button text', f.text(st, 'label', { placeholder: 'Single sign-on' })),
       f.field('Issuer URL', f.text(st, 'issuer', { mono: true, placeholder: 'https://auth.example.com/application/o/lumen/' }), 'The provider’s address. https only, except on this machine.')),
     h('div', { class: 'fgrid' }, f.field('Client ID', f.text(st, 'client_id', { mono: true })),
       f.field('Client secret file (optional)', f.text(st, 'client_secret_file', { mono: true, placeholder: '/run/secrets/oidc' }), 'A file on the Lumen host that holds the secret. Leave empty for a public client.')),
-    f.field('Redirect URL', f.text(st, 'redirect_url', { mono: true }), 'Register this exact address with the provider. It must end in /api/login/oidc/callback.'),
+    f.field('Redirect URL for your provider', h('div', { class: 'row' }, h('input', { class: 'input mono-in', readOnly: true, value: callback, 'aria-label': 'Redirect URL for your provider', onfocus: e => e.target.select() }), h('button', { class: 'btn', type: 'button', onclick: () => copy(callback) }, L.ic('copy'), 'Copy')),
+      c.redirect_url ? 'An override under Advanced is set, so Lumen uses that address instead.' : 'Register this address with the provider. Lumen builds it from the address you use to open the console, so it fits a name, an IP address, http or https. If people open the console in different ways, register each address.'),
     h('div', { class: 'fgrid' }, f.field('Administrator group (optional)', f.text(st, 'admin_group', { mono: true, placeholder: 'lumen-admins' }), 'Members of this group start as administrators.')),
-    ssoCheck(st, 'sync_role', 'Keep roles in step with the group on every sign-in', 'The last administrator is never demoted. Needs an administrator group.'),
-    ssoCheck(st, 'single_logout', 'Also sign out of the provider when signing out here', 'Only for people who signed in through the provider.'),
+    ssoSwitch(st, 'sync_role', 'Keep roles in step with the group on every sign-in', 'The last administrator is never demoted. Needs an administrator group.'),
+    ssoSwitch(st, 'single_logout', 'Also sign out of the provider when signing out here', 'Only for people who signed in through the provider.'),
     h('details', {}, h('summary', { style: 'cursor:pointer' }, 'Advanced'),
-      h('div', { class: 'stack', style: 'margin-top:12px' }, f.field('Certificate authority file (optional)', f.text(st, 'ca_file', { mono: true, placeholder: '/etc/lumen/provider-ca.pem' }), 'Only for a provider with a private certificate authority.'),
+      h('div', { class: 'stack', style: 'margin-top:12px' }, f.field('Redirect URL override (optional)', f.text(st, 'redirect_url', { mono: true, placeholder: 'https://dns.example/api/login/oidc/callback' }), 'Leave empty. Set it only if a reverse proxy hides the address people use. It must end in /api/login/oidc/callback.'),
+        f.field('Certificate authority file (optional)', f.text(st, 'ca_file', { mono: true, placeholder: '/etc/lumen/provider-ca.pem' }), 'Only for a provider with a private certificate authority.'),
         h('div', { class: 'fgrid' }, f.field('Username claim', f.text(st, 'username_claim', { mono: true })), f.field('Groups claim', f.text(st, 'groups_claim', { mono: true }))))),
     result,
     h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: test }, L.ic('refresh'), 'Check provider'), h('span', { class: 'sp' }), h('button', { class: 'btn primary', type: 'button', onclick: save }, 'Save and apply')));

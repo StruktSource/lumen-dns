@@ -11,7 +11,7 @@ In the console, an administrator turns it on under **Users → Sign-in → Singl
 
 You need [managed mode](managed-mode.md) (`--state`), a web listener, and a client registered with your provider:
 
-- **Redirect URL:** `https://<your console address>/api/login/oidc/callback` (exactly this path).
+- **Redirect URL:** the console's address followed by `/api/login/oidc/callback`. Lumen builds it from the address people use to open the console, so you do not type it: the console shows it ready to copy (see [The redirect URL](#the-redirect-url)).
 - **Flow:** authorization code with PKCE. A client secret is optional.
 - **Scopes:** Lumen asks for `openid profile email groups`. Providers ignore scopes they do not know.
 
@@ -22,7 +22,7 @@ label = "Authentik"                       # text of the sign-in button
 issuer = "https://auth.home.example/application/o/lumen/"
 client_id = "lumen"
 client_secret_file = "oidc-secret"       # optional; one line, beside the config file
-redirect_url = "https://dns.home.example/api/login/oidc/callback"
+# redirect_url = ""                      # leave unset: built from the address the browser used
 # ca_file = "provider-ca.pem"            # only for a provider with a private certificate authority
 # username_claim = "preferred_username"  # default
 # groups_claim = "groups"                # default
@@ -37,7 +37,7 @@ You can also turn it on in the first-run setup (the **Single sign-on** step), wh
 | :--- | :--- |
 | `issuer` | `https://` only. `http://` is accepted only for `localhost` or a loopback address, for testing. |
 | `client_secret_file` | Read when needed, never logged or shown. Leave unset for a public client. |
-| `redirect_url` | Must be registered with the provider and end in `/api/login/oidc/callback`. |
+| `redirect_url` | **Leave unset.** An optional override for a reverse proxy that hides the real address; it must end in `/api/login/oidc/callback`. |
 | `ca_file` | Extra trusted CA certificates (PEM, up to 1 MiB) for the provider only. |
 | `admin_group` | A person in this group is created as an administrator on their **first** sign-in. |
 | `sync_role` | Needs `admin_group`. Makes the group decide the role on **every** sign-in (see below). Default off. |
@@ -53,6 +53,17 @@ You can also turn it on in the first-run setup (the **Single sign-on** step), wh
 - **Sessions** are the same as for password sign-ins: the same cookie, idle and absolute limits, and sign-out. The audit log records `sso` as the sign-in method.
 - **Passwords.** An external account gets a random password nobody knows. An administrator can still set one for it under *Users → People* if you want a local fallback.
 
+## The redirect URL
+
+The provider sends the browser back to a **redirect URL**, and it only accepts addresses you registered with it. Lumen does not make you guess or type that address:
+
+- It is built for each sign-in from the address the browser used to open the console: `https` or `http`, then the host name or IP address and port, then `/api/login/oidc/callback`. For example `https://lumen.dns.orb.local/api/login/oidc/callback`, `https://dns.home.example/api/login/oidc/callback`, or `http://192.168.1.2:8080/api/login/oidc/callback`.
+- **Users → Sign-in** (and the setup step) show the address for the page you are on, read-only, with a **Copy** button. Register exactly that address with the provider.
+- If people reach the console in more than one way (a name and an IP address, say), register each address. Providers allow several redirect URLs.
+- Behind a reverse proxy that ends TLS, the proxy should pass the original `Host` header and `X-Forwarded-Proto: https`; Lumen uses both. If the proxy hides the real address, set the override `redirect_url` (the console has it under **Advanced**) to the public address.
+- The `Host` header must be a plain name, IPv4 address, or bracketed IPv6 address with an optional port. Anything else (spaces, slashes, `@`, `?`) starts no sign-in.
+- A wrong `Host` cannot send anyone anywhere: the provider refuses any redirect address that was not registered with it, and the token request repeats the exact address the sign-in started with.
+
 ## Link an existing account
 
 Someone who already has a local account keeps it. Under **My account → Single sign-on** they choose **Link …**, sign in at the provider, and the account is tied to that identity. From then on **Sign in with …** opens the same account, with the same username, role, settings, and history.
@@ -64,7 +75,7 @@ Someone who already has a local account keeps it. Under **My account → Single 
 
 ## Single logout
 
-With `single_logout = true`, signing out of the console also sends the browser to the provider's logout page, **but only for sessions that were started through the provider** (a small `HttpOnly` marker cookie remembers this). Password sign-ins sign out of the console only. Lumen sends `client_id` and a `post_logout_redirect_uri` that is your console's address, so register that address with the provider as an allowed post-logout redirect. It is skipped quietly when the provider's discovery lists no `end_session_endpoint`. Lumen does not keep ID tokens, so it sends no `id_token_hint`; a provider that insists on one will show its own confirmation page.
+With `single_logout = true`, signing out of the console also sends the browser to the provider's logout page, **but only for sessions that were started through the provider** (a small `HttpOnly` marker cookie remembers this). Password sign-ins sign out of the console only. Lumen sends `client_id` and a `post_logout_redirect_uri` that is the console's address as the browser used it (for example `https://lumen.dns.orb.local/`), so register that address with the provider as an allowed post-logout redirect. It is skipped quietly when the provider's discovery lists no `end_session_endpoint`. Lumen does not keep ID tokens, so it sends no `id_token_hint`; a provider that insists on one will show its own confirmation page.
 
 ## What Lumen checks
 
@@ -94,7 +105,7 @@ These belong to the bundled console and may change between releases; they are no
 | Symptom | Check |
 | :--- | :--- |
 | No button on the login page | `enabled = true`, the config was applied, and the console runs in managed mode. |
-| "Single sign-on did not work" | The audit log shows the reason: wrong issuer, wrong client ID, an unregistered redirect URL, a clock more than 2 minutes off, or the provider being unreachable from Lumen. |
+| "Single sign-on did not work" | The audit log shows the reason: wrong issuer, wrong client ID, a redirect URL that is not registered with the provider (compare it with the address shown under **Users → Sign-in**), a clock more than 2 minutes off, or the provider being unreachable from Lumen. |
 | Provider uses a private CA | Set `ca_file` to its certificate. |
 | Everyone becomes a User | The provider does not send the `groups` claim for this client, or `groups_claim` has another name. |
 | Signing out ends nothing at the provider | `single_logout` is off, the provider has no `end_session_endpoint`, or the session was a password sign-in. |

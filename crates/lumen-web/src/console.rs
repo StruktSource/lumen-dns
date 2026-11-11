@@ -206,6 +206,30 @@ fn setup_oidc(store: &Store, body: &Value) -> Result<Option<lumen_config::Oidc>,
     Ok(Some(oidc))
 }
 
+/// `scheme://host[:port]` as the browser addressed this console, for building the callback
+/// address. The host comes from the `Host` header, which must look like a name, an IPv4 address,
+/// or a bracketed IPv6 address with an optional port. A proxy that ends TLS says so with
+/// `X-Forwarded-Proto`. A wrong value cannot redirect anyone anywhere: the provider only
+/// accepts callback addresses that were registered with it.
+fn public_origin(request: &Request) -> Option<String> {
+    let host = request.headers.get(HOST)?.to_str().ok()?;
+    if host.is_empty()
+        || host.len() > 255
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
+    {
+        return None;
+    }
+    let https = request.tls
+        || request
+            .headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("https"));
+    Some(format!("{}://{host}", if https { "https" } else { "http" }))
+}
+
 /// A 302 to a fixed or provider-supplied location. Never built from request input.
 fn redirect(location: &str) -> Reply {
     let mut response = Response::new(Full::new(Bytes::new()));
@@ -1110,7 +1134,9 @@ impl Console {
         }
         // Every start counts toward the address limit; a successful sign-in clears it.
         self.throttle.lock().expect("throttle").fail(&keys);
-        let (url, state) = self.oidc.begin(config, link).map_err(|_| None)?;
+        let origin = public_origin(request).ok_or(None)?;
+        let redirect = crate::oidc::callback_for(config, &origin);
+        let (url, state) = self.oidc.begin(config, link, &redirect).map_err(|_| None)?;
         let secure = if request.tls { "; Secure" } else { "" };
         let cookie = HeaderValue::from_str(&format!(
             "{OIDC_COOKIE}={state}; Path=/api/login/oidc; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
@@ -1379,7 +1405,10 @@ impl Console {
                 .host
                 .oidc()
                 .filter(|config| config.single_logout)
-                .and_then(|config| self.oidc.logout_url(&config))
+                .and_then(|config| {
+                    let origin = public_origin(ctx.request)?;
+                    self.oidc.logout_url(&config, &origin)
+                })
             {
                 body["redirect"] = Value::String(url);
             }
@@ -3385,6 +3414,92 @@ mod tests {
                 .as_bool()
         };
         assert_eq!((flag("anna"), flag("admin")), (Some(true), Some(false)));
+    }
+
+    #[test]
+    fn the_callback_address_follows_how_people_reach_the_console() {
+        use crate::oidc::tests::{config as oidc_config, mock_provider};
+        let f = fixture();
+        let provider = mock_provider("s", "lumen");
+        let mut config = oidc_config(&provider.base);
+        config.redirect_url = String::new();
+        *f.host.oidc.lock().unwrap() = Some(config.clone());
+        let start = |host: &str, proto: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            headers.insert(HOST, HeaderValue::from_str(host).unwrap());
+            if let Some(proto) = proto {
+                headers.insert("x-forwarded-proto", HeaderValue::from_str(proto).unwrap());
+            }
+            f.console.handle(&Request {
+                method: Method::GET,
+                path: "/api/login/oidc".into(),
+                query: String::new(),
+                headers,
+                body: Bytes::new(),
+                peer: peer("127.0.0.1"),
+                tls: false,
+            })
+        };
+        let redirect_uri = |reply: &Reply| {
+            let location = reply.headers()[hyper::header::LOCATION]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            reqwest::Url::parse(&location)
+                .ok()?
+                .query_pairs()
+                .find(|(key, _)| key == "redirect_uri")
+                .map(|(_, value)| value.into_owned())
+        };
+        for (host, proto, expected) in [
+            (
+                "lumen.dns.orb.local",
+                Some("https"),
+                "https://lumen.dns.orb.local/api/login/oidc/callback",
+            ),
+            (
+                "192.168.1.2:8080",
+                None,
+                "http://192.168.1.2:8080/api/login/oidc/callback",
+            ),
+            (
+                "[fd00::2]:8080",
+                None,
+                "http://[fd00::2]:8080/api/login/oidc/callback",
+            ),
+            (
+                "dns.home.example",
+                Some("HTTPS"),
+                "https://dns.home.example/api/login/oidc/callback",
+            ),
+            (
+                "dns.home.example",
+                Some("gopher"),
+                "http://dns.home.example/api/login/oidc/callback",
+            ),
+        ] {
+            assert_eq!(
+                redirect_uri(&start(host, proto)).as_deref(),
+                Some(expected),
+                "{host}"
+            );
+        }
+        // A Host header that is not a plain name or address starts nothing.
+        for host in ["evil.example/x", "a b", "user@evil.example", "x?y=1"] {
+            let reply = start(host, None);
+            assert_eq!(
+                reply.headers()[hyper::header::LOCATION],
+                "/?sso=failed#/login",
+                "{host}"
+            );
+        }
+        // An override from the configuration wins, for a proxy that hides the real address.
+        config.redirect_url = "https://dns.example/api/login/oidc/callback".into();
+        *f.host.oidc.lock().unwrap() = Some(config);
+        assert_eq!(
+            redirect_uri(&start("192.168.1.2:8080", None)).as_deref(),
+            Some("https://dns.example/api/login/oidc/callback")
+        );
     }
 
     #[test]

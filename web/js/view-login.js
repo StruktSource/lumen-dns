@@ -53,7 +53,7 @@ function signIn() {
 
 /* ---------- first-run setup ---------- */
 /* A guided wizard: welcome, setup code (only off the host machine), account, privacy, networks, protection, review. */
-const sf = { sso: false, ssoLabel: '', ssoIssuer: '', ssoClient: '', ssoSecret: '', ssoRedirect: location.origin + '/api/login/oidc/callback', ssoGroup: '', ssoSync: false, ssoLogout: false, name: 'admin', pw: '', pw2: '', mode: 'recursive', code: '', protect: 'recommended' }; let nets = []; let at = 0; let verified = false;
+const sf = { sso: false, ssoLabel: '', ssoIssuer: '', ssoClient: '', ssoSecret: '', ssoGroup: '', ssoSync: false, ssoLogout: false, name: 'admin', pw: '', pw2: '', mode: 'recursive', code: '', protect: 'recommended' }; let nets = []; let at = 0; let verified = false;
 const PROTECT = [
   ['recommended', 'Recommended', 'Hagezi Pro plus the Threat Intelligence feed. Blocks ads, trackers, malware and phishing with very few broken sites.', '≈ 1.4 M rules · 40 MB'],
   ['light', 'Light', 'Hagezi Light and a trimmed threat feed. Gentle and small, a good fit for a Raspberry Pi.', '≈ 270 k rules · 10 MB'],
@@ -114,17 +114,18 @@ function setup() {
     next = () => { const n = sf.name.trim().toLowerCase(); if (!L.v.username(n)) return (err.textContent = L.t('Choose a valid username.')); const c = L.pw.check(sf.pw); if (!c.ok) return (err.textContent = L.t('Password needs {tips}.', { tips: c.tips.map(x => L.t(x)).join(L.t(' and ')) })); if (sf.pw !== sf.pw2) return (err.textContent = L.t('The two passwords differ.')); sf.name = n; go(at + 1); };
   } else if (id === 'sso') {
     nextLabel = sf.sso ? 'Continue' : 'Skip for now';
-    const check = (key, text) => h('label', { class: 'pick' }, h('input', { type: 'checkbox', checked: sf[key], onchange: e => { sf[key] = e.target.checked; draw(); } }), h('div', {}, h('b', {}, text)));
+    const callback = location.origin + '/api/login/oidc/callback';
+    const check = (key, text) => h('div', {}, L.f.sw(sf, key, text, { onChange: key === 'sso' ? draw : null }));
     body = [h('h2', {}, 'Sign in with your identity provider'), h('p', { class: 'muted', style: 'margin:0' }, 'Optional. Let people sign in with Authentik, Authelia, Pocket ID, Octelium, or another OpenID Connect provider. The username and password login always stays available. You can also set this up later.'),
       check('sso', 'Use an identity provider'),
       ...(sf.sso ? [L.f.field('Button text', L.f.text(sf, 'ssoLabel', { placeholder: 'Single sign-on' })),
         L.f.field('Issuer URL', L.f.text(sf, 'ssoIssuer', { mono: true, placeholder: 'https://auth.example.com/application/o/lumen/' })),
         L.f.field('Client ID', L.f.text(sf, 'ssoClient', { mono: true })),
         L.f.field('Client secret file (optional)', L.f.text(sf, 'ssoSecret', { mono: true, placeholder: '/run/secrets/oidc' }), 'A file on the Lumen host that holds the secret. Leave empty for a public client.'),
-        L.f.field('Redirect URL', L.f.text(sf, 'ssoRedirect', { mono: true }), 'Register this redirect URL with the provider.'),
+        L.f.field('Redirect URL for your provider', h('div', { class: 'row' }, h('input', { class: 'input mono-in', readOnly: true, value: callback, 'aria-label': 'Redirect URL for your provider', onfocus: e => e.target.select() }), h('button', { class: 'btn', type: 'button', onclick: async () => { try { await navigator.clipboard.writeText(callback); L.toast('Copied'); } catch { L.toast('Copy failed. Select the text manually.', 'bad'); } } }, L.ic('copy'), 'Copy')), 'Register this address with the provider. Lumen builds it from the address you use to open the console, so it fits a name, an IP address, http or https.'),
         L.f.field('Administrator group (optional)', L.f.text(sf, 'ssoGroup', { mono: true, placeholder: 'lumen-admins' }), 'Members of this group start as administrators.'),
         check('ssoSync', 'Keep roles in step with the group on every sign-in'), check('ssoLogout', 'Also sign out of the provider when signing out here')] : []), err];
-    next = () => { if (sf.sso && (!sf.ssoIssuer.trim() || !sf.ssoClient.trim() || !sf.ssoRedirect.trim())) return (err.textContent = L.t('Enter the issuer URL, client ID and redirect URL.')); go(at + 1); };
+    next = () => { if (sf.sso && (!sf.ssoIssuer.trim() || !sf.ssoClient.trim())) return (err.textContent = L.t('Enter the issuer URL and client ID.')); go(at + 1); };
   } else if (id === 'privacy') {
     const card = (v, t, d, tag) => h('label', { class: 'pick' }, h('input', { type: 'radio', name: 'mode', checked: sf.mode === v, onchange: () => { sf.mode = v; } }), h('div', {}, h('b', {}, t, tag ? h('span', { class: 'chip', style: 'margin-left:8px' }, tag) : null), h('span', {}, d)));
     body = [h('h2', {}, 'How should Lumen find answers?'), h('p', { class: 'muted', style: 'margin:0' }, 'This decides who can see which sites your devices look up.'),
@@ -143,7 +144,7 @@ function setup() {
     body = [h('h2', {}, 'Ready to start'), h('p', { class: 'muted', style: 'margin:0' }, 'Lumen creates your account and applies these choices. DNS restarts for a moment, then you land on the overview.'),
       h('dl', { class: 'kv review' }, h('dt', {}, 'Administrator'), h('dd', {}, sf.name), h('dt', {}, 'Resolution'), h('dd', {}, label), h('dt', {}, 'Single sign-on'), h('dd', {}, sf.sso ? (sf.ssoLabel.trim() || 'Single sign-on') : 'Off'), h('dt', {}, 'Allowed networks'), h('dd', {}, nets.length ? nets.join(', ') : 'this machine only'), h('dt', {}, 'Block lists'), h('dd', {}, sf.protect === 'none' ? 'none yet' : L.t('{name} (downloads after setup)', { name: L.t(prot) }))), err];
     next = async () => {
-      try { L.signedIn(await L.api('POST', '/api/setup', { code: sf.code, username: sf.name, password: sf.pw, mode: sf.mode, allow_clients: nets, oidc: sf.sso ? { label: sf.ssoLabel.trim(), issuer: sf.ssoIssuer.trim(), client_id: sf.ssoClient.trim(), client_secret_file: sf.ssoSecret.trim(), redirect_url: sf.ssoRedirect.trim(), admin_group: sf.ssoGroup.trim(), sync_role: sf.ssoSync && !!sf.ssoGroup.trim(), single_logout: sf.ssoLogout } : undefined, language: L.lang })); if (sf.protect !== 'none') localStorage.setItem('lumen.pendingBundle', sf.protect); L.activity.poke(); sf.pw = sf.pw2 = ''; at = 0; }
+      try { L.signedIn(await L.api('POST', '/api/setup', { code: sf.code, username: sf.name, password: sf.pw, mode: sf.mode, allow_clients: nets, oidc: sf.sso ? { label: sf.ssoLabel.trim(), issuer: sf.ssoIssuer.trim(), client_id: sf.ssoClient.trim(), client_secret_file: sf.ssoSecret.trim(), admin_group: sf.ssoGroup.trim(), sync_role: sf.ssoSync && !!sf.ssoGroup.trim(), single_logout: sf.ssoLogout } : undefined, language: L.lang })); if (sf.protect !== 'none') localStorage.setItem('lumen.pendingBundle', sf.protect); L.activity.poke(); sf.pw = sf.pw2 = ''; at = 0; }
       catch (x) { err.textContent = x.message; if (x.status === 403) { at = needCode ? 1 : 0; draw(); } }
     };
   }

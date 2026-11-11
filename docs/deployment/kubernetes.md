@@ -23,7 +23,7 @@ helm upgrade --install lumen deploy/helm/lumen --namespace lumen --create-namesp
 
 1. **Edit the config ACL** for your real pod and client networks.
 
-For [single sign-on](../guides/external-login.md), keep the OIDC client secret in a Kubernetes Secret mounted read-only as a file and point `client_secret_file` at it; register the Ingress address (not the pod address) as the redirect URL.
+For [single sign-on](../guides/external-login.md), keep the OIDC client secret in a Kubernetes Secret mounted read-only as a file and point `client_secret_file` at it; register the redirect URL the console shows when you open it through the Ingress (not through the pod address). Have the Ingress pass the original `Host` header and `X-Forwarded-Proto`.
 2. **Review the NetworkPolicy.** The default accepts DNS only from the same namespace and permits resolver egress on DNS and encrypted-DNS ports. It lists both Service port 53 and pod target port 5353 so CNIs that enforce before or after Service translation behave the same. Check it against your cluster's CNI.
 3. **Encrypted DNS (optional).** Mount an existing TLS Secret through `tls.existingSecret`. The config must name files under `/etc/lumen/tls`.
 4. **Dual-stack (optional).** Set Helm `service.ipFamilyPolicy` and `service.ipFamilies`. This is unverified.
