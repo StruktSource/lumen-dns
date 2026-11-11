@@ -72,9 +72,22 @@ addEventListener('hashchange', () => { L.render(); scrollTo(0, 0); });
   await L.render();
 })();
 
-/* Keep the overview live: it reloads every 10 seconds. */
-setInterval(async () => {
-  if (document.hidden || !L.session || L.route().page !== 'overview' || L.$('dialog[open]')) return;
-  try { await Promise.all([L.loadStatus(), L.loadSeries()]); L.paintMain(); } catch { /* next tick */ }
-}, 10000);
+/* Keep the overview live. How often it reloads is a per-browser choice (default 10 s, or off), set with the slider on the Overview. */
+L.RELOAD_STEPS = [1, 2, 5, 10, 30, 60, 0];
+L.reloadSecs = () => { try { const raw = localStorage.getItem('lumen-overview-reload'); const v = raw === null ? NaN : Number(raw); return L.RELOAD_STEPS.includes(v) ? v : 10; } catch { return 10; } };
+L.setReloadSecs = secs => { try { localStorage.setItem('lumen-overview-reload', String(secs)); } catch { /* storage blocked */ } scheduleReload(); };
+let reloadTimer = 0;
+function scheduleReload() {
+  clearTimeout(reloadTimer);
+  const secs = L.reloadSecs();
+  if (!secs) return;
+  reloadTimer = setTimeout(async () => {
+    const slider = L.$('.reload-range');
+    if (!document.hidden && L.session && L.route().page === 'overview' && !L.$('dialog[open]') && document.activeElement !== slider) {
+      try { await Promise.all([L.loadStatus(), L.loadSeries()]); L.paintMain(); } catch { /* next tick */ }
+    }
+    scheduleReload();
+  }, secs * 1000);
+}
+scheduleReload();
 })();

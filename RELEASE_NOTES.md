@@ -5,7 +5,7 @@ Lumen 0.6.0 adds a live view to Activity and fixes the setup wizard ignoring the
 ## Highlights
 
 - **Live view.** Switch on *Live* in Activity to watch lookups arrive as they happen. The switch is remembered in your browser.
-- **Overview refreshes every 10 seconds.**
+- **Overview refreshes every 10 seconds, and you can change that.** An *Auto reload* slider offers 1, 2, 5, 10, 30, 60 seconds or off.
 - **Setup keeps your resolver choice.** Picking *Use another resolver* (Quad9) now results in forward mode instead of falling back to recursive.
 
 ## Check the download

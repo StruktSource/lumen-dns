@@ -69,11 +69,19 @@ L.views.overview = () => {
     if (cfg.listen.allow_clients.some(x => x === '0.0.0.0/0' || x === '::/0')) alerts.push(['bad', 'Open resolver: allowed networks include the whole internet.', 'Open listeners', () => L.go('dns', 'listeners')]);
   }
 
+  const reloadControl = () => {
+    const steps = L.RELOAD_STEPS, label = secs => secs ? L.t('{n} s', { n: secs }) : L.t('Off');
+    const out = h('output', { class: 'mono' }, label(L.reloadSecs()));
+    return h('label', { class: 'reload-pick' }, h('span', {}, 'Auto reload'),
+      h('input', { class: 'reload-range', type: 'range', min: 0, max: steps.length - 1, step: 1, value: steps.indexOf(L.reloadSecs()), 'aria-label': 'Auto reload',
+        oninput: e => { out.textContent = label(steps[e.target.value]); }, onchange: e => L.setReloadSecs(steps[e.target.value]) }), out);
+  };
   const control = async (path, msg) => { try { await L.api('POST', path); L.toast(msg); setTimeout(async () => { try { await L.loadStatus(); L.paintMain(); } catch { /* next refresh */ } }, 1500); } catch (e) { L.toast(e.message, 'bad'); } };
   const rollback = async () => { if (await L.confirm({ title: 'Roll back filter lists', text: 'Swap to the previous successful generation. Automatic refresh pauses until the next successful manual refresh.', label: 'Roll back' })) control('/api/filter/rollback', 'Rollback queued.'); };
 
   return [
     L.pageHead('Overview', 'Live totals since Lumen started. Domains and devices are never part of these numbers.', [
+      reloadControl(),
       h('span', { class: 'pill ' + (s.daemon === 'running' ? 'ok' : 'bad') }, s.daemon === 'running' ? 'Running' : s.daemon), h('span', { class: 'pill plain' }, 'Uptime ' + F.dur(s.uptime_secs)), h('span', { class: 'pill plain' }, 'Revision ' + s.revision)]),
     admin ? gettingStarted(cfg, s, f, c) : null,
     alerts.length ? h('div', { class: 'stack', style: 'margin-bottom:16px' }, alerts.map(([k, t, label, fn]) => h('div', { class: 'note ' + k }, L.ic('alert'), h('p', {}, t), label ? h('button', { class: 'btn sm', style: 'margin-left:auto', onclick: fn }, label) : null))) : null,

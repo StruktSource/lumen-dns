@@ -636,5 +636,7 @@ L.i18n.add('nl', {
 "No encrypted transport": "Geen versleuteld transport",
 "At most {n} here.": "Hier maximaal {n}.",
 "Live": "Live",
-"Live view adds new lookups to the list as they happen.": "De live-weergave voegt nieuwe opzoekingen direct aan de lijst toe."
+"Live view adds new lookups to the list as they happen.": "De live-weergave voegt nieuwe opzoekingen direct aan de lijst toe.",
+"Auto reload": "Automatisch verversen",
+"{n} s": "{n} s"
 });

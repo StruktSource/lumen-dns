@@ -10,7 +10,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Changed
 
-- The Overview now reloads every 10 seconds (it was 5).
+- The Overview now reloads every 10 seconds (it was 5). A new *Auto reload* slider on the Overview lets each browser choose 1, 2, 5, 10, 30 or 60 seconds, or off. The choice is remembered in the browser.
 
 ### Fixed
 
