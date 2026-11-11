@@ -182,16 +182,18 @@ impl Snapshot {
                     if key.exact() && suffix != name {
                         continue;
                     }
-                    let hit = Hit {
-                        domain: suffix.to_owned(),
-                        exact: key.exact(),
-                        allow: key.allow(),
-                        list: Some(list),
-                    };
-                    if key.allow() {
-                        return Some(hit);
-                    }
-                    if blocked.is_none() {
+                    // Keep looking for an allow, but do not allocate another domain for a
+                    // block that cannot replace the most-specific match already found.
+                    if key.allow() || blocked.is_none() {
+                        let hit = Hit {
+                            domain: suffix.to_owned(),
+                            exact: key.exact(),
+                            allow: key.allow(),
+                            list: Some(list),
+                        };
+                        if key.allow() {
+                            return Some(hit);
+                        }
                         blocked = Some(hit);
                     }
                 }
