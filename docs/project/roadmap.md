@@ -172,7 +172,7 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### Medium priority: soon
 
-5. **Optional external login: first version done in 0.6.0** ([guide](../guides/external-login.md)). Authorization code with PKCE for any OpenID Connect provider, off by default, built-in login kept. Still open: linking an existing local account, group-to-role sync on every sign-in, single logout, a setup-wizard step, and a check against live Authentik, Authelia, Pocket ID, and Octelium installations.
+5. **Optional external login: done in 0.6.0** ([guide](../guides/external-login.md)). Authorization code with PKCE for any OpenID Connect provider, off by default, built-in login kept. Includes linking an existing account, optional group-to-role sync, optional single logout, and a setup-wizard step. Not yet checked against live Authentik, Authelia, Pocket ID, or Octelium installations; back-channel logout and per-group roles beyond one admin group are not built.
 6. **CSS themes** for the console.
 7. **Finish the translations:** the remaining long help texts, and more languages.
 
@@ -183,17 +183,16 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 8. **Trust-anchor rollover automation and certificate lifecycle tooling.**
 9. **Split DNS, local records, and conditional forwarding.**
-10. **Recursion speed evidence:** a statistically significant cold-query result and an expiry-refresh benchmark (see [Recursion speed](#recursion-speed-issue-9)).
 
 ### Large efforts, before or after 1.0
 
-11. **Independent security review.** Required before a stable release.
-12. **High availability and cluster configuration replication.**
-13. **Optional DNS threat feeds and enterprise policy features.**
+10. **Independent security review.** Required before a stable release.
+11. **High availability and cluster configuration replication.**
+12. **Optional DNS threat feeds and enterprise policy features.**
 
 ### Not now
 
-14. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
+13. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
 
 ## Side projects
 
@@ -207,12 +206,12 @@ Important work that does not add a feature. It can be done in any order and by a
 
 ## Recursion speed (Issue #9)
 
-Implemented and partly measured.
+Implemented.
 
 - [x] Reproducible A/B benchmark with trial-level statistics (`scripts/recursion_bench.py`)
 - [x] Shared in-flight recursion, startup priming, opt-in expiry refresh and hedging, and latency metrics
-- [ ] Show a statistically significant public-network cold single-query gain. The first 12-trial run was **not** significant; a deterministic local test does prove that priming reduces authority round trips and latency
-- [ ] Benchmark expiry refresh (it has unit tests only)
+
+No significant public-network cold-query gain is claimed: the first 12-trial run was not significant, while a deterministic local test shows that priming reduces authority round trips and latency. Expiry refresh has unit tests only.
 
 Results and caveats: [Performance](performance.md).
 

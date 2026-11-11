@@ -297,3 +297,18 @@ bodies are bounded. Config validation covers URL, callback path, claim and label
 Not verified: live Authentik, Authelia, Pocket ID, Octelium, or Keycloak servers; a provider
 behind a private CA; TLS to a real provider; behavior behind a reverse proxy that rewrites the
 host. The ID token signature is deliberately not checked (see the guide).
+
+### External login follow-up: linking, role sync, single logout, setup step
+
+Console tests cover the whole story against the loopback provider: a signed-in person links an
+account (CSRF required, one link per account and per identity, the callback needs no session
+cookie), a later provider sign-in reaches that same account without creating another, group
+membership promotes it with `sync_role`, losing the group demotes it, the last administrator is
+never demoted, and without `sync_role` the role is left alone. Single logout returns the
+provider's logout address only for sessions that carry the marker cookie; password sign-ins do
+not. Unlinking needs the right password. The setup step rejects non-HTTPS issuers, a missing
+client ID, a wrong callback path, and role sync without a group **before** creating the account,
+and stages a valid `[web.oidc]` for reload. Store tests cover link, unlink and the uniqueness
+rules. Not verified: browsers (the wizard step and account card were syntax-checked, not
+clicked through), live providers, providers that require `id_token_hint` for logout, and a
+reverse proxy that changes the host.
