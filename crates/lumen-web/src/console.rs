@@ -32,6 +32,8 @@ const COOKIE_NAME: &str = "lumen_session";
 /// Carries the sign-in state through the provider's redirect. `Lax`, because the provider's
 /// redirect back is a cross-site navigation that a `Strict` cookie would not survive.
 const OIDC_COOKIE: &str = "lumen_oidc";
+/// Marks a console session that came from the provider, for single logout.
+const SSO_COOKIE: &str = "lumen_sso";
 const MAX_SESSION_SECS: u64 = 12 * 3600;
 const DEFAULT_IDLE_MINUTES: u64 = 30;
 const SERIES_POINTS: usize = 60;
@@ -151,6 +153,45 @@ fn reply(status: StatusCode, body: &Value) -> Reply {
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
     response
+}
+
+/// The external-login choice of the setup wizard, checked against the stored configuration
+/// exactly as a configuration change would be. `None` when the wizard did not ask for it.
+fn setup_oidc(store: &Store, body: &Value) -> Result<Option<lumen_config::Oidc>, String> {
+    let Some(item) = body.get("oidc").filter(|value| value.is_object()) else {
+        return Ok(None);
+    };
+    let get = |key: &str| {
+        text(item, key)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let flag = |key: &str| item.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let mut oidc = lumen_config::Oidc {
+        enabled: true,
+        issuer: get("issuer").unwrap_or_default(),
+        client_id: get("client_id").unwrap_or_default(),
+        redirect_url: get("redirect_url").unwrap_or_default(),
+        client_secret_file: get("client_secret_file").map(PathBuf::from),
+        admin_group: get("admin_group"),
+        sync_role: flag("sync_role"),
+        single_logout: flag("single_logout"),
+        ..lumen_config::Oidc::default()
+    };
+    if let Some(label) = get("label") {
+        oidc.label = label;
+    }
+    let mut config = match store.config()? {
+        Some(stored) => Config::parse(&stored.source, Path::new(&stored.base_dir))?,
+        None => Config {
+            schema_version: 1,
+            ..Config::default()
+        },
+    };
+    config.web.oidc = oidc.clone();
+    config.validate()?;
+    Ok(Some(oidc))
 }
 
 /// A 302 to a fixed or provider-supplied location. Never built from request input.
@@ -388,6 +429,9 @@ impl Console {
             ("GET", ["me"]) => return reply(StatusCode::OK, &me_json(&session)),
             ("POST", ["logout"]) => return self.logout(&mut store, &ctx),
             ("POST", ["me", "password"]) => return self.change_own_password(&mut store, &ctx),
+            ("GET", ["me", "oidc"]) => return self.oidc_state(&store, &ctx),
+            ("POST", ["me", "oidc", "link"]) => return self.oidc_link_start(&store, &ctx),
+            ("DELETE", ["me", "oidc"]) => return self.oidc_unlink(&mut store, &ctx),
             ("POST", ["me", "2fa", "setup"]) => return self.totp_setup(&mut store, &ctx),
             ("POST", ["me", "2fa", "enable"]) => return self.totp_enable(&mut store, &ctx),
             ("POST", ["me", "2fa", "disable"]) => return self.totp_disable(&mut store, &ctx),
@@ -610,6 +654,11 @@ impl Console {
         if let Err(message) = password::check_policy(pw, &name) {
             return bad(&message);
         }
+        // Checked before the account exists, so a typo in the provider settings can be fixed.
+        let sso = match setup_oidc(store, &body) {
+            Ok(sso) => sso,
+            Err(message) => return bad(&message),
+        };
         let Ok(record) = password::hash(pw) else {
             return unavailable();
         };
@@ -618,7 +667,7 @@ impl Console {
             Err(message) => return bad(&message),
         };
         // Optional first-run choices. Failures here never undo the account.
-        if let Err(message) = self.apply_setup_choices(store, &body, &name) {
+        if let Err(message) = self.apply_setup_choices(store, &body, sso.as_ref(), &name) {
             let _ = message;
         }
         if let Some(code) = text(&body, "language").filter(|c| LANGUAGES.contains(c)) {
@@ -642,11 +691,12 @@ impl Console {
         &self,
         store: &mut Store,
         body: &Value,
+        sso: Option<&lumen_config::Oidc>,
         actor: &str,
     ) -> Result<(), String> {
         let mode = text(body, "mode");
         let networks = body.get("allow_clients").and_then(Value::as_array);
-        if mode.is_none() && networks.is_none() {
+        if mode.is_none() && networks.is_none() && sso.is_none() {
             return Ok(());
         }
         let stored = store.config()?.ok_or("no active config")?;
@@ -701,6 +751,17 @@ impl Console {
                     .ok_or("bad listen table")?;
                 listen.insert("allow_clients".into(), toml::Value::Array(all));
             }
+        }
+        if let Some(sso) = sso {
+            let web = table
+                .entry("web")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .ok_or("bad web table")?;
+            web.insert(
+                "oidc".into(),
+                toml::Value::try_from(sso).map_err(|_| "cannot write external login")?,
+            );
         }
         let source = toml::to_string(&table).map_err(|_| "cannot write config")?;
         Config::parse(&source, Path::new(&stored.base_dir))?;
@@ -1011,10 +1072,15 @@ impl Console {
         response
     }
 
-    fn oidc_begin(&self, request: &Request) -> Reply {
-        let Some(config) = self.host.oidc() else {
-            return error(StatusCode::NOT_FOUND, "external sign-in is off");
-        };
+    #[allow(clippy::result_large_err)] // The error is the ready-made HTTP reply.
+    /// Shared start of a sign-in or a linking flow. `Err(Some(reply))` is a ready answer for a
+    /// throttled address; `Err(None)` means the provider could not be reached.
+    fn oidc_start(
+        &self,
+        request: &Request,
+        config: &lumen_config::Oidc,
+        link: Option<i64>,
+    ) -> Result<(String, HeaderValue), Option<Reply>> {
         let keys = vec![format!("i:{}", request.peer.ip())];
         if self
             .throttle
@@ -1023,27 +1089,124 @@ impl Console {
             .locked(&keys)
             .is_some()
         {
-            return error(
+            return Err(Some(error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many attempts. Try again soon.",
-            );
+            )));
         }
         // Every start counts toward the address limit; a successful sign-in clears it.
         self.throttle.lock().expect("throttle").fail(&keys);
-        let Ok((url, state)) = self.oidc.begin(&config) else {
-            return self.oidc_failed(request.tls);
-        };
+        let (url, state) = self.oidc.begin(config, link).map_err(|_| None)?;
         let secure = if request.tls { "; Secure" } else { "" };
-        let mut response = redirect(&url);
-        if let Ok(value) = HeaderValue::from_str(&format!(
+        let cookie = HeaderValue::from_str(&format!(
             "{OIDC_COOKIE}={state}; Path=/api/login/oidc; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
             crate::oidc::FLOW_SECS
-        )) {
-            response.headers_mut().insert(SET_COOKIE, value);
+        ))
+        .map_err(|_| None)?;
+        Ok((url, cookie))
+    }
+
+    fn oidc_begin(&self, request: &Request) -> Reply {
+        let Some(config) = self.host.oidc() else {
+            return error(StatusCode::NOT_FOUND, "external sign-in is off");
+        };
+        match self.oidc_start(request, &config, None) {
+            Ok((url, cookie)) => {
+                let mut response = redirect(&url);
+                response.headers_mut().insert(SET_COOKIE, cookie);
+                response
+            }
+            Err(Some(reply)) => reply,
+            Err(None) => self.oidc_failed(request.tls),
         }
+    }
+
+    /// What the account page shows about external sign-in for the signed-in person.
+    fn oidc_state(&self, store: &Store, ctx: &Ctx<'_>) -> Reply {
+        let config = self.host.oidc();
+        reply(
+            StatusCode::OK,
+            &json!({
+                "available": config.is_some(),
+                "label": config.as_ref().map(|c| c.label.clone()),
+                "linked": store.oidc_linked(ctx.session.user.id).unwrap_or(false),
+            }),
+        )
+    }
+
+    /// A signed-in person starts linking their own account to a provider identity.
+    fn oidc_link_start(&self, store: &Store, ctx: &Ctx<'_>) -> Reply {
+        let Some(config) = self.host.oidc() else {
+            return error(StatusCode::NOT_FOUND, "external sign-in is off");
+        };
+        if store.oidc_linked(ctx.session.user.id).unwrap_or(true) {
+            return error(StatusCode::CONFLICT, "This account is already linked.");
+        }
+        match self.oidc_start(ctx.request, &config, Some(ctx.session.user.id)) {
+            Ok((url, cookie)) => {
+                let mut response = reply(StatusCode::OK, &json!({ "url": url }));
+                response.headers_mut().insert(SET_COOKIE, cookie);
+                response
+            }
+            Err(Some(reply)) => reply,
+            Err(None) => error(
+                StatusCode::BAD_GATEWAY,
+                "The sign-in provider did not answer.",
+            ),
+        }
+    }
+
+    /// Remove the link again. It needs the account's own password, so an account that was
+    /// created by the provider (and has no known password) cannot cut itself off.
+    fn oidc_unlink(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
+        let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
+            return bad("invalid JSON");
+        };
+        let name = &ctx.session.user.name;
+        let key = vec![format!("p:{name}")];
+        if let Some(wait) = self.throttle.lock().expect("throttle").locked(&key) {
+            return error(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("Too many attempts. Try again in {wait} s."),
+            );
+        }
+        let verified = store
+            .user_with_record(name)
+            .ok()
+            .flatten()
+            .is_some_and(|(_, record)| {
+                password::verify(text(&body, "password").unwrap_or(""), &record)
+            });
+        if !verified {
+            self.throttle.lock().expect("throttle").fail(&key);
+            return error(StatusCode::FORBIDDEN, "Your password is not correct.");
+        }
+        self.throttle.lock().expect("throttle").clear(&key);
+        match store.oidc_unlink(ctx.session.user.id) {
+            Ok(removed) => {
+                if removed {
+                    Self::actor(store, ctx, "user.oidc-unlink", name);
+                }
+                reply(StatusCode::OK, &json!({ "ok": true }))
+            }
+            Err(_) => unavailable(),
+        }
+    }
+
+    /// Where a finished linking flow lands: the account page with a short notice.
+    fn oidc_link_done(&self, ok: bool, tls: bool) -> Reply {
+        let mut response = redirect(if ok {
+            "/?sso=linked#/account"
+        } else {
+            "/?sso=link-failed#/account"
+        });
+        response
+            .headers_mut()
+            .append(SET_COOKIE, clear_oidc_cookie(tls));
         response
     }
 
+    #[allow(clippy::too_many_lines)] // One linear sign-in: check, map, sync role, start session.
     fn oidc_callback(&self, store: &mut Store, request: &Request) -> Reply {
         let Some(config) = self.host.oidc() else {
             return error(StatusCode::NOT_FOUND, "external sign-in is off");
@@ -1077,8 +1240,8 @@ impl Console {
         } else {
             Err("provider returned an error".to_owned())
         };
-        let identity = match outcome {
-            Ok(identity) => identity,
+        let (identity, link) = match outcome {
+            Ok(done) => done,
             Err(reason) => {
                 Self::audit(
                     store,
@@ -1092,6 +1255,31 @@ impl Console {
                 return self.oidc_failed(request.tls);
             }
         };
+        if let Some(user_id) = link {
+            // Linking: the person was signed in when they started, and this browser is the one
+            // that started it. The identity and the account must both be free.
+            let account = store
+                .users()
+                .ok()
+                .and_then(|users| users.into_iter().find(|user| user.id == user_id));
+            let linked = match &account {
+                Some(_) => store.oidc_link(user_id, &identity.issuer, &identity.subject),
+                None => Err("account no longer exists".into()),
+            };
+            let (name, role) = account
+                .as_ref()
+                .map_or(("-", "-"), |user| (user.name.as_str(), user.role.as_str()));
+            Self::audit(
+                store,
+                name,
+                role,
+                "user.oidc-link",
+                &config.label,
+                linked.is_ok(),
+                &request.peer,
+            );
+            return self.oidc_link_done(linked.is_ok(), request.tls);
+        }
         let role = if config
             .admin_group
             .as_ref()
@@ -1101,7 +1289,7 @@ impl Console {
         } else {
             Role::User
         };
-        let Ok((user, _created)) = store.oidc_user(
+        let Ok((mut user, _created)) = store.oidc_user(
             &identity.issuer,
             &identity.subject,
             identity.username.as_deref(),
@@ -1109,6 +1297,22 @@ impl Console {
         ) else {
             return self.oidc_failed(request.tls);
         };
+        // With role sync the group decides on every sign-in. The last administrator stays one.
+        if config.sync_role && user.role != role {
+            let changed = store.set_role(&user.name, role).is_ok();
+            Self::audit(
+                store,
+                &user.name,
+                role.as_str(),
+                "user.role",
+                "sso group",
+                changed,
+                &request.peer,
+            );
+            if changed {
+                user.role = role;
+            }
+        }
         self.throttle.lock().expect("throttle").clear(&keys);
         let _ = store.record_login(user.id);
         Self::audit(
@@ -1129,6 +1333,15 @@ impl Console {
         if let Ok(value) = HeaderValue::from_str(&session_cookie) {
             response.headers_mut().append(SET_COOKIE, value);
         }
+        if config.single_logout {
+            // Remembers that this session came from the provider, so sign-out can end it there.
+            let secure = if request.tls { "; Secure" } else { "" };
+            if let Ok(value) = HeaderValue::from_str(&format!(
+                "{SSO_COOKIE}=1; Path=/; HttpOnly; SameSite=Strict{secure}"
+            )) {
+                response.headers_mut().append(SET_COOKIE, value);
+            }
+        }
         response
             .headers_mut()
             .append(SET_COOKIE, clear_oidc_cookie(request.tls));
@@ -1138,12 +1351,30 @@ impl Console {
     fn logout(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
         let _ = store.delete_session(ctx.token_hash);
         Self::actor(store, ctx, "session.end", "console");
-        let mut response = reply(StatusCode::OK, &json!({ "ok": true }));
         let secure = if ctx.request.tls { "; Secure" } else { "" };
-        if let Ok(value) = HeaderValue::from_str(&format!(
+        let mut body = json!({ "ok": true });
+        let mut clear = vec![format!(
             "{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}"
-        )) {
-            response.headers_mut().insert(SET_COOKIE, value);
+        )];
+        if cookie(&ctx.request.headers, SSO_COOKIE).is_some() {
+            clear.push(format!(
+                "{SSO_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}"
+            ));
+            // Signed in through the provider: also end the session there, when it can.
+            if let Some(url) = self
+                .host
+                .oidc()
+                .filter(|config| config.single_logout)
+                .and_then(|config| self.oidc.logout_url(&config))
+            {
+                body["redirect"] = Value::String(url);
+            }
+        }
+        let mut response = reply(StatusCode::OK, &body);
+        for value in clear {
+            if let Ok(value) = HeaderValue::from_str(&value) {
+                response.headers_mut().append(SET_COOKIE, value);
+            }
         }
         response
     }
@@ -2590,6 +2821,341 @@ mod tests {
         assert!(store.user_with_record("anna").unwrap().unwrap().0.role == Role::User);
     }
 
+    fn oidc_get(f: &Fixture, path: &str, cookie: &str) -> Reply {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("lumen.test"));
+        if !cookie.is_empty() {
+            headers.insert(COOKIE, HeaderValue::from_str(cookie).unwrap());
+        }
+        let (path, query) = path.split_once('?').unwrap_or((path, ""));
+        f.console.handle(&Request {
+            method: Method::GET,
+            path: path.into(),
+            query: query.into(),
+            headers,
+            body: Bytes::new(),
+            peer: peer("127.0.0.1"),
+            tls: false,
+        })
+    }
+
+    fn csrf_of(f: &Fixture, cookie: &str) -> String {
+        let token = cookie
+            .split("lumen_session=")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let hash = password::sha256_hex(token);
+        Store::open(&f.state)
+            .unwrap()
+            .session(&hash, 1800, 43200)
+            .unwrap()
+            .unwrap()
+            .csrf
+    }
+
+    fn set_cookies(reply: &Reply) -> Vec<String> {
+        reply
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn pair(cookie: &str) -> String {
+        cookie.split(';').next().unwrap().to_owned()
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One story: link, sign in, sync roles, sign out, unlink.
+    fn external_login_links_accounts_syncs_roles_and_signs_out_of_the_provider() {
+        use crate::oidc::tests::{config as oidc_config, mock_provider, nonce_of};
+        let f = fixture();
+        let provider = mock_provider("subject-7", "lumen");
+        let mut config = oidc_config(&provider.base);
+        config.admin_group = Some("lumen-admins".into());
+        config.sync_role = true;
+        config.single_logout = true;
+        *f.host.oidc.lock().unwrap() = Some(config.clone());
+
+        // A local person links their own account. Only a signed-in person with the CSRF token can.
+        let (token, csrf) = sign_in(&f, "anna", "anna passphrase 123");
+        let session = Some((token.as_str(), csrf.as_str()));
+        let (_, mine) = body(call(
+            &f,
+            Method::GET,
+            "/api/me/oidc",
+            session,
+            "",
+            "127.0.0.1",
+        ));
+        assert_eq!(
+            (mine["available"].as_bool(), mine["linked"].as_bool()),
+            (Some(true), Some(false))
+        );
+        assert_eq!(
+            call(
+                &f,
+                Method::POST,
+                "/api/me/oidc/link",
+                Some((token.as_str(), "wrong")),
+                "",
+                "127.0.0.1"
+            )
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        let started = call(
+            &f,
+            Method::POST,
+            "/api/me/oidc/link",
+            session,
+            "",
+            "127.0.0.1",
+        );
+        let flow = pair(&set_cookies(&started)[0]);
+        let (status, started) = body(started);
+        assert_eq!(status, StatusCode::OK);
+        *provider.nonce.lock().unwrap() = nonce_of(started["url"].as_str().unwrap());
+        let state = flow.trim_start_matches("lumen_oidc=");
+        // The provider's redirect carries no session cookie (it is SameSite=Strict), only the flow.
+        let done = oidc_get(
+            &f,
+            &format!("/api/login/oidc/callback?code=c&state={state}"),
+            &flow,
+        );
+        assert_eq!(
+            done.headers()[hyper::header::LOCATION],
+            "/?sso=linked#/account"
+        );
+        assert!(
+            set_cookies(&done)
+                .iter()
+                .all(|c| !c.starts_with("lumen_session="))
+        );
+        let (_, mine) = body(call(
+            &f,
+            Method::GET,
+            "/api/me/oidc",
+            session,
+            "",
+            "127.0.0.1",
+        ));
+        assert_eq!(mine["linked"], true);
+        // A second link attempt is refused, and nobody else can claim the same identity.
+        assert_eq!(
+            call(
+                &f,
+                Method::POST,
+                "/api/me/oidc/link",
+                session,
+                "",
+                "127.0.0.1"
+            )
+            .status(),
+            StatusCode::CONFLICT
+        );
+        let (other_token, other_csrf) = sign_in(&f, "admin", "correct horse battery");
+        let other = call(
+            &f,
+            Method::POST,
+            "/api/me/oidc/link",
+            Some((other_token.as_str(), other_csrf.as_str())),
+            "",
+            "127.0.0.1",
+        );
+        let flow = pair(&set_cookies(&other)[0]);
+        let (_, other) = body(other);
+        *provider.nonce.lock().unwrap() = nonce_of(other["url"].as_str().unwrap());
+        let refused = oidc_get(
+            &f,
+            &format!(
+                "/api/login/oidc/callback?code=c&state={}",
+                flow.trim_start_matches("lumen_oidc=")
+            ),
+            &flow,
+        );
+        assert_eq!(
+            refused.headers()[hyper::header::LOCATION],
+            "/?sso=link-failed#/account"
+        );
+
+        // Signing in through the provider now reaches the existing local account, and the
+        // group promotes it (role sync).
+        let sso = |f: &Fixture| {
+            let started = oidc_get(f, "/api/login/oidc", "");
+            let flow = pair(&set_cookies(&started)[0]);
+            let url = started.headers()[hyper::header::LOCATION]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            *provider.nonce.lock().unwrap() = nonce_of(&url);
+            let state = flow.trim_start_matches("lumen_oidc=").to_owned();
+            oidc_get(
+                f,
+                &format!("/api/login/oidc/callback?code=c&state={state}"),
+                &flow,
+            )
+        };
+        let role_of = |f: &Fixture, name: &str| {
+            Store::open(&f.state)
+                .unwrap()
+                .user_with_record(name)
+                .unwrap()
+                .unwrap()
+                .0
+                .role
+        };
+        assert_eq!(role_of(&f, "anna"), Role::User);
+        let signed = sso(&f);
+        assert_eq!(signed.headers()[hyper::header::LOCATION], "/");
+        let cookies = set_cookies(&signed);
+        assert_eq!(
+            role_of(&f, "anna"),
+            Role::Admin,
+            "group membership promotes"
+        );
+        assert_eq!(
+            Store::open(&f.state).unwrap().users().unwrap().len(),
+            2,
+            "no new account"
+        );
+        let session_cookie = cookies
+            .iter()
+            .find(|c| c.starts_with("lumen_session="))
+            .unwrap();
+        let marker = cookies
+            .iter()
+            .find(|c| c.starts_with("lumen_sso=1"))
+            .expect("sso marker");
+        assert!(marker.contains("HttpOnly") && marker.contains("SameSite=Strict"));
+
+        // Single logout: with the marker the answer names the provider's logout page.
+        let out = |cookie: String| {
+            let mut headers = HeaderMap::new();
+            headers.insert(HOST, HeaderValue::from_static("lumen.test"));
+            headers.insert(COOKIE, HeaderValue::from_str(&cookie).unwrap());
+            headers.insert(
+                "x-lumen-csrf",
+                HeaderValue::from_str(&csrf_of(&f, &cookie)).unwrap(),
+            );
+            f.console.handle(&Request {
+                method: Method::POST,
+                path: "/api/logout".into(),
+                query: String::new(),
+                headers,
+                body: Bytes::new(),
+                peer: peer("127.0.0.1"),
+                tls: false,
+            })
+        };
+        let token = pair(session_cookie);
+        let reply = out(format!("{token}; {}", pair(marker)));
+        assert!(
+            set_cookies(&reply)
+                .iter()
+                .any(|c| c.starts_with("lumen_sso=;") && c.contains("Max-Age=0"))
+        );
+        let (_, reply) = body(reply);
+        let target = reply["redirect"].as_str().expect("provider logout address");
+        assert!(
+            target.starts_with(&format!("{}/logout?", provider.base)),
+            "{target}"
+        );
+        assert!(target.contains("client_id=lumen"));
+        // A password sign-in has no marker, so signing out stays inside the console.
+        let (token, _) = sign_in(&f, "anna", "anna passphrase 123");
+        let (_, reply) = body(out(format!("lumen_session={token}")));
+        assert!(reply.get("redirect").is_none());
+
+        // Role sync also demotes when the group is gone, but never the last administrator.
+        let mut changed = config.clone();
+        changed.admin_group = Some("other-group".into());
+        *f.host.oidc.lock().unwrap() = Some(changed);
+        sso(&f);
+        assert_eq!(role_of(&f, "anna"), Role::User, "no longer in the group");
+        Store::open(&f.state)
+            .unwrap()
+            .set_role("anna", Role::Admin)
+            .unwrap();
+        Store::open(&f.state)
+            .unwrap()
+            .set_role("admin", Role::User)
+            .unwrap();
+        let kept = sso(&f);
+        assert_eq!(
+            kept.headers()[hyper::header::LOCATION],
+            "/",
+            "still signs in"
+        );
+        assert_eq!(
+            role_of(&f, "anna"),
+            Role::Admin,
+            "the last administrator stays"
+        );
+
+        // Without role sync a later sign-in leaves the role alone.
+        let mut plain = config;
+        plain.sync_role = false;
+        *f.host.oidc.lock().unwrap() = Some(plain);
+        Store::open(&f.state)
+            .unwrap()
+            .set_role("admin", Role::Admin)
+            .unwrap();
+        Store::open(&f.state)
+            .unwrap()
+            .set_role("anna", Role::User)
+            .unwrap();
+        sso(&f);
+        assert_eq!(role_of(&f, "anna"), Role::User);
+
+        // Unlinking needs the account's own password.
+        let (token, csrf) = sign_in(&f, "anna", "anna passphrase 123");
+        let session = Some((token.as_str(), csrf.as_str()));
+        let wrong = call(
+            &f,
+            Method::DELETE,
+            "/api/me/oidc",
+            session,
+            r#"{"password":"nope nope nope"}"#,
+            "127.0.0.1",
+        );
+        assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
+        let right = call(
+            &f,
+            Method::DELETE,
+            "/api/me/oidc",
+            session,
+            r#"{"password":"anna passphrase 123"}"#,
+            "127.0.0.1",
+        );
+        assert_eq!(right.status(), StatusCode::OK);
+        let (_, mine) = body(call(
+            &f,
+            Method::GET,
+            "/api/me/oidc",
+            session,
+            "",
+            "127.0.0.1",
+        ));
+        assert_eq!(mine["linked"], false);
+        let audit = Store::open(&f.state).unwrap().audit_events(100).unwrap();
+        assert!(
+            audit
+                .iter()
+                .any(|e| e.action == "user.oidc-link" && e.outcome == "accepted")
+        );
+        assert!(
+            audit
+                .iter()
+                .any(|e| e.action == "user.oidc-link" && e.outcome == "rejected")
+        );
+        assert!(audit.iter().any(|e| e.action == "user.oidc-unlink"));
+    }
+
     #[test]
     fn login_is_generic_gated_and_throttled() {
         let f = fixture();
@@ -2796,6 +3362,63 @@ mod tests {
         assert!(source.contains("mode = \"forward\""), "{source}");
         assert!(source.contains("quad9-unfiltered"), "{source}");
         assert!(!source.contains("enabled = true"), "{source}");
+    }
+
+    #[test]
+    fn setup_can_turn_on_external_login_and_checks_it_before_making_the_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("state.db");
+        Store::open(&state)
+            .unwrap()
+            .set_config(
+                "schema_version = 1\n[web]\nhttp = ['127.0.0.1:8080']\n",
+                directory.path(),
+            )
+            .unwrap();
+        let host = Arc::new(Stub::default());
+        let f = Fixture {
+            console: Console::new(state.clone(), host.clone(), "test"),
+            host,
+            _directory: directory,
+            state,
+        };
+        let setup = |oidc: Value| {
+            body(call(
+                &f,
+                Method::POST,
+                "/api/setup",
+                None,
+                &json!({"username": "owner", "password": "correct horse battery", "oidc": oidc})
+                    .to_string(),
+                "127.0.0.1",
+            ))
+        };
+        // A bad provider setting is refused and no account is created, so it can be fixed.
+        for bad in [
+            json!({"issuer": "http://remote.example/", "client_id": "lumen", "redirect_url": "https://dns.example/api/login/oidc/callback"}),
+            json!({"issuer": "https://id.example/", "client_id": "", "redirect_url": "https://dns.example/api/login/oidc/callback"}),
+            json!({"issuer": "https://id.example/", "client_id": "lumen", "redirect_url": "https://dns.example/elsewhere"}),
+            json!({"issuer": "https://id.example/", "client_id": "lumen", "redirect_url": "https://dns.example/api/login/oidc/callback", "sync_role": true}),
+        ] {
+            let (status, json) = setup(bad.clone());
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad} {json}");
+            assert_eq!(Store::open(&f.state).unwrap().user_count().unwrap(), 0);
+        }
+        let (status, json) = setup(json!({
+            "label": "Authentik", "issuer": "https://id.example/application/o/lumen/",
+            "client_id": "lumen", "redirect_url": "https://dns.example/api/login/oidc/callback",
+            "admin_group": "lumen-admins", "sync_role": true, "single_logout": true
+        }));
+        assert_eq!(status, StatusCode::OK, "{json}");
+        let staged = Store::open(&f.state).unwrap().staged_config().unwrap();
+        let source = staged.expect("external login staged").source;
+        let config = Config::parse(&source, Path::new("/etc/lumen")).unwrap();
+        config.validate().unwrap();
+        let oidc = config.web.oidc;
+        assert!(oidc.enabled && oidc.sync_role && oidc.single_logout);
+        assert_eq!(oidc.label, "Authentik");
+        assert_eq!(oidc.admin_group.as_deref(), Some("lumen-admins"));
+        assert_eq!(config.web.http.len(), 1, "other web settings are kept");
     }
 
     #[test]

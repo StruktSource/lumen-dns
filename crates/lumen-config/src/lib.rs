@@ -64,6 +64,13 @@ pub struct Oidc {
     pub groups_claim: String,
     /// New accounts of members of this group start as administrators; others start as users.
     pub admin_group: Option<String>,
+    /// Keep roles in step with `admin_group` on every sign-in, not only on the first one.
+    /// Members become administrators and everyone else a user. The last administrator is never
+    /// demoted.
+    pub sync_role: bool,
+    /// Also end the provider's session when someone signs out of the console after signing in
+    /// through it. The provider must allow the console address as a post-logout redirect.
+    pub single_logout: bool,
 }
 
 impl Default for Oidc {
@@ -79,6 +86,8 @@ impl Default for Oidc {
             username_claim: "preferred_username".into(),
             groups_claim: "groups".into(),
             admin_group: None,
+            sync_role: false,
+            single_logout: false,
         }
     }
 }
@@ -842,6 +851,9 @@ impl Config {
             group.is_empty() || group.len() > 256 || group.chars().any(char::is_control)
         }) {
             return Err("web.oidc.admin_group must be 1..=256 characters".into());
+        }
+        if oidc.sync_role && oidc.admin_group.is_none() {
+            return Err("web.oidc.sync_role needs web.oidc.admin_group".into());
         }
         Ok(())
     }
@@ -1656,6 +1668,10 @@ mod tests {
         config.web.oidc.redirect_url = "https://dns.example/somewhere".into();
         assert!(config.validate().is_err(), "callback path is fixed");
         config.web.oidc.redirect_url = "https://dns.example/api/login/oidc/callback".into();
+        config.web.oidc.sync_role = true;
+        assert!(config.validate().is_err(), "role sync needs a group");
+        config.web.oidc.admin_group = Some("lumen-admins".into());
+        config.validate().unwrap();
         config.web.http.clear();
         assert!(config.validate().is_err(), "needs a web listener");
     }

@@ -1212,6 +1212,64 @@ impl Store {
         Ok((user, true))
     }
 
+    /// Tie an existing account to a provider identity. Both sides must be unlinked, so one
+    /// person cannot end up with two accounts and one account cannot have two identities.
+    ///
+    /// # Errors
+    /// Returns an error for invalid claims, an identity or account that is already linked, or
+    /// database access.
+    pub fn oidc_link(&mut self, user_id: i64, issuer: &str, subject: &str) -> Result<(), String> {
+        if issuer.is_empty()
+            || issuer.len() > 2048
+            || subject.is_empty()
+            || subject.len() > 512
+            || issuer.chars().any(char::is_control)
+            || subject.chars().any(char::is_control)
+        {
+            return Err("invalid OIDC identity claims".into());
+        }
+        self.connection
+            .execute(
+                "INSERT INTO oidc_identities(issuer, subject, user_id, created_at)
+                 VALUES(?1, ?2, ?3, ?4)",
+                params![issuer, subject, user_id, now()?],
+            )
+            .map(|_| ())
+            .map_err(|error| match error {
+                rusqlite::Error::SqliteFailure(failure, _)
+                    if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    "that account or that provider identity is already linked".to_owned()
+                }
+                other => database_error(other),
+            })
+    }
+
+    /// Remove an account's provider link. Returns whether there was one.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn oidc_unlink(&self, user_id: i64) -> Result<bool, String> {
+        self.connection
+            .execute("DELETE FROM oidc_identities WHERE user_id = ?1", [user_id])
+            .map(|changed| changed != 0)
+            .map_err(database_error)
+    }
+
+    /// Whether the account is tied to a provider identity.
+    ///
+    /// # Errors
+    /// Returns an error when database access fails.
+    pub fn oidc_linked(&self, user_id: i64) -> Result<bool, String> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM oidc_identities WHERE user_id = ?1)",
+                [user_id],
+                |row| row.get(0),
+            )
+            .map_err(database_error)
+    }
+
     /// Change a role. The last administrator cannot be demoted.
     ///
     /// # Errors
@@ -2205,6 +2263,33 @@ mod tests {
                     .is_err()
             );
         }
+        // An existing account can be linked once, and neither side can be linked twice.
+        let (local, _) = store.user_with_record("admin").unwrap().unwrap();
+        assert!(!store.oidc_linked(local.id).unwrap());
+        store
+            .oidc_link(local.id, issuer, "local-admin-subject")
+            .unwrap();
+        assert!(store.oidc_linked(local.id).unwrap());
+        assert!(
+            store.oidc_link(local.id, issuer, "another").is_err(),
+            "account already linked"
+        );
+        assert!(
+            store
+                .oidc_link(other.id, issuer, "local-admin-subject")
+                .is_err(),
+            "identity already linked"
+        );
+        let (via, created) = store
+            .oidc_user(issuer, "local-admin-subject", Some("whatever"), Role::User)
+            .unwrap();
+        assert!(!created);
+        assert_eq!(
+            via.id, local.id,
+            "a linked identity signs in to the existing account"
+        );
+        assert!(store.oidc_unlink(local.id).unwrap());
+        assert!(!store.oidc_unlink(local.id).unwrap());
         // The identity is removed with its account, so a new login starts fresh.
         assert!(store.delete_user(&external.name).unwrap());
         let (again, created) = store

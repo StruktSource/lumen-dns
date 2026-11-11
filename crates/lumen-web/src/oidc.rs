@@ -45,12 +45,16 @@ struct Provider {
     token_endpoint: String,
     /// Send the client secret in the form body instead of a Basic header.
     secret_in_body: bool,
+    /// Where to send the browser to end the provider's own session, when it offers one.
+    end_session_endpoint: Option<String>,
 }
 
 struct Pending {
     verifier: String,
     nonce: String,
     at: Instant,
+    /// Set when a signed-in person is linking their existing account instead of signing in.
+    link: Option<i64>,
 }
 
 /// Discovery cache and the sign-ins that are waiting for their browser to come back.
@@ -61,9 +65,13 @@ pub(crate) struct Flows {
 }
 
 impl Flows {
-    /// Start a sign-in. Returns the provider URL to send the browser to and the state value
-    /// that the flow cookie must carry.
-    pub(crate) fn begin(&self, config: &Oidc) -> Result<(String, String), String> {
+    /// Start a sign-in, or with `link` the linking of that account. Returns the provider URL to
+    /// send the browser to and the state value that the flow cookie must carry.
+    pub(crate) fn begin(
+        &self,
+        config: &Oidc,
+        link: Option<i64>,
+    ) -> Result<(String, String), String> {
         let provider = self.provider(config)?;
         let state = password::random_hex(16)?;
         let nonce = password::random_hex(16)?;
@@ -98,18 +106,20 @@ impl Flows {
                 verifier,
                 nonce,
                 at: Instant::now(),
+                link,
             },
         );
         Ok((url.into(), state))
     }
 
     /// Finish a sign-in for `state` with the code the provider returned. A state works once.
+    /// The second value is the account being linked, for a linking flow.
     pub(crate) fn finish(
         &self,
         config: &Oidc,
         state: &str,
         code: &str,
-    ) -> Result<Identity, String> {
+    ) -> Result<(Identity, Option<i64>), String> {
         let flow = self
             .pending
             .lock()
@@ -131,6 +141,23 @@ impl Flows {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         check_claims(&claims, config, &provider.issuer, &flow.nonce, now)
+            .map(|identity| (identity, flow.link))
+    }
+
+    /// The provider's logout address for a person who signed in through it, if it has one.
+    /// Best effort: `None` means signing out of the console is all that happens.
+    pub(crate) fn logout_url(&self, config: &Oidc) -> Option<String> {
+        let provider = self.provider(config).ok()?;
+        let mut url = Url::parse(provider.end_session_endpoint.as_deref()?).ok()?;
+        let back = Url::parse(&config.redirect_url)
+            .ok()?
+            .origin()
+            .ascii_serialization()
+            + "/";
+        url.query_pairs_mut()
+            .append_pair("client_id", &config.client_id)
+            .append_pair("post_logout_redirect_uri", &back);
+        Some(url.into())
     }
 
     fn provider(&self, config: &Oidc) -> Result<Arc<Provider>, String> {
@@ -248,10 +275,12 @@ async fn discover(config: &Oidc) -> Result<Provider, String> {
         .and_then(Value::as_array)
         .map(|list| list.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
+    let end_session_endpoint = field("end_session_endpoint").filter(|url| oidc_url_ok(url));
     Ok(Provider {
         issuer,
         authorization_endpoint,
         token_endpoint,
+        end_session_endpoint,
         secret_in_body: methods.contains(&"client_secret_post")
             && !methods.contains(&"client_secret_basic"),
     })
@@ -485,6 +514,7 @@ pub(crate) mod tests {
                         "issuer": served_base,
                         "authorization_endpoint": format!("{served_base}/authorize"),
                         "token_endpoint": format!("{served_base}/token"),
+                        "end_session_endpoint": format!("{served_base}/logout"),
                     })
                 } else if request.starts_with("POST /token") {
                     let claims = json!({
@@ -526,7 +556,7 @@ pub(crate) mod tests {
         let provider = mock_provider("subject-1", "lumen");
         let config = config(&provider.base);
         let flows = Flows::default();
-        let (url, state) = flows.begin(&config).unwrap();
+        let (url, state) = flows.begin(&config, None).unwrap();
         let parsed = Url::parse(&url).unwrap();
         assert_eq!(parsed.path(), "/authorize");
         let query: HashMap<_, _> = parsed.query_pairs().into_owned().collect();
@@ -537,7 +567,8 @@ pub(crate) mod tests {
         assert_eq!(query["code_challenge"].len(), 43);
         *provider.nonce.lock().unwrap() = nonce_of(&url);
 
-        let who = flows.finish(&config, &state, "the-code").unwrap();
+        let (who, link) = flows.finish(&config, &state, "the-code").unwrap();
+        assert_eq!(link, None);
         assert_eq!(who.subject, "subject-1");
         assert_eq!(who.groups, ["lumen-admins"]);
         let token_request = provider
@@ -556,11 +587,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_linking_flow_carries_its_account_and_logout_names_the_client() {
+        let provider = mock_provider("subject-9", "lumen");
+        let config = config(&provider.base);
+        let flows = Flows::default();
+        let (url, state) = flows.begin(&config, Some(42)).unwrap();
+        *provider.nonce.lock().unwrap() = nonce_of(&url);
+        let (who, link) = flows.finish(&config, &state, "code").unwrap();
+        assert_eq!((who.subject.as_str(), link), ("subject-9", Some(42)));
+
+        let logout = Url::parse(&flows.logout_url(&config).unwrap()).unwrap();
+        assert_eq!(logout.path(), "/logout");
+        let query: HashMap<_, _> = logout.query_pairs().into_owned().collect();
+        assert_eq!(query["client_id"], "lumen");
+        assert_eq!(query["post_logout_redirect_uri"], "http://127.0.0.1:1/");
+    }
+
+    #[test]
     fn a_token_for_another_client_or_a_wrong_issuer_is_refused() {
         let provider = mock_provider("subject-1", "someone-else");
         let config = config(&provider.base);
         let flows = Flows::default();
-        let (url, state) = flows.begin(&config).unwrap();
+        let (url, state) = flows.begin(&config, None).unwrap();
         *provider.nonce.lock().unwrap() = nonce_of(&url);
         assert!(flows.finish(&config, &state, "code").is_err());
 
@@ -568,7 +616,7 @@ pub(crate) mod tests {
         let provider = mock_provider("subject-1", "lumen");
         let mut config = self::config(&provider.base);
         config.issuer = "http://127.0.0.1:9/".into();
-        assert!(Flows::default().begin(&config).is_err());
+        assert!(Flows::default().begin(&config, None).is_err());
     }
 
     #[test]
@@ -577,7 +625,7 @@ pub(crate) mod tests {
         let config = config(&provider.base);
         let flows = Flows::default();
         for _ in 0..MAX_PENDING + 20 {
-            flows.begin(&config).unwrap();
+            flows.begin(&config, None).unwrap();
         }
         assert_eq!(flows.pending.lock().unwrap().len(), MAX_PENDING);
     }
