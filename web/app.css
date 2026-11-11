@@ -33,8 +33,6 @@ svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke
 .nav a:hover{background:#1c1c1a;color:#fff}.nav a[aria-current=page]{background:var(--acid);color:var(--ink);font-weight:600}
 .nav a .badge{margin-left:auto}
 .side-foot{margin-top:auto;border-top:1px solid #3a3a36;padding-top:14px;display:grid;gap:10px}
-.who{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid transparent}.who:hover{border-color:#4a4a45}.who .av{width:30px;height:30px;border:1px solid #62625d;display:grid;place-items:center;font:600 13px var(--mono);color:var(--acid)}
-.who div{min-width:0;line-height:1.2}.who strong{display:block;font-size:13px}.who span{font:11px var(--mono);color:#8d8d84;text-transform:uppercase}
 .side-tools{display:flex;gap:6px}.side .btn{background:transparent;border-color:#4a4a45;color:#ddd}.side .btn:hover{border-color:var(--acid);color:var(--acid)}
 .mocktag{font:10px var(--mono);letter-spacing:.05em;color:#8d8d84;text-transform:uppercase;padding:0 8px}
 .mocktag:before{content:"";display:inline-block;width:6px;height:6px;background:var(--acid);margin-right:7px}

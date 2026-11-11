@@ -35,7 +35,6 @@ function shell(content, page) {
     h('div', { class: 'brand' }, h('b', {}, '✦'), 'LUMEN', h('small', {}, 'v' + (L.meta?.version || ''))),
     h('nav', { class: 'nav', 'aria-label': 'Main' }, PAGES.filter(p => !p[4] && L.can(p[3]) && (!p[5] || L.moduleOn(p[5]))).map(([id, label, icon]) => h('a', { href: '#/' + id, 'aria-current': id === page ? 'page' : null, onclick: () => side.classList.remove('open') }, L.ic(icon), label))),
     h('div', { class: 'side-foot' },
-      h('a', { class: 'who', href: '#/users/me', title: 'My account', onclick: () => side.classList.remove('open') }, h('div', { class: 'av' }, L.session.name[0].toUpperCase()), h('div', {}, h('strong', {}, L.session.name), h('span', {}, L.ROLE_LABEL[L.session.role]))),
       h('div', { class: 'side-tools' },
         h('div', { class: 'side-lang' }, L.ic('globe', 16), L.langSelect()),
         h('button', { class: 'btn sp', title: 'Toggle theme', onclick: () => { const t = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = t; localStorage.setItem('lumen-theme', t); L.render(); } }, L.ic(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon'), document.documentElement.dataset.theme === 'dark' ? 'Light' : 'Dark'),
