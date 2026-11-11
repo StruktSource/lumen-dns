@@ -271,3 +271,14 @@ release workspace build, all three shipped config checks, JavaScript syntax chec
 `scripts/verify-release.py --version v0.6.0` also pass. Hosted cross-platform results remain
 pending. No statistically significant public cold-query gain or exact per-authority timing is
 claimed.
+
+## 2026-11-11 — list download revalidation and disk cache
+
+`./scripts/dev.sh check` (format, Clippy with warnings denied, locked workspace tests, doc
+tests) passed on macOS ARM64. `lumen-filter` tests cover a gzip-compressed list download
+(decoded, within the size limit) and a stale list revalidated with `If-None-Match` /
+`If-Modified-Since` that accepts `304 Not Modified` and keeps its body. Not covered by a
+dedicated test: restart reuse straight from the disk cache, damaged or oversized cache files,
+the 128-entry and 512 MiB caps, and a decompression bomb. Not verified: Windows
+file-permission behavior of the cache folder (Unix modes only), a live public list server, and
+disk-full behavior.

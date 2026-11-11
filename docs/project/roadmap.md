@@ -177,7 +177,7 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### Lower priority: later
 
-6. **Faster, lighter list downloads.** Ideas, roughly in order of payoff: conditional requests (`ETag` / `If-Modified-Since`) so an unchanged list costs almost nothing; downloading several lists at once with a bound; asking for compressed transfer; keeping downloaded lists on disk so a restart does not fetch them again; and delta updates for very large lists. Lists already stay in memory across reloads, so changing settings no longer downloads them again.
+6. **Faster, lighter list downloads (partly done in 0.6.0).** Done: conditional requests (`ETag` / `Last-Modified`), compressed transfer, and a bounded disk cache in managed mode so a restart does not fetch fresh lists again. Still open: downloading several lists at once with a bound, and delta updates for very large lists.
 7. **Weighted random load balancing** across providers (spreading by recent speed rather than evenly), as some filter apps offer. Round-robin and fastest-first cover most of it today.
 
 8. **Trust-anchor rollover automation and certificate lifecycle tooling.**
