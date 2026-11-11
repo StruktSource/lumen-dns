@@ -1,6 +1,6 @@
 # Lumen 0.6.0
 
-Lumen 0.6.0 adds a live view to Activity and fixes the setup wizard ignoring the forwarding choice.
+Lumen 0.6.0 adds console features, fixes setup forwarding selection, and bounds automatic encrypted transport failover.
 
 ## Highlights
 
@@ -9,6 +9,12 @@ Lumen 0.6.0 adds a live view to Activity and fixes the setup wizard ignoring the
 - **A sidebar you can hide.** Press `[` or use the button in the sidebar header to get more room.
 - **Overview refreshes every 10 seconds, and you can change that.** An *Auto reload* slider under *Users & access → Console* offers 1, 2, 5, 10, 30, 60 seconds or off, saved on the server for everyone.
 - **Setup keeps your resolver choice.** Picking *Use another resolver* (Quad9) now results in forward mode instead of falling back to recursive.
+
+## Resolver changes
+
+- A silent first encrypted transport no longer consumes the provider's whole deadline. Each transport gets its share of remaining time; only transport failures/timeouts advance transports. DNSSEC failures and usable answers stay final; upstream SERVFAIL may still advance providers.
+- Small response/filter allocation cleanups and portable ThinLTO are included. No new benchmark gain is claimed. Native CPU tuning stays opt-in and separate from release artifacts.
+- See `docs/project/optimization-audit.md` for rejected and deferred I/O, allocator, parser and data-structure changes. Cold recursive DNSSEC delay and local reverse-DNS handling remain follow-ups, not fixes claimed by this release.
 
 ## Check the download
 

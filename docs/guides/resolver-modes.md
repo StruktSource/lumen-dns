@@ -61,7 +61,7 @@ Full field list: [Configuration: resolver](../reference/configuration.md#resolve
 
 ### Encrypted transport failover
 
-With `protocol = "auto"`, Lumen builds an encrypted-only list for a provider, in the order you set (default: QUIC, then HTTPS, then TLS). It moves to the next transport **only** after a connection, transport, or timeout error. An upstream SERVFAIL can move to the next configured provider, but a usable DNS answer (including NXDOMAIN) or local DNSSEC failure is final. It never falls back to plain text.
+With `protocol = "auto"`, Lumen builds an encrypted-only list for a provider, in the order you set (default: QUIC, then HTTPS, then TLS). It moves to the next transport **only** after a connection, transport, or timeout error. An upstream SERVFAIL can move to the next configured provider, but a usable DNS answer (including NXDOMAIN) or local DNSSEC failure is final. It never falls back to plain text. Each automatic transport gets the remaining provider budget divided by the number of transports left; early failures donate unused time to later transports. All tiers share one provider deadline, including silent handshakes and DNSSEC work. The outer client deadline still applies.
 
 ## Which should I choose?
 
@@ -130,3 +130,24 @@ How expiry refresh stays safe:
 - [Upstream providers](upstream-providers.md)
 - [DNSSEC and trust anchors](../reference/dnssec-and-trust.md)
 - [Configuration reference](../reference/configuration.md#resolver)
+
+## Cold recursion and local names
+
+Cold validating recursion can require delegation, DS/DNSKEY, denial and CNAME walks.
+A quick direct provider reply does not measure this work. Startup warming and shared
+recursion already exist; they do not eliminate slow authorities or DNSSEC failures.
+The current Hickory recursor uses five-second pool timeouts independently of
+`upstream_timeout_ms`, which controls forwarding. The outer query deadline still caps
+client work. Timeout fallback remains opt-in and off by default.
+
+Per-hop tracing and authority/DNSSEC retry tuning are queued in the roadmap. Current
+Hickory trace events can contain names, IPs and DNS data; Lumen does not enable a global
+tracing subscriber. A future diagnostic mode must be explicit, bounded and privacy-safe.
+Do not enable verbose upstream logs as a default fix or disable validation to hide failures.
+
+`.arpa` requests are normal. Public reverse DNS and resolver discovery must still work.
+Local reverse answering needs correct negative replies and an operator opt-out under
+[RFC 6303](https://www.rfc-editor.org/rfc/rfc6303.html), while
+[`home.arpa`](https://www.rfc-editor.org/rfc/rfc8375.html) and
+[resolver discovery](https://www.rfc-editor.org/rfc/rfc9462.html) have separate rules.
+This update does not add local-zone answering or claim to fix cold recursive latency.

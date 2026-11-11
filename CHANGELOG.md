@@ -10,6 +10,12 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 - **Modules and the Traffic map.** A new *Modules* page lists big, optional features. Each is off until an administrator turns it on, and the choice is saved on the server. The first module, *Traffic map*, draws your DNS traffic as an interactive tree: the Lumen server, then domain endings, then the domains under them. You can drag, zoom, search, filter and open any domain for details. It needs query history.
 - **Hide the sidebar.** A button in the sidebar header (or the `[` key) hides it for more room, and a tab on the left edge brings it back. The choice is remembered in the browser.
 
+### Resolver and build updates
+
+- Automatic encrypted transports now share one provider deadline with bounded per-transport time slices. A silent or failed first transport can reach the next encrypted transport. DNS answers and local DNSSEC failures remain final; upstream SERVFAIL keeps its existing next-provider policy.
+- Removed a response-buffer clone and allocations for discarded filter block matches. Portable release builds enable cross-crate ThinLTO, retaining baseline CPU support and unwinding.
+- Added the v0.6.0 optimization audit with explicit rejected/deferred ideas. Cold-recursion tracing, authority/DNSSEC retry tuning and standards-correct local reverse DNS are queued; no recursive latency fix is claimed.
+
 ### Changed
 
 - The Overview now reloads every 10 seconds (it was 5). A new *Auto reload* slider under *Users & access → Console* lets an administrator choose 1, 2, 5, 10, 30 or 60 seconds, or off. The choice is saved on the server and applies to everyone.

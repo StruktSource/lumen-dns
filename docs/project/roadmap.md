@@ -164,14 +164,16 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### High priority: do next
 
-1. **Logic-led full codebase cleanup and optimization.** Review the full codebase to simplify, minimize, and optimize it. Do not make any optimization until a code audit confirms that Lumen does not already implement it and a reasoned review shows that it makes sense for the real code path. Evaluate Linux `io_uring` where it can replace `epoll`; `SO_REUSEPORT`; batched vector I/O with `recvmmsg`/`sendmmsg` instead of one-at-a-time `recvfrom`; zero-copy paths and direct buffers; `jemalloc` or `mimalloc` instead of glibc `malloc`; arena allocation for DNS requests; radix trees or tries with Bloom-filter pre-checks instead of hash maps; compact string encoding; cache-local B-trees or pointer tries; replacing performance-critical parts of Hickory DNS with a minimal wire parser based on `nom` or `zerocopy`; and a full release-build optimization pass with aggressive link-time optimization, code-generation settings, native CPU targeting, and modern SIMD such as AVX2 or AVX-512. Keep only changes that pass this logical audit and have acceptable portability, safety, memory, and maintenance costs.
-2. **Transport failover when a provider's first transport is silent.** A blocked QUIC port can stall a whole provider today, because the forwarding library gives one query a single deadline. Needs a per-transport budget. See [Upstream providers](../guides/upstream-providers.md#how-failover-works).
+1. **Logic-led cleanup and optimization (v0.6.0).** Completed with local checks; selected changes and verification are in [the audit](optimization-audit.md) and [verification](verification.md). Implemented and checked: response ownership transfer, discarded filter-match allocation removal, and portable ThinLTO. Large I/O, allocator, arena, tree and parser rewrites are rejected or deferred with reasons.
+2. **Silent first encrypted transport failover (v0.6.0).** Implement bounded per-transport shares inside the provider deadline, preserve final DNS/DNSSEC results and encrypted-only policy. Local checks pass; cross-platform hosted CI remains pending. See [provider behavior](../guides/upstream-providers.md#how-failover-works).
+3. **Cold recursive DNSSEC latency diagnosis and recovery.** User report: 46/339 SERVFAIL after restart, 82 queries over one second, mean 1.07 s and worst 8.65 s; not independently reproduced here. Add opt-in privacy-safe per-hop timing/outcomes, then deterministic slow-authority and DNSSEC recovery tests. Hickory 0.26.3 recursor pools inherit a five-second timeout with one outstanding authority request; Lumen's forwarding upstream timeout does not tune these pools. Prefer a narrow upstream option over replacing the resolver or blindly retrying DNSSEC failures. Audit the extra SOA/NS ancestor walks in insecure recovery, preserve authenticated denial and bogus-answer policy, and keep one outer query deadline. No production latency fix is claimed yet.
+4. **Local-only DNS names.** Design RFC 6303 local reverse zones with an operator opt-out and correct SOA/NS/negative replies. Keep public reverse DNS working; `.arpa` also contains public reverse and resolver discovery names. Handle DNS-SD, `home.arpa` and `resolver.arpa` under their own standards, never a blanket `.arpa` block. See [resolver limits](../guides/resolver-modes.md#cold-recursion-and-local-names).
 
 ### Medium priority: soon
 
-3. **Optional external login.** Let administrators opt in to Authentik, Authelia, Octelium, and similar self-hosted identity or access platforms as console login methods. Keep Lumen's built-in login available and keep external login disabled by default.
-4. **CSS themes** for the console.
-5. **Finish the translations:** the remaining long help texts, and more languages.
+5. **Optional external login.** Let administrators opt in to Authentik, Authelia, Octelium, and similar self-hosted identity or access platforms as console login methods. Keep Lumen's built-in login available and keep external login disabled by default.
+6. **CSS themes** for the console.
+7. **Finish the translations:** the remaining long help texts, and more languages.
 
 ### Lower priority: later
 

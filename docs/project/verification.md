@@ -196,3 +196,38 @@ All three answered before the deadline. This is a dated smoke check, not a laten
 - Automatic trust-anchor rollover, signed images, reproducible releases, and **independent security review**
 
 See the [roadmap](roadmap.md) for how these are tracked.
+
+## 2026-11-11 — v0.6.0 audit and transport budgets
+
+Local macOS ARM64 checks pass:
+
+- `./scripts/dev.sh check`: formatting, locked all-target workspace Clippy with
+  `-D warnings`, 116 tests and all doc tests.
+- `cargo test --locked -p lumen-filter`: 17 tests and doc tests.
+- `cargo test -p lumen-resolver -p lumen-core --locked`: 36 tests; the final full
+  workspace run also includes the added signed encrypted DNSSEC policy cases.
+- `cargo check --workspace --all-targets --locked` and
+  `cargo +1.88.0 check --workspace --all-targets --locked`.
+- `cargo build --release --locked --workspace` with portable ThinLTO.
+- `cargo run --locked --bin lumen -- --config FILE --check` for
+  `config/lumen.toml`, `config/forward.example.toml`, `config/filtering.example.toml`.
+- `python3 scripts/verify-release.py --version v0.6.0`, changed Markdown local-link
+  checks, and `git diff --check`.
+
+Controlled loopback fixtures verify silent TLS to successful DoH, failed TLS to
+successful DoH, usable time for later transports, a bounded all-silent provider with
+configured attempts=2, 12 concurrent queries, cancellation/shutdown socket cleanup,
+plaintext rejection, and final signed positive/negative/DNSSEC-bogus results without
+contacting a second encrypted transport. Existing ranked/fastest/round-robin/race
+strategy tests pass. No public DNS is needed. TLS is used to model controlled silence;
+live firewall-dropped QUIC, long-running leak/soak tests and non-macOS runtime behavior
+for these changes remain unverified locally.
+
+Before this work PR #34 head `d53e71f` had a failing dependency audit:
+`libsqlite3-sys 0.38.2`, RUSTSEC-2026-0459 (upgrade requires >=0.39.0).
+Other jobs in CI run 43047695110 passed. This pre-existing dependency issue is not
+silenced or changed here. Copilot reported insufficient review quota; no approval
+was recorded. No new local security scan was run, per project instructions.
+
+Hosted checks for the updated head remain pending. No throughput, cold-recursion
+latency, native CPU, or platform-wide release-validation claim is made by this audit.

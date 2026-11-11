@@ -58,8 +58,9 @@ What the data supports:
   regression proves the mechanism, not a production-network latency claim.
 - **Slow tail unchanged.** About 3% of cold queries time out in both variants. They
   concentrate on a few domains (openbsd.org, videolan.org, torproject.org) whose
-  authoritative servers do not answer. Hickory's recursor fixes its per-attempt
-  timeout and one outstanding request, so Lumen cannot shorten it.
+  authoritative servers do not answer. Hickory's recursor fixes its pool
+  timeout and one outstanding authority request. Its current public options do not
+  expose these settings to Lumen.
 - **Warm lookups:** the median stayed 0.1 ms. The warm pass re-queries the same names,
   so its tail follows the cold failures (2 vs 5 timeouts) and is not a cache-hit
   regression claim either way.
@@ -154,3 +155,11 @@ Server throughput, latency, cache behavior, large-list scaling, and sustained
 load measurements remain future work. Those tests need a controlled local
 upstream and a load generator so public-network variance does not become a Lumen
 performance claim.
+
+## v0.6.0 logic-led audit
+
+[Optimization decisions](optimization-audit.md) record current hot paths, selected
+cleanup and rejected/deferred ideas. Response ownership transfer and skipped discarded
+filter-match allocations remove known work; portable ThinLTO enables cross-crate code
+optimization. No new latency, throughput or memory measurement is claimed. Native CPU
+builds are opt-in local artifacts, separate from standard portable releases.

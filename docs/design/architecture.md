@@ -109,3 +109,10 @@ Transport admission bounds live tasks, message allocations, HTTP and QUIC stream
 - [Threat model](threat-model.md)
 - [Configuration reference](../reference/configuration.md)
 - [Versioning and releases](../project/versioning.md)
+
+## v0.6.0 optimization boundaries
+
+The [audit](../project/optimization-audit.md) keeps the shared portable engine,
+Hickory DNS/DNSSEC ownership, compact flat filter keys and bounded receive buffers.
+Portable releases enable ThinLTO and retain unwinding and baseline target CPUs.
+Native CPU tuning is a separate local opt-in, never a release requirement.
