@@ -13,7 +13,7 @@ Everyday checks (format, Clippy with warnings denied, and offline tests with the
 
 ```sh
 ./scripts/dev.sh check
-cargo +1.88.0 check --workspace --all-targets --locked    # minimum Rust version
+cargo +1.89.0 check --workspace --all-targets --locked    # minimum Rust version
 cargo build --workspace --release --locked
 cargo audit
 cargo audit --file fuzz/Cargo.lock
@@ -225,9 +225,27 @@ for these changes remain unverified locally.
 
 Before this work PR #34 head `d53e71f` had a failing dependency audit:
 `libsqlite3-sys 0.38.2`, RUSTSEC-2026-0459 (upgrade requires >=0.39.0).
-Other jobs in CI run 43047695110 passed. This pre-existing dependency issue is not
-silenced or changed here. Copilot reported insufficient review quota; no approval
+Other jobs in CI run 43047695110 passed. This pre-existing dependency issue was not
+silenced by the resolver work; see the SQLite follow-up below for its later fix. Copilot reported insufficient review quota; no approval
 was recorded. No new local security scan was run, per project instructions.
 
 Hosted checks for the updated head remain pending. No throughput, cold-recursion
 latency, native CPU, or platform-wide release-validation claim is made by this audit.
+
+## 2026-11-11 — SQLite dependency follow-up
+
+Updated `rusqlite` 0.40.2 to 0.41.1 and bundled `libsqlite3-sys` 0.38.2 to 0.39.1
+for RUSTSEC-2026-0459. Retained `bundled` and `fallible_uint`; no store schema or
+SQL changes. Minimum Rust is now 1.89, matching rusqlite's upstream requirement;
+CI and source-build docs use the same version.
+
+`cargo audit` and `cargo audit --file fuzz/Cargo.lock` pass. Fuzz locked metadata
+passes unchanged because its dependency graph does not contain rusqlite/SQLite.
+All jobs other than the dependency audit passed on prior head `39db41a`, including
+six native targets, both OCI runtime jobs, Kubernetes/Helm, Podman, fuzz and MSRV.
+The updated dependency still needs a fresh hosted CI run before release claims.
+
+Local follow-up checks pass: `./scripts/dev.sh check` (116 tests/doc tests, format,
+Clippy with denied warnings), `cargo +1.89.0 check --workspace --all-targets --locked`,
+`cargo build --release --locked --workspace`, all three shipped config checks,
+`python3 scripts/verify-release.py --version v0.6.0`, and `git diff --check`.

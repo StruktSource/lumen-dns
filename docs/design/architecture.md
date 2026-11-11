@@ -101,7 +101,7 @@ Transport admission bounds live tasks, message allocations, HTTP and QUIC stream
 
 ## Runtime and compatibility
 
-- **Minimum Rust:** 1.88, required by Hickory 0.26.3. `rust-toolchain.toml` selects the installed stable channel, CI and Docker pin 1.95.0, and CI also checks the 1.88 minimum.
+- **Minimum Rust:** 1.89, required by rusqlite 0.41.1. `rust-toolchain.toml` selects the installed stable channel, CI and Docker pin 1.95.0, and CI also checks the 1.89 minimum.
 - **Platforms:** CI targets Linux, macOS, and Windows with portable Tokio, rustls, and ring transports. Runtime claims must be backed by the [verification record](../project/verification.md) and the [compatibility matrix](../deployment/compatibility.md).
 
 ## Related

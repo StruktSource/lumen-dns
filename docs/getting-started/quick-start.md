@@ -54,7 +54,7 @@ Continue with [Ask Lumen a question](#ask-lumen-a-question).
 
 ## Option B: build from source
 
-**You need:** Rust 1.88 or newer (stable is recommended; CI uses 1.95.0), Git, and optionally `dig` for testing.
+**You need:** Rust 1.89 or newer (stable is recommended; CI uses 1.95.0), Git, and optionally `dig` for testing.
 
 ```sh
 git clone https://github.com/StruktSource/lumen-dns.git

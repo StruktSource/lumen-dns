@@ -55,7 +55,7 @@ New to the ideas? Read [Concepts](docs/getting-started/concepts.md) for a plain-
 
 ## Quick start
 
-To build from source you need Rust 1.88 or newer; a release download needs nothing. By default Lumen listens only on **loopback port 5353**, validates DNSSEC, and uses no outside provider.
+To build from source you need Rust 1.89 or newer; a release download needs nothing. By default Lumen listens only on **loopback port 5353**, validates DNSSEC, and uses no outside provider.
 
 ```sh
 git clone https://github.com/StruktSource/lumen-dns.git

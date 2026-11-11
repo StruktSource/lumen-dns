@@ -12,6 +12,8 @@ Lumen 0.6.0 adds console features, fixes setup forwarding selection, and bounds 
 
 ## Resolver changes
 
+- Bundled SQLite updated to address RUSTSEC-2026-0459 (`rusqlite 0.41.1`, `libsqlite3-sys 0.39.1`). Building from source now needs Rust 1.89 or newer. Database schema stays unchanged.
+
 - A silent first encrypted transport no longer consumes the provider's whole deadline. Each transport gets its share of remaining time; only transport failures/timeouts advance transports. DNSSEC failures and usable answers stay final; upstream SERVFAIL may still advance providers.
 - Small response/filter allocation cleanups and portable ThinLTO are included. No new benchmark gain is claimed. Native CPU tuning stays opt-in and separate from release artifacts.
 - See `docs/project/optimization-audit.md` for rejected and deferred I/O, allocator, parser and data-structure changes. Cold recursive DNSSEC delay and local reverse-DNS handling remain follow-ups, not fixes claimed by this release.
