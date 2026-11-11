@@ -132,13 +132,28 @@ impl Accel {
         background: bool,
     ) -> Result<Message, RecursorError> {
         let started = Instant::now();
+        let result = self
+            .resolve_unobserved(recursor, name, rtype, dnssec_ok, background)
+            .await;
+        self.metrics.observe(started.elapsed(), background);
+        result
+    }
+
+    /// Resolve without adding a client-latency sample. Used by bounded retry and recovery code,
+    /// which records one logical lookup and its individual attempts at their own boundary.
+    pub(crate) async fn resolve_unobserved<P: RuntimeProvider>(
+        &self,
+        recursor: &Recursor<P>,
+        name: &LowerName,
+        rtype: RecordType,
+        dnssec_ok: bool,
+        background: bool,
+    ) -> Result<Message, RecursorError> {
         let key: Key = (name.clone(), rtype, dnssec_ok);
         if !background {
             self.touch(&key);
         }
-        let result = self.coalesced(recursor, &key).await;
-        self.metrics.observe(started.elapsed(), background);
-        result
+        self.coalesced(recursor, &key).await
     }
 
     async fn coalesced<P: RuntimeProvider>(

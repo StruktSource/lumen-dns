@@ -49,6 +49,12 @@ positive_ttl_secs = 86400
 negative_ttl_secs = 3600
 # Bound iterative query and nameserver recursion.
 recursion_depth = 24
+# Bound each full walk. Only a timeout starts the next attempt.
+attempts = 2
+upstream_timeout_ms = 2000
+# Stop registered local-only names here. Extra name-free attempt metrics stay off.
+local_zones = true
+diagnostics = false
 # Optional overrides: BIND-format root hints and DNSKEY-format trust anchors.
 # root_hints = "root.hints"
 # trust_anchor = "root.key"

@@ -7,7 +7,7 @@ use hickory_server::resolver::config::ProtocolConfig;
 use hickory_server::{
     net::runtime::{DnsUdpSocket, RuntimeProvider, TokioTime},
     proto::{
-        op::{Message, ResponseCode},
+        op::{Edns, Message, ResponseCode},
         rr::{
             RData,
             rdata::{A, NS},
@@ -126,6 +126,87 @@ fn record(name: &str, data: RData) -> Record {
     Record::from_rdata(Name::from_ascii(name).unwrap(), 60, data)
 }
 
+fn local_query(name: &str, rtype: RecordType, dnssec_ok: bool) -> Query {
+    let mut message = Message::query();
+    message.metadata.id = 42;
+    message.metadata.recursion_desired = true;
+    message.add_query(DnsQuery::query(Name::from_ascii(name).unwrap(), rtype));
+    if dnssec_ok {
+        let mut edns = Edns::new();
+        edns.set_dnssec_ok(true).set_max_payload(1232);
+        message.edns = Some(edns);
+    }
+    Query::parse(&message.to_vec().unwrap()).unwrap()
+}
+
+#[test]
+fn registered_local_zones_get_correct_negative_answers() {
+    for name in [
+        "printer.10.in-addr.arpa.",
+        "_dns-sd._udp.1.0.168.192.in-addr.arpa.",
+        "host.64.100.in-addr.arpa.",
+        "host.d.f.ip6.arpa.",
+        "host.service.arpa.",
+        "host.home.arpa.",
+    ] {
+        let response = local_zone_response(&local_query(name, RecordType::PTR, false)).unwrap();
+        assert_eq!(
+            response.metadata.response_code,
+            ResponseCode::NXDomain,
+            "{name}"
+        );
+        assert!(response.metadata.authoritative, "{name}");
+        assert_eq!(response.authorities.len(), 1, "{name}");
+        assert!(
+            matches!(response.authorities[0].data, RData::SOA(_)),
+            "{name}"
+        );
+    }
+
+    let resolver =
+        local_zone_response(&local_query("_dns.resolver.arpa.", RecordType::SVCB, false)).unwrap();
+    assert_eq!(resolver.metadata.response_code, ResponseCode::NoError);
+    assert!(resolver.answers.is_empty());
+    assert!(resolver.metadata.authoritative);
+
+    let mdns = local_zone_response(&local_query(
+        "_services._dns-sd._udp.local.",
+        RecordType::PTR,
+        false,
+    ))
+    .unwrap();
+    assert_eq!(mdns.metadata.response_code, ResponseCode::NXDomain);
+    assert!(!mdns.metadata.authoritative);
+}
+
+#[test]
+fn local_zone_apex_and_dnssec_exceptions_follow_the_rfc() {
+    let soa =
+        local_zone_response(&local_query("10.in-addr.arpa.", RecordType::SOA, false)).unwrap();
+    assert_eq!(soa.answers.len(), 1);
+    assert!(matches!(soa.answers[0].data, RData::SOA(_)));
+    assert_eq!(soa.answers[0].ttl, LOCAL_ZONE_TTL);
+
+    let ns = local_zone_response(&local_query("10.in-addr.arpa.", RecordType::NS, false)).unwrap();
+    assert_eq!(ns.answers.len(), 1);
+    assert!(matches!(ns.answers[0].data, RData::NS(_)));
+
+    assert!(local_zone_response(&local_query("home.arpa.", RecordType::DS, true)).is_none());
+    let plain_ds = local_zone_response(&local_query("home.arpa.", RecordType::DS, false)).unwrap();
+    assert_eq!(plain_ds.metadata.response_code, ResponseCode::NoError);
+    assert!(plain_ds.answers.is_empty());
+
+    assert!(
+        local_zone_response(&local_query(
+            "8.8.8.8.in-addr.arpa.",
+            RecordType::PTR,
+            false,
+        ))
+        .is_none()
+    );
+    assert!(local_zone_response(&local_query("ipv4only.arpa.", RecordType::AAAA, false)).is_none());
+}
+
 fn hierarchy_reply(request: Message, role: usize) -> Message {
     let mut response = Message::response(request.metadata.id, request.metadata.op_code);
     response.queries = request.queries;
@@ -229,6 +310,10 @@ async fn iterative_delegations_cache_and_depth_limit() {
                 recursor: Arc::new(recursor),
                 fallback: None,
                 accel: Arc::new(Accel::new(Arc::default(), Prefetch::default())),
+                policy: RecursivePolicy {
+                    attempts: 1,
+                    attempt_timeout: Duration::from_secs(2),
+                },
             },
         })],
     );
@@ -236,6 +321,7 @@ async fn iterative_delegations_cache_and_depth_limit() {
         catalog,
         metrics: Arc::new(Metrics::default()),
         background: None,
+        local_zones: true,
     };
     let mut request = Message::query();
     request.metadata.recursion_desired = true;
@@ -344,6 +430,86 @@ async fn iterative_delegations_cache_and_depth_limit() {
 }
 
 #[tokio::test]
+async fn silent_recursive_attempt_is_bounded_and_retried() {
+    let mut tasks = JoinSet::new();
+    let mut mapping = HashMap::new();
+    let root_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for (role, ip) in ["198.41.0.4", "192.0.2.2", "192.0.2.3"].iter().enumerate() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        mapping.insert(ip.parse().unwrap(), socket.local_addr().unwrap());
+        let root_hits = Arc::clone(&root_hits);
+        tasks.spawn(async move {
+            let mut buffer = [0; 4096];
+            loop {
+                let (size, peer) = socket.recv_from(&mut buffer).await.unwrap();
+                if role == 0 && root_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                    continue;
+                }
+                let request = Message::from_vec(&buffer[..size]).unwrap();
+                let bytes = hierarchy_reply(request, role).to_vec().unwrap();
+                socket.send_to(&bytes, peer).await.unwrap();
+            }
+        });
+    }
+    let provider = TestRuntime {
+        inner: TokioRuntimeProvider::default(),
+        mapping: Arc::new(mapping),
+    };
+    let recursor = Recursor::new(
+        &["198.41.0.4".parse().unwrap()],
+        DnssecPolicy::ValidationDisabled,
+        None,
+        RecursorOptions {
+            deny_server: vec![],
+            case_randomization: true,
+            ..RecursorOptions::default()
+        },
+        provider,
+    )
+    .unwrap();
+    let metrics = Arc::new(Metrics::default());
+    metrics.diagnostics.store(true, Ordering::Relaxed);
+    let accel = Accel::new(Arc::clone(&metrics), Prefetch::default());
+    let started = Instant::now();
+    let response = recursive_lookup(
+        &recursor,
+        &accel,
+        &LowerName::from(Name::from_ascii("www.example.test.").unwrap()),
+        RecordType::A,
+        false,
+        RecursivePolicy {
+            attempts: 2,
+            attempt_timeout: Duration::from_millis(80),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(started.elapsed() < Duration::from_millis(400));
+    assert!(
+        response
+            .answers
+            .iter()
+            .any(|record| record.data == RData::A(A::new(203, 0, 113, 42)))
+    );
+    assert_eq!(metrics.recursive_attempts.load(Ordering::Relaxed), 2);
+    assert_eq!(metrics.recursive_retries.load(Ordering::Relaxed), 1);
+    assert_eq!(metrics.recursive_timeouts.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        metrics
+            .latency
+            .iter()
+            .map(|bucket| bucket.load(Ordering::Relaxed))
+            .sum::<u64>(),
+        1,
+        "one logical lookup produces one client-latency sample"
+    );
+    let rendered = metrics.render();
+    assert!(rendered.contains("lumen_dns_recursive_attempts_total 2"));
+    assert!(!rendered.contains("www.example.test"));
+    tasks.abort_all();
+}
+
+#[tokio::test]
 async fn recursion_timeout_invokes_fallback_once() {
     let recursive_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let fallback_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -417,6 +583,10 @@ async fn recursion_timeout_invokes_fallback_once() {
                 insecure: None,
                 recursor: Arc::new(recursor),
                 accel: Arc::new(Accel::new(Arc::clone(&metrics), Prefetch::default())),
+                policy: RecursivePolicy {
+                    attempts: 1,
+                    attempt_timeout: Duration::from_millis(250),
+                },
                 fallback: Some(FallbackBackend {
                     resolver: Box::new(forward::Provider::new(vec![forward], None)),
                     recursive_timeout: Duration::from_millis(30),
@@ -430,6 +600,7 @@ async fn recursion_timeout_invokes_fallback_once() {
         catalog,
         metrics: Arc::clone(&metrics),
         background: None,
+        local_zones: true,
     };
     let mut request = Message::query();
     request.metadata.recursion_desired = true;
@@ -878,6 +1049,12 @@ fn latency_histogram_is_cumulative_and_fixed_cardinality() {
     assert!(text.contains(&format!("{background}_bucket{{le=\"0.02\"}} 1\n")));
     assert!(text.contains(&format!("{background}_count 1\n")));
     assert_eq!(text.matches("_bucket{").count(), 22);
+    assert!(!text.contains("recursive_attempt_duration_seconds"));
+    metrics.diagnostics.store(true, Ordering::Relaxed);
+    metrics.observe_attempt(Duration::from_millis(30));
+    let diagnostic = metrics.render();
+    assert!(diagnostic.contains("lumen_dns_recursive_attempt_duration_seconds_count 1"));
+    assert_eq!(diagnostic.matches("_bucket{").count(), 33);
 }
 
 #[tokio::test]

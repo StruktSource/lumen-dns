@@ -191,6 +191,7 @@ pub enum ForwardStrategy {
 /// DNSSEC validates by default in both modes.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Independent serialized feature switches, not one state.
 pub struct Resolver {
     pub mode: Mode,
     pub dnssec: bool,
@@ -219,6 +220,10 @@ pub struct Resolver {
     pub recursion_depth: u8,
     pub attempts: u8,
     pub upstream_timeout_ms: u32,
+    /// Serve standards-defined local-only zones without sending them to public DNS.
+    pub local_zones: bool,
+    /// Export extra fixed-cardinality recursive attempt metrics. No names or addresses.
+    pub diagnostics: bool,
     pub fallback: Fallback,
     pub warm: Warm,
     pub prefetch: Prefetch,
@@ -248,6 +253,8 @@ impl Default for Resolver {
             recursion_depth: 24,
             attempts: 2,
             upstream_timeout_ms: 2000,
+            local_zones: true,
+            diagnostics: false,
             fallback: Fallback::default(),
             warm: Warm::default(),
             prefetch: Prefetch::default(),
@@ -743,6 +750,21 @@ impl Config {
         }
         self.validate_fallback()?;
         self.validate_acceleration()?;
+        if r.mode == Mode::Recursive {
+            let recursive_budget =
+                (u32::from(r.attempts) + u32::from(r.dnssec)).saturating_mul(r.upstream_timeout_ms);
+            let available = if r.fallback.enabled {
+                r.fallback.recursive_timeout_ms
+            } else {
+                self.limits.query_timeout_ms
+            };
+            if recursive_budget > available {
+                return Err(
+                    "recursive attempts plus DNSSEC recovery must fit the recursive deadline"
+                        .into(),
+                );
+            }
+        }
         if r.upstream_ca.is_some()
             && !r
                 .upstreams
@@ -1194,6 +1216,8 @@ mod tests {
     fn warm_and_prefetch_are_off_by_default_and_bounded() {
         let mut config: Config = toml::from_str("schema_version = 1").unwrap();
         assert!(!config.resolver.warm.enabled && !config.resolver.prefetch.enabled);
+        assert!(config.resolver.local_zones);
+        assert!(!config.resolver.diagnostics);
         assert_eq!(config.resolver.nameserver_cache_entries, 1024);
         config.validate().unwrap();
         let parsed: Config = toml::from_str(
@@ -1240,6 +1264,18 @@ mod tests {
         );
         assert!(
             toml::from_str::<Config>("schema_version = 1\n[resolver.warm]\nbogus = 1").is_err()
+        );
+        let local: Config = toml::from_str(
+            "schema_version = 1\n[resolver]\nlocal_zones = false\ndiagnostics = true\n",
+        )
+        .unwrap();
+        assert!(!local.resolver.local_zones && local.resolver.diagnostics);
+        let mut over_budget = Config::default();
+        over_budget.resolver.attempts = 5;
+        over_budget.resolver.upstream_timeout_ms = 2000;
+        assert!(
+            over_budget.validate().is_err(),
+            "retries leave time for recovery"
         );
     }
 
