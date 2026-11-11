@@ -28,7 +28,7 @@ In words:
 1. A query arrives and is admitted only if the client is allowed and within its rate and connection limits.
 2. It is decoded strictly and bounded.
 3. The client's profile and the current filter snapshot decide whether to block it. Filtering happens **before** any cache or resolver work.
-4. Otherwise a recursive or forwarding resolver answers it, using bounded caches and local DNSSEC validation, all under one whole-resolution deadline.
+4. Otherwise registered local-only zones answer in-process, or the selected recursive or forwarding resolver answers it. Recursive walks, timeout-only retries, DNSSEC recovery, caches, and local validation all stay inside one whole-resolution deadline.
 
 All transports share **one resolver and cache set** and one global query budget. A listener failure reaches the daemon, while individual client I/O failures are isolated. Shutdown cancels listener and child tasks, and no thread is created per query.
 

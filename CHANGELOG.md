@@ -15,7 +15,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 - Updated bundled SQLite through `rusqlite 0.41.1` and `libsqlite3-sys 0.39.1` to resolve RUSTSEC-2026-0459. Minimum source-build Rust is now 1.89; database schema and release binary requirements are unchanged.
 - Automatic encrypted transports now share one provider deadline with bounded per-transport time slices. A silent or failed first transport can reach the next encrypted transport. DNS answers and local DNSSEC failures remain final; upstream SERVFAIL keeps its existing next-provider policy.
 - Removed a response-buffer clone and allocations for discarded filter block matches. Portable release builds enable cross-crate ThinLTO, retaining baseline CPU support and unwinding.
-- Added the v0.6.0 optimization audit with explicit rejected/deferred ideas. Cold-recursion tracing, authority/DNSSEC retry tuning and standards-correct local reverse DNS are queued; no recursive latency fix is claimed.
+- Added the v0.6.0 optimization audit with explicit rejected/deferred ideas. Recursive walks now have bounded timeout-only retries, DNSSEC unsigned-zone recovery has one total budget, and optional fixed-cardinality diagnostics expose attempt timing without names or addresses. Registered local reverse, `home.arpa`, `resolver.arpa`, `service.arpa`, and `.local` requests no longer leak to public DNS. Public cold-latency gains and exact per-authority tracing are not claimed.
 
 ### Changed
 

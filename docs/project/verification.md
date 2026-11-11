@@ -249,3 +249,25 @@ Local follow-up checks pass: `./scripts/dev.sh check` (116 tests/doc tests, form
 Clippy with denied warnings), `cargo +1.89.0 check --workspace --all-targets --locked`,
 `cargo build --release --locked --workspace`, all three shipped config checks,
 `python3 scripts/verify-release.py --version v0.6.0`, and `git diff --check`.
+
+## 2026-11-11 — bounded recursion and local-only zones
+
+Controlled local resolver fixtures cover a silent first recursive walk followed by a
+successful second walk, the per-attempt and total elapsed bounds, cache-backed iterative
+delegation, and cancellation cleanup. Only timeouts retry; existing negative-answer and
+DNSSEC-failure policy stays final. The SOA/NS unsigned-zone recovery loop now has one shared
+attempt-sized deadline.
+
+Local-zone unit tests cover authoritative apex SOA and NS, NXDOMAIN with SOA for names below
+empty zones, NODATA for resolver discovery, the `home.arpa` DS+DO public-proof exception,
+`.local` leak prevention, private/shared IPv4 reverse zones, local IPv6 reverse zones, and
+`service.arpa`. Public `8.8.8.8.in-addr.arpa` and `ipv4only.arpa` are shown to bypass local
+handling. These tests use no public DNS.
+
+`cargo test -p lumen-resolver -p lumen-config --locked` passes 41 tests and doc tests.
+`./scripts/dev.sh check` passes format, locked all-target Clippy with denied warnings, 119
+workspace tests, and all doc tests. Rust 1.89 locked all-target workspace check, portable
+release workspace build, all three shipped config checks, JavaScript syntax checks, and
+`scripts/verify-release.py --version v0.6.0` also pass. Hosted cross-platform results remain
+pending. No statistically significant public cold-query gain or exact per-authority timing is
+claimed.

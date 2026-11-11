@@ -135,19 +135,25 @@ How expiry refresh stays safe:
 
 Cold validating recursion can require delegation, DS/DNSKEY, denial and CNAME walks.
 A quick direct provider reply does not measure this work. Startup warming and shared
-recursion already exist; they do not eliminate slow authorities or DNSSEC failures.
-The current Hickory recursor uses five-second pool timeouts independently of
-`upstream_timeout_ms`, which controls forwarding. The outer query deadline still caps
-client work. Timeout fallback remains opt-in and off by default.
+recursion still do not remove slow authorities or DNSSEC work.
 
-Per-hop tracing and authority/DNSSEC retry tuning are queued in the roadmap. Current
-Hickory trace events can contain names, IPs and DNS data; Lumen does not enable a global
-tracing subscriber. A future diagnostic mode must be explicit, bounded and privacy-safe.
-Do not enable verbose upstream logs as a default fix or disable validation to hide failures.
+Lumen now caps each full recursive walk with `upstream_timeout_ms` and retries only a
+timeout, up to `attempts`. Hickory keeps completed cache work between walks. A usable DNS
+answer, authenticated negative answer, or DNSSEC failure is final. The extra SOA/NS scan used
+to recover a proven unsigned ancestor has one shared attempt-sized budget, rather than one
+unbounded wait per ancestor. The outer query deadline remains the final cap. This is a bounded
+failure-recovery change, not a claim that public cold-query speed is now proven.
 
-`.arpa` requests are normal. Public reverse DNS and resolver discovery must still work.
-Local reverse answering needs correct negative replies and an operator opt-out under
-[RFC 6303](https://www.rfc-editor.org/rfc/rfc6303.html), while
-[`home.arpa`](https://www.rfc-editor.org/rfc/rfc8375.html) and
-[resolver discovery](https://www.rfc-editor.org/rfc/rfc9462.html) have separate rules.
-This update does not add local-zone answering or claim to fix cold recursive latency.
+Set `diagnostics = true` for aggregate recursive-attempt timing and outcome metrics. They have
+fixed labels and contain no query names, authority IPs, or client data. Hickory does not expose
+safe per-authority timing through its stable recursor API, so Lumen does not turn on Hickory's
+verbose trace events, which can include DNS names, addresses, and response data.
+
+With `local_zones = true` (the default), Lumen answers the IANA locally-served reverse zones
+under [RFC 6303](https://www.rfc-editor.org/rfc/rfc6303.html) and RFC 7793. It also handles
+[`home.arpa`](https://www.rfc-editor.org/rfc/rfc8375.html),
+[`resolver.arpa`](https://www.rfc-editor.org/rfc/rfc9462.html), and `service.arpa` locally.
+Apple DNS-SD queries inside private reverse zones therefore fail fast with a correct local
+negative answer. `.local` never goes to public DNS, but Lumen is not an mDNS bridge. Public
+reverse zones and `ipv4only.arpa` still recurse normally. Disable `local_zones` only when a
+separate local authority or conditional DNS path owns these names.
