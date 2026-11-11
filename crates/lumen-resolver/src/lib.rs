@@ -325,7 +325,7 @@ impl Resolver {
                 },
             )
             .await;
-        let result = bytes.lock().map_err(|_| "response lock poisoned")?.clone();
+        let result = std::mem::take(&mut *bytes.lock().map_err(|_| "response lock poisoned")?);
         if result.is_empty() {
             return Err("empty resolver response".into());
         }
