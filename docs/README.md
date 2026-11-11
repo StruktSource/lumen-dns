@@ -61,5 +61,5 @@ Welcome! This is the map to everything written about Lumen, a self-hosted DNS re
 - [Roadmap and status](project/roadmap.md): what works today and what is planned.
 - [Versioning and releases](project/versioning.md): version rules and how to verify a download.
 - [Verification record](project/verification.md): tests and checks that have actually been run.
-- [Performance](project/performance.md) and [raw benchmarks](project/benchmarks/2026-10-31-recursion/ab-report.md)
+- [Performance](project/performance.md) and raw benchmarks: [load and idle](project/benchmarks/2026-11-12-load/load-table.md), [recursion A/B](project/benchmarks/2026-10-31-recursion/ab-report.md)
 - [Contributing](../CONTRIBUTING.md) · [Code of conduct](../CODE_OF_CONDUCT.md) · [Changelog](../CHANGELOG.md)

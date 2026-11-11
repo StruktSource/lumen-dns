@@ -36,7 +36,7 @@ New to the ideas? Read [Concepts](docs/getting-started/concepts.md) for a plain-
 | 🛡️ **Filters per device** | Block ads, trackers, or categories globally, or with different rules and schedules for each device. |
 | 🖥️ **Easy to manage** | A built-in web console and a `lumenctl` command-line tool, with safe reloads that roll back on failure. |
 | 📊 **Visible** | Opt-in aggregate metrics for Prometheus, Grafana, and Home Assistant. |
-| 🪶 **Small** | An idle Lumen uses about 9 MiB of memory. |
+| 🪶 **Small** | An idle Lumen uses about 8 MiB of memory, and answers cached or blocked names in about 0.03 ms. |
 
 ## Features
 
@@ -120,7 +120,7 @@ Lumen is a Rust workspace with a single shared resolver pipeline and deliberatel
 
 **Still ahead:** certificate and trust-anchor automation, split DNS and local records, high availability, more interoperability and soak testing, real-hardware validation, and independent security review. These are **roadmap items, not current capabilities**.
 
-See the [roadmap](docs/project/roadmap.md), the [verification record](docs/project/verification.md), and [performance notes](docs/project/performance.md). There is no verified production throughput or latency claim yet.
+See the [roadmap](docs/project/roadmap.md), the [verification record](docs/project/verification.md), and [performance notes](docs/project/performance.md). Measured idle memory and loopback latency are recorded there; there is no verified production throughput claim yet.
 
 ## Documentation
 
