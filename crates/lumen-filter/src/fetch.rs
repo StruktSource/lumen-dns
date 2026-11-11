@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! HTTPS-only downloads with DNS pinning, no redirects/proxies, and hard bounds.
 
-use crate::rules::MAX_LIST_BYTES;
+use crate::{cache::Validators, rules::MAX_LIST_BYTES};
 use reqwest::{Client, Url};
 use std::{
     net::{IpAddr, SocketAddr},
@@ -51,13 +51,19 @@ pub(crate) fn public_ip(ip: IpAddr) -> bool {
 
 /// Large lists over slow links need minutes, and a long transfer can drop mid-way.
 /// Each attempt has its own deadline; only transient transport errors are retried.
-pub(crate) async fn download(source: &str) -> Result<Vec<u8>, String> {
+#[derive(Debug)]
+pub(crate) enum Download {
+    Changed(Vec<u8>, Validators),
+    NotModified(Validators),
+}
+
+pub(crate) async fn download(source: &str, validators: &Validators) -> Result<Download, String> {
     let mut last = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
             tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
         }
-        match download_once(source).await {
+        match download_once(source, validators).await {
             Ok(bytes) => return Ok(bytes),
             Err(error)
                 if matches!(
@@ -75,7 +81,7 @@ pub(crate) async fn download(source: &str) -> Result<Vec<u8>, String> {
     Err(format!("{last} after 3 attempts"))
 }
 
-async fn download_once(source: &str) -> Result<Vec<u8>, String> {
+async fn download_once(source: &str, validators: &Validators) -> Result<Download, String> {
     tokio::time::timeout(Duration::from_secs(90), async {
         let url = validate_url(source)?;
         let host = url
@@ -114,19 +120,45 @@ async fn download_once(source: &str) -> Result<Vec<u8>, String> {
             .resolve_to_addrs(host, &addresses)
             .build()
             .map_err(|_| "list client setup failed")?;
-        read_response(&client, url).await
+        read_response(&client, url, validators).await
     })
     .await
     .map_err(|_| "list download deadline exceeded")?
 }
 
-pub(crate) async fn read_response(client: &Client, url: Url) -> Result<Vec<u8>, String> {
-    let mut response = client
-        .get(url)
-        .header("Accept", "text/plain")
+pub(crate) async fn read_response(
+    client: &Client,
+    url: Url,
+    validators: &Validators,
+) -> Result<Download, String> {
+    let mut request = client.get(url).header("Accept", "text/plain");
+    if let Some(etag) = &validators.etag {
+        request = request.header("If-None-Match", etag);
+    }
+    if let Some(modified) = &validators.last_modified {
+        request = request.header("If-Modified-Since", modified);
+    }
+    let mut response = request
         .send()
         .await
         .map_err(|_| "list HTTPS request failed")?;
+    let response_validators = Validators {
+        etag: response
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .or_else(|| validators.etag.clone()),
+        last_modified: response
+            .headers()
+            .get("last-modified")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .or_else(|| validators.last_modified.clone()),
+    };
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(Download::NotModified(response_validators));
+    }
     if response.status() != reqwest::StatusCode::OK {
         return Err(format!(
             "list address answered HTTP {} instead of 200 (check the URL; redirects are not followed)",
@@ -138,13 +170,6 @@ pub(crate) async fn read_response(client: &Client, url: Url) -> Result<Vec<u8>, 
         .is_some_and(|length| length > MAX_LIST_BYTES as u64)
     {
         return Err("list response exceeds the 64 MiB size limit".into());
-    }
-    if response
-        .headers()
-        .get("content-encoding")
-        .is_some_and(|value| value != "identity")
-    {
-        return Err("compressed lists are not supported".into());
     }
     let total = response.content_length();
     let mut bytes = Vec::new();
@@ -160,5 +185,5 @@ pub(crate) async fn read_response(client: &Client, url: Url) -> Result<Vec<u8>, 
         bytes.extend_from_slice(&chunk);
         crate::activity::bytes(bytes.len() as u64, total);
     }
-    Ok(bytes)
+    Ok(Download::Changed(bytes, response_validators))
 }

@@ -19,6 +19,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Changed
 
+- **Lighter list downloads.** Lists are requested compressed and revalidated with `ETag` / `Last-Modified`, so an unchanged list costs a `304`. In managed mode downloaded lists are also kept in a bounded `filter-cache` folder beside the state database, so a restart does not download fresh lists again.
 - The Overview now reloads every 10 seconds (it was 5). A new *Auto reload* slider under *Users & access → Console* lets an administrator choose 1, 2, 5, 10, 30 or 60 seconds, or off. The choice is saved on the server and applies to everyone.
 
 ### Fixed

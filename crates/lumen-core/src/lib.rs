@@ -2,7 +2,7 @@
 //! Service lifecycle, resource admission, and aggregate metrics.
 
 mod transport;
-pub use lumen_filter::{Filter, activity};
+pub use lumen_filter::{Filter, activity, configure_download_cache};
 pub use lumen_resolver::Transport;
 pub use transport::{ConsoleOptions, RunningServer};
 
