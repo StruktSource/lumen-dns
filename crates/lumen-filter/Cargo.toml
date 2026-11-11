@@ -9,13 +9,16 @@ repository.workspace = true
 [dependencies]
 lumen-proto = { path = "../lumen-proto" }
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 ipnet.workspace = true
 tokio.workspace = true
 rustls.workspace = true
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "gzip", "brotli", "deflate", "zstd"] }
 webpki-roots = "1"
 
 [dev-dependencies]
+flate2 = "1"
 tempfile = "3"
 toml = "1.1"
 rcgen = "0.14"

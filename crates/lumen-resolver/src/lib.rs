@@ -12,8 +12,11 @@ use hickory_server::{
     },
     proto::{
         dnssec::{DnssecSummary, TrustAnchors},
-        op::{Message, Query as DnsQuery},
-        rr::{LowerName, Name, RData, Record, RecordSet, RecordType, TSigResponseContext},
+        op::{Edns, Message, Query as DnsQuery, ResponseCode},
+        rr::{
+            LowerName, Name, RData, Record, RecordSet, RecordType, TSigResponseContext,
+            rdata::{NS, SOA},
+        },
         serialize::{binary::BinEncoder, txt::Parser},
     },
     resolver::{
@@ -36,8 +39,8 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -53,6 +56,7 @@ pub struct Resolver {
     catalog: Catalog,
     metrics: Arc<Metrics>,
     background: Option<Background>,
+    local_zones: bool,
 }
 
 /// Optional priming and refresh tasks, started explicitly once listeners are bound.
@@ -75,6 +79,13 @@ const LATENCY_BOUNDS: [f64; 10] = [0.001, 0.005, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0
 /// Aggregate counters. No query names or client labels are retained.
 #[derive(Default)]
 pub struct Metrics {
+    diagnostics: AtomicBool,
+    recursive_attempts: AtomicU64,
+    recursive_retries: AtomicU64,
+    recursive_timeouts: AtomicU64,
+    recursive_failures: AtomicU64,
+    attempt_latency: [AtomicU64; 11],
+    attempt_latency_sum_micros: AtomicU64,
     attempts: AtomicU64,
     successes: AtomicU64,
     failures: AtomicU64,
@@ -109,6 +120,21 @@ impl Metrics {
         };
         latency[slot].fetch_add(1, Ordering::Relaxed);
         sum.fetch_add(
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn observe_attempt(&self, elapsed: Duration) {
+        if !self.diagnostics.load(Ordering::Relaxed) {
+            return;
+        }
+        let slot = LATENCY_BOUNDS
+            .iter()
+            .position(|bound| elapsed.as_secs_f64() <= *bound)
+            .unwrap_or(LATENCY_BOUNDS.len());
+        self.attempt_latency[slot].fetch_add(1, Ordering::Relaxed);
+        self.attempt_latency_sum_micros.fetch_add(
             u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
@@ -181,6 +207,7 @@ impl Metrics {
                 value.load(Ordering::Relaxed)
             );
         }
+        self.render_diagnostics(&mut text);
         render_histogram(
             &mut text,
             "lumen_dns_recursive_lookup_duration_seconds",
@@ -196,6 +223,47 @@ impl Metrics {
             &self.background_latency_sum_micros,
         );
         text
+    }
+
+    fn render_diagnostics(&self, text: &mut String) {
+        if !self.diagnostics.load(Ordering::Relaxed) {
+            return;
+        }
+        for (name, help, value) in [
+            (
+                "recursive_attempts_total",
+                "Bounded recursive walk attempts, without query or server labels.",
+                &self.recursive_attempts,
+            ),
+            (
+                "recursive_retries_total",
+                "Recursive walks retried after a timeout.",
+                &self.recursive_retries,
+            ),
+            (
+                "recursive_attempt_timeouts_total",
+                "Recursive walk attempts that reached their Lumen budget.",
+                &self.recursive_timeouts,
+            ),
+            (
+                "recursive_attempt_failures_total",
+                "Recursive walk attempts that failed without a timeout.",
+                &self.recursive_failures,
+            ),
+        ] {
+            let _ = writeln!(
+                text,
+                "# HELP lumen_dns_{name} {help}\n# TYPE lumen_dns_{name} counter\nlumen_dns_{name} {}",
+                value.load(Ordering::Relaxed)
+            );
+        }
+        render_histogram(
+            text,
+            "lumen_dns_recursive_attempt_duration_seconds",
+            "Time spent in each bounded recursive walk attempt.",
+            &self.attempt_latency,
+            &self.attempt_latency_sum_micros,
+        );
     }
 }
 
@@ -220,6 +288,148 @@ fn render_histogram(
     let _ = writeln!(text, "{name}_sum {sum}\n{name}_count {total}");
 }
 
+const LOCAL_ZONE_TTL: u32 = 10_800;
+
+static EMPTY_LOCAL_ZONES: LazyLock<Vec<Name>> = LazyLock::new(|| {
+    let mut zones = vec![
+        "10.in-addr.arpa.",
+        "168.192.in-addr.arpa.",
+        "0.in-addr.arpa.",
+        "127.in-addr.arpa.",
+        "254.169.in-addr.arpa.",
+        "2.0.192.in-addr.arpa.",
+        "100.51.198.in-addr.arpa.",
+        "113.0.203.in-addr.arpa.",
+        "255.255.255.255.in-addr.arpa.",
+        "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa.",
+        "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa.",
+        "d.f.ip6.arpa.",
+        "8.e.f.ip6.arpa.",
+        "9.e.f.ip6.arpa.",
+        "a.e.f.ip6.arpa.",
+        "b.e.f.ip6.arpa.",
+        "8.b.d.0.1.0.0.2.ip6.arpa.",
+        "service.arpa.",
+    ]
+    .into_iter()
+    .map(|zone| Name::from_ascii(zone).expect("static local zone"))
+    .collect::<Vec<_>>();
+    zones.extend((16..=31).map(|octet| {
+        Name::from_ascii(format!("{octet}.172.in-addr.arpa.")).expect("private reverse zone")
+    }));
+    zones.extend((64..=127).map(|octet| {
+        Name::from_ascii(format!("{octet}.100.in-addr.arpa.")).expect("shared reverse zone")
+    }));
+    zones
+});
+
+static HOME_ARPA: LazyLock<Name> =
+    LazyLock::new(|| Name::from_ascii("home.arpa.").expect("static local zone"));
+static RESOLVER_ARPA: LazyLock<Name> =
+    LazyLock::new(|| Name::from_ascii("resolver.arpa.").expect("static local zone"));
+static MDNS_LOCAL: LazyLock<Name> =
+    LazyLock::new(|| Name::from_ascii("local.").expect("static local zone"));
+
+/// Answer registered local-only names without leaking them into public recursion.
+fn local_zone_response(query: &Query) -> Option<Message> {
+    let question = query.message.queries.first()?;
+    let name = question.name();
+    let dnssec_ok = query
+        .message
+        .edns
+        .as_ref()
+        .is_some_and(|edns| edns.flags().dnssec_ok);
+
+    // RFC 8375 requires the real parent proof for this one query.
+    if HOME_ARPA.zone_of(name)
+        && name == &*HOME_ARPA
+        && question.query_type() == RecordType::DS
+        && dnssec_ok
+    {
+        return None;
+    }
+
+    if RESOLVER_ARPA.zone_of(name) {
+        return Some(if name == &*RESOLVER_ARPA {
+            empty_zone_response(query, &RESOLVER_ARPA)
+        } else {
+            local_nodata(query, &RESOLVER_ARPA)
+        });
+    }
+    if MDNS_LOCAL.zone_of(name) {
+        // Lumen is not an mDNS bridge. Never send a link-local name to public DNS, and do not
+        // claim authority for the multicast namespace.
+        let mut response = response_base(query, false);
+        response.metadata.response_code = ResponseCode::NXDomain;
+        return Some(response);
+    }
+    if HOME_ARPA.zone_of(name) {
+        return Some(empty_zone_response(query, &HOME_ARPA));
+    }
+    EMPTY_LOCAL_ZONES
+        .iter()
+        .find(|zone| zone.zone_of(name))
+        .map(|zone| empty_zone_response(query, zone))
+}
+
+fn response_base(query: &Query, authoritative: bool) -> Message {
+    let mut response = Message::response(query.message.metadata.id, query.message.metadata.op_code);
+    response.metadata.authoritative = authoritative;
+    response.metadata.recursion_available = true;
+    response.metadata.recursion_desired = query.message.metadata.recursion_desired;
+    response.metadata.checking_disabled = query.message.metadata.checking_disabled;
+    response.queries.clone_from(&query.message.queries);
+    if let Some(request_edns) = &query.message.edns {
+        let mut edns = Edns::new();
+        edns.set_max_payload(request_edns.max_payload())
+            .set_dnssec_ok(request_edns.flags().dnssec_ok);
+        response.edns = Some(edns);
+    }
+    response
+}
+
+fn local_soa(zone: &Name) -> Record {
+    Record::from_rdata(
+        zone.clone(),
+        LOCAL_ZONE_TTL,
+        RData::SOA(SOA::new(
+            zone.clone(),
+            Name::from_ascii("nobody.invalid.").expect("static SOA name"),
+            1,
+            3600,
+            1200,
+            604_800,
+            LOCAL_ZONE_TTL,
+        )),
+    )
+}
+
+fn local_nodata(query: &Query, zone: &Name) -> Message {
+    let mut response = response_base(query, true);
+    response.add_authority(local_soa(zone));
+    response
+}
+
+fn empty_zone_response(query: &Query, zone: &Name) -> Message {
+    let question = &query.message.queries[0];
+    let mut response = response_base(query, true);
+    if question.name() != zone {
+        response.metadata.response_code = ResponseCode::NXDomain;
+        response.add_authority(local_soa(zone));
+        return response;
+    }
+    match question.query_type() {
+        RecordType::SOA => response.add_answer(local_soa(zone)),
+        RecordType::NS => response.add_answer(Record::from_rdata(
+            zone.clone(),
+            LOCAL_ZONE_TTL,
+            RData::NS(NS(zone.clone())),
+        )),
+        _ => response.add_authority(local_soa(zone)),
+    };
+    response
+}
+
 impl Resolver {
     /// Build the selected mode and trust anchors before opening listeners.
     ///
@@ -228,6 +438,9 @@ impl Resolver {
     pub fn new(config: &Config) -> Result<Self, String> {
         let settings = &config.resolver;
         let metrics = Arc::new(Metrics::default());
+        metrics
+            .diagnostics
+            .store(settings.diagnostics, Ordering::Relaxed);
         let anchors = settings
             .trust_anchor
             .as_ref()
@@ -270,6 +483,7 @@ impl Resolver {
             catalog,
             metrics,
             background,
+            local_zones: settings.local_zones,
         })
     }
 
@@ -305,6 +519,13 @@ impl Resolver {
         protocol: Transport,
         maximum: usize,
     ) -> Result<Vec<u8>, String> {
+        if self.local_zones
+            && let Some(response) = local_zone_response(query)
+        {
+            return response
+                .to_vec()
+                .map_err(|_| "cannot encode local response".into());
+        }
         let raw = query.message.to_vec().map_err(|_| "cannot encode query")?;
         let request =
             Request::from_bytes(raw, peer, protocol).map_err(|_| "cannot decode request")?;
@@ -325,7 +546,7 @@ impl Resolver {
                 },
             )
             .await;
-        let result = bytes.lock().map_err(|_| "response lock poisoned")?.clone();
+        let result = std::mem::take(&mut *bytes.lock().map_err(|_| "response lock poisoned")?);
         if result.is_empty() {
             return Err("empty resolver response".into());
         }
@@ -354,7 +575,7 @@ fn forward_zone(
             // Another provider is the retry, so a silent one costs one timeout, not two.
             member_options.attempts = 1;
         }
-        members.push(forward_resolver(
+        members.push(forward_provider(
             settings,
             &settings.upstreams[start..start + size],
             member_options,
@@ -378,6 +599,57 @@ fn group_sizes(provider_groups: &[usize], count: usize) -> Vec<usize> {
     let used: usize = groups.iter().sum();
     groups.extend(std::iter::repeat_n(1, count.saturating_sub(used)));
     groups
+}
+
+fn forward_provider(
+    settings: &lumen_config::Resolver,
+    upstreams: &[lumen_config::Upstream],
+    options: ResolverOpts,
+    anchors: Option<Arc<TrustAnchors>>,
+) -> Result<forward::Provider<TokioRuntimeProvider>, String> {
+    if !settings.automatic_transport {
+        return Ok(forward::Provider::new(
+            vec![forward_resolver(settings, upstreams, options, anchors)?],
+            None,
+        ));
+    }
+    // Automatic mode is encrypted-only even for callers that bypass config expansion.
+    if upstreams.iter().any(|upstream| {
+        matches!(
+            upstream.protocol,
+            UpstreamProtocol::Udp | UpstreamProtocol::Tcp
+        )
+    }) {
+        return Err("automatic transports must be encrypted".into());
+    }
+    let mut tiers: Vec<Vec<lumen_config::Upstream>> = Vec::new();
+    for upstream in upstreams {
+        if let Some(tier) = tiers
+            .iter_mut()
+            .find(|tier| tier[0].protocol == upstream.protocol)
+        {
+            tier.push(upstream.clone());
+        } else {
+            tiers.push(vec![upstream.clone()]);
+        }
+    }
+    let budget = options.timeout;
+    let mut transports = Vec::new();
+    for tier in &tiers {
+        let mut tier_options = options.clone();
+        // Keep the provider's configured response-cache bound across all its transports.
+        tier_options.cache_size /= tiers.len() as u64;
+        if tiers.len() > 1 {
+            tier_options.attempts = 1;
+        }
+        transports.push(forward_resolver(
+            settings,
+            tier,
+            tier_options,
+            anchors.clone(),
+        )?);
+    }
+    Ok(forward::Provider::new(transports, Some(budget)))
 }
 
 fn forward_resolver(
@@ -522,7 +794,7 @@ fn recursive_zone(
         fallback_options.attempts = usize::from(settings.fallback.attempts);
         fallback_options.timeout = Duration::from_millis(u64::from(settings.fallback.timeout_ms));
         Some(FallbackBackend {
-            resolver: Box::new(forward_resolver(
+            resolver: Box::new(forward_provider(
                 settings,
                 &settings.fallback.upstreams,
                 fallback_options,
@@ -552,6 +824,10 @@ fn recursive_zone(
             insecure,
             fallback,
             accel: Arc::clone(&accel),
+            policy: RecursivePolicy {
+                attempts: settings.attempts,
+                attempt_timeout: Duration::from_millis(u64::from(settings.upstream_timeout_ms)),
+            },
         },
     });
     Ok((zone, Background { accel, start }))
@@ -594,11 +870,23 @@ enum Backend<P: hickory_server::net::runtime::RuntimeProvider> {
         insecure: Option<Arc<Recursor<P>>>,
         fallback: Option<FallbackBackend<P>>,
         accel: Arc<Accel>,
+        policy: RecursivePolicy,
     },
     Forward(Box<forward::ForwardPool<P>>),
 }
+#[derive(Clone, Copy)]
+struct RecursivePolicy {
+    attempts: u8,
+    attempt_timeout: Duration,
+}
+#[derive(Clone, Copy)]
+struct RecoveryTarget<'a> {
+    name: &'a LowerName,
+    rtype: RecordType,
+    dnssec_ok: bool,
+}
 struct FallbackBackend<P: hickory_server::net::runtime::RuntimeProvider> {
-    resolver: Box<hickory_server::resolver::Resolver<P>>,
+    resolver: Box<forward::Provider<P>>,
     recursive_timeout: Duration,
     timeout: Duration,
     metrics: Arc<Metrics>,
@@ -642,11 +930,12 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
                 insecure,
                 fallback,
                 accel,
+                policy,
             } => match fallback {
                 Some(fallback) => {
                     let recursive = timeout(
                         fallback.recursive_timeout,
-                        accel.resolve(recursor, name, rtype, options.dnssec_ok, false),
+                        recursive_lookup(recursor, accel, name, rtype, options.dnssec_ok, *policy),
                     )
                     .await;
                     match recursive {
@@ -655,10 +944,13 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
                                 recursor,
                                 insecure.as_deref(),
                                 accel,
-                                name,
-                                rtype,
-                                options.dnssec_ok,
+                                RecoveryTarget {
+                                    name,
+                                    rtype,
+                                    dnssec_ok: options.dnssec_ok,
+                                },
                                 message,
+                                *policy,
                             )
                             .await,
                         )),
@@ -667,10 +959,13 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
                                 recursor,
                                 insecure.as_deref(),
                                 accel,
-                                name,
-                                rtype,
-                                options.dnssec_ok,
+                                RecoveryTarget {
+                                    name,
+                                    rtype,
+                                    dnssec_ok: options.dnssec_ok,
+                                },
                                 Some(&error),
+                                *policy,
                             )
                             .await
                             {
@@ -710,37 +1005,44 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
                         }
                     }
                 }
-                None => match accel
-                    .resolve(recursor, name, rtype, options.dnssec_ok, false)
-                    .await
-                {
-                    Ok(message) => Ok(AuthLookup::Response(
-                        recover_bogus(
+                None => {
+                    match recursive_lookup(recursor, accel, name, rtype, options.dnssec_ok, *policy)
+                        .await
+                    {
+                        Ok(message) => Ok(AuthLookup::Response(
+                            recover_bogus(
+                                recursor,
+                                insecure.as_deref(),
+                                accel,
+                                RecoveryTarget {
+                                    name,
+                                    rtype,
+                                    dnssec_ok: options.dnssec_ok,
+                                },
+                                message,
+                                *policy,
+                            )
+                            .await,
+                        )),
+                        Err(error) => match insecure_retry(
                             recursor,
                             insecure.as_deref(),
                             accel,
-                            name,
-                            rtype,
-                            options.dnssec_ok,
-                            message,
+                            RecoveryTarget {
+                                name,
+                                rtype,
+                                dnssec_ok: options.dnssec_ok,
+                            },
+                            Some(&error),
+                            *policy,
                         )
-                        .await,
-                    )),
-                    Err(error) => match insecure_retry(
-                        recursor,
-                        insecure.as_deref(),
-                        accel,
-                        name,
-                        rtype,
-                        options.dnssec_ok,
-                        Some(&error),
-                    )
-                    .await
-                    {
-                        Some(message) => Ok(AuthLookup::Response(message)),
-                        None => Err(LookupError::from(error)),
-                    },
-                },
+                        .await
+                        {
+                            Some(message) => Ok(AuthLookup::Response(message)),
+                            None => Err(LookupError::from(error)),
+                        },
+                    }
+                }
             },
             Backend::Forward(pool) => pool
                 .lookup(Name::from(name), rtype)
@@ -781,6 +1083,69 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
     }
 }
 
+/// Run a small number of full recursive walks. Only a timeout is retried. Hickory keeps
+/// delegation and response caches between attempts, so a retry can reuse completed work while
+/// choosing a different authority. DNS answers and DNSSEC failures stay final.
+async fn recursive_lookup<P: hickory_server::net::runtime::RuntimeProvider>(
+    recursor: &Recursor<P>,
+    accel: &Accel,
+    name: &LowerName,
+    rtype: RecordType,
+    dnssec_ok: bool,
+    policy: RecursivePolicy,
+) -> Result<Message, hickory_server::resolver::recursor::RecursorError> {
+    let lookup_started = Instant::now();
+    let mut last = hickory_server::resolver::recursor::RecursorError::Timeout;
+    let result = 'attempts: {
+        for attempt in 0..policy.attempts {
+            if attempt > 0 {
+                accel
+                    .metrics
+                    .recursive_retries
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            accel
+                .metrics
+                .recursive_attempts
+                .fetch_add(1, Ordering::Relaxed);
+            let started = Instant::now();
+            let result = timeout(
+                policy.attempt_timeout,
+                accel.resolve_unobserved(recursor, name, rtype, dnssec_ok, false),
+            )
+            .await;
+            accel.metrics.observe_attempt(started.elapsed());
+            match result {
+                Ok(Ok(message)) => break 'attempts Ok(message),
+                Ok(Err(error)) if recursion_timed_out(&error) => {
+                    accel
+                        .metrics
+                        .recursive_timeouts
+                        .fetch_add(1, Ordering::Relaxed);
+                    last = error;
+                }
+                Err(_) => {
+                    accel
+                        .metrics
+                        .recursive_timeouts
+                        .fetch_add(1, Ordering::Relaxed);
+                    last = hickory_server::resolver::recursor::RecursorError::Timeout;
+                }
+                Ok(Err(error)) => {
+                    accel
+                        .metrics
+                        .recursive_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    break 'attempts Err(error);
+                }
+            }
+        }
+        break 'attempts Err(last);
+    };
+    accel.metrics.observe(lookup_started.elapsed(), false);
+    result
+}
+
 /// Some operators answer DS queries for a child zone from the child itself, which strict
 /// validation reads as bogus (Google's `l.google.com` is one). DNSSEC cannot make a name secure
 /// below a zone that is provably unsigned, so when an ancestor was validated as insecure the
@@ -789,10 +1154,9 @@ async fn insecure_retry<P: hickory_server::net::runtime::RuntimeProvider>(
     validating: &Recursor<P>,
     plain: Option<&Recursor<P>>,
     accel: &Accel,
-    name: &LowerName,
-    rtype: RecordType,
-    dnssec_ok: bool,
+    target: RecoveryTarget<'_>,
     error: Option<&hickory_server::resolver::recursor::RecursorError>,
+    policy: RecursivePolicy,
 ) -> Option<Message> {
     let plain = plain?;
     if error.is_some_and(|e| e.is_no_records_found() || e.is_nx_domain() || recursion_timed_out(e))
@@ -800,33 +1164,45 @@ async fn insecure_retry<P: hickory_server::net::runtime::RuntimeProvider>(
         return None;
     }
     let mut chain = Vec::new();
-    let mut current = Name::from(name.clone()).base_name();
+    let mut current = Name::from(target.name.clone()).base_name();
     while !current.is_root() {
         chain.push(current.clone());
         current = current.base_name();
     }
     chain.reverse(); // from the top-level domain downwards
+    let deadline = Instant::now() + policy.attempt_timeout;
     for ancestor in chain {
         let ancestor = LowerName::from(ancestor);
         // Which name server answers can vary between attempts, so look at the apex more than once.
         for probe in [RecordType::SOA, RecordType::NS] {
-            let result = accel
-                .resolve(validating, &ancestor, probe, true, false)
-                .await;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            let result = timeout(
+                remaining,
+                accel.resolve_unobserved(validating, &ancestor, probe, true, false),
+            )
+            .await
+            .ok()?;
             let Ok(message) = result else { continue };
             match DnssecSummary::from_records(
                 message.answers.iter().chain(message.authorities.iter()),
             ) {
                 DnssecSummary::Insecure => {
-                    let query = DnsQuery::query(Name::from(name.clone()), rtype);
-                    return plain
-                        .resolve(query, Instant::now(), dnssec_ok)
-                        .await
-                        .ok()
-                        .map(|mut message| {
-                            message.metadata.authentic_data = false;
-                            message
-                        });
+                    let query = DnsQuery::query(Name::from(target.name.clone()), target.rtype);
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    return timeout(
+                        remaining,
+                        plain.resolve(query, Instant::now(), target.dnssec_ok),
+                    )
+                    .await
+                    .ok()?
+                    .ok()
+                    .map(|mut message| {
+                        message.metadata.authentic_data = false;
+                        message
+                    });
                 }
                 DnssecSummary::Secure => break, // a signed zone: look one level down
                 DnssecSummary::Bogus => {}
@@ -842,17 +1218,16 @@ async fn recover_bogus<P: hickory_server::net::runtime::RuntimeProvider>(
     validating: &Recursor<P>,
     plain: Option<&Recursor<P>>,
     accel: &Accel,
-    name: &LowerName,
-    rtype: RecordType,
-    dnssec_ok: bool,
+    target: RecoveryTarget<'_>,
     message: Message,
+    policy: RecursivePolicy,
 ) -> Message {
     let bogus = matches!(
         DnssecSummary::from_records(message.answers.iter().chain(message.authorities.iter())),
         DnssecSummary::Bogus
     );
     let mut message = if bogus {
-        insecure_retry(validating, plain, accel, name, rtype, dnssec_ok, None)
+        insecure_retry(validating, plain, accel, target, None, policy)
             .await
             .unwrap_or(message)
     } else {

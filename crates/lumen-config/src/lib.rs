@@ -5,7 +5,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -34,6 +34,85 @@ pub struct Web {
     pub certificate: Option<PathBuf>,
     pub private_key: Option<PathBuf>,
     pub max_connections: u16,
+    /// Optional external sign-in for the console (`OpenID` Connect). Off by default.
+    pub oidc: Oidc,
+}
+
+/// Where the console redirects the browser after an external sign-in.
+pub const OIDC_CALLBACK_PATH: &str = "/api/login/oidc/callback";
+
+/// External console login through any `OpenID` Connect provider (Authentik, Authelia, Pocket ID,
+/// Octelium, Keycloak, and similar). Disabled by default; the built-in login always stays.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Oidc {
+    pub enabled: bool,
+    /// Text of the sign-in button, for example `Authentik`.
+    pub label: String,
+    /// Issuer URL. `https://` only, except `http://` on a loopback address.
+    pub issuer: String,
+    pub client_id: String,
+    /// File holding the client secret. Leave unset for a public client (PKCE only).
+    pub client_secret_file: Option<PathBuf>,
+    /// Optional override. Empty (the default) means Lumen builds the callback address from the
+    /// address the browser used to reach the console, so it works with a name, an IP address,
+    /// `http` or `https`. Register that address with the provider. Set this only when a reverse
+    /// proxy hides the real address; it must then end in [`OIDC_CALLBACK_PATH`].
+    pub redirect_url: String,
+    /// Extra CA certificates (PEM) for a provider with a private certificate authority.
+    pub ca_file: Option<PathBuf>,
+    /// Claim used to name a new account.
+    pub username_claim: String,
+    /// Claim that lists a person's groups.
+    pub groups_claim: String,
+    /// New accounts of members of this group start as administrators; others start as users.
+    pub admin_group: Option<String>,
+    /// Keep roles in step with `admin_group` on every sign-in, not only on the first one.
+    /// Members become administrators and everyone else a user. The last administrator is never
+    /// demoted.
+    pub sync_role: bool,
+    /// Also end the provider's session when someone signs out of the console after signing in
+    /// through it. The provider must allow the console address as a post-logout redirect.
+    pub single_logout: bool,
+}
+
+impl Default for Oidc {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            label: "Single sign-on".into(),
+            issuer: String::new(),
+            client_id: String::new(),
+            client_secret_file: None,
+            redirect_url: String::new(),
+            ca_file: None,
+            username_claim: "preferred_username".into(),
+            groups_claim: "groups".into(),
+            admin_group: None,
+            sync_role: false,
+            single_logout: false,
+        }
+    }
+}
+
+/// `https://` URLs, or `http://` only when the host is a loopback address or `localhost`.
+#[must_use]
+pub fn oidc_url_ok(value: &str) -> bool {
+    if value.len() > 2048 || value.bytes().any(|b| b <= 0x20 || b == 0x7f) || value.contains('#') {
+        return false;
+    }
+    if value.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = value.strip_prefix("http://") else {
+        return false;
+    };
+    let host = rest.split(['/', '?']).next().unwrap_or("");
+    let host = host.strip_prefix('[').map_or_else(
+        || host.rsplit_once(':').map_or(host, |(name, _)| name),
+        |ipv6| ipv6.split(']').next().unwrap_or(""),
+    );
+    host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 impl Default for Web {
@@ -44,6 +123,7 @@ impl Default for Web {
             certificate: None,
             private_key: None,
             max_connections: 64,
+            oidc: Oidc::default(),
         }
     }
 }
@@ -191,6 +271,7 @@ pub enum ForwardStrategy {
 /// DNSSEC validates by default in both modes.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Independent serialized feature switches, not one state.
 pub struct Resolver {
     pub mode: Mode,
     pub dnssec: bool,
@@ -219,6 +300,10 @@ pub struct Resolver {
     pub recursion_depth: u8,
     pub attempts: u8,
     pub upstream_timeout_ms: u32,
+    /// Serve standards-defined local-only zones without sending them to public DNS.
+    pub local_zones: bool,
+    /// Export extra fixed-cardinality recursive attempt metrics. No names or addresses.
+    pub diagnostics: bool,
     pub fallback: Fallback,
     pub warm: Warm,
     pub prefetch: Prefetch,
@@ -248,6 +333,8 @@ impl Default for Resolver {
             recursion_depth: 24,
             attempts: 2,
             upstream_timeout_ms: 2000,
+            local_zones: true,
+            diagnostics: false,
             fallback: Fallback::default(),
             warm: Warm::default(),
             prefetch: Prefetch::default(),
@@ -480,6 +567,8 @@ impl Config {
             &mut config.resolver.upstream_ca,
             &mut config.web.certificate,
             &mut config.web.private_key,
+            &mut config.web.oidc.client_secret_file,
+            &mut config.web.oidc.ca_file,
         ]
         .into_iter()
         .flatten()
@@ -721,6 +810,57 @@ impl Config {
         }) {
             return Err("web listener conflicts with another TCP listener".into());
         }
+        self.validate_oidc()
+    }
+
+    fn validate_oidc(&self) -> Result<(), String> {
+        let oidc = &self.web.oidc;
+        let claim_ok = |name: &str| {
+            (1..=64).contains(&name.len())
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b':' | b'.'))
+        };
+        if !oidc.enabled {
+            return Ok(());
+        }
+        if self.web.http.is_empty() && self.web.https.is_empty() {
+            return Err("web.oidc needs a web listener".into());
+        }
+        if !oidc_url_ok(&oidc.issuer) {
+            return Err("web.oidc.issuer must be an https URL (http only on loopback)".into());
+        }
+        if !oidc.redirect_url.is_empty()
+            && (!oidc_url_ok(&oidc.redirect_url)
+                || !oidc.redirect_url.ends_with(OIDC_CALLBACK_PATH))
+        {
+            return Err(format!(
+                "web.oidc.redirect_url, when set, must be an https URL ending in {OIDC_CALLBACK_PATH}"
+            ));
+        }
+        if oidc.client_id.is_empty()
+            || oidc.client_id.len() > 256
+            || oidc.client_id.chars().any(char::is_control)
+        {
+            return Err("web.oidc.client_id must be 1..=256 characters".into());
+        }
+        if oidc.label.trim().is_empty()
+            || oidc.label.chars().count() > 40
+            || oidc.label.chars().any(char::is_control)
+        {
+            return Err("web.oidc.label must be 1..=40 characters".into());
+        }
+        if !claim_ok(&oidc.username_claim) || !claim_ok(&oidc.groups_claim) {
+            return Err("web.oidc claim names must be 1..=64 simple characters".into());
+        }
+        if oidc.admin_group.as_ref().is_some_and(|group| {
+            group.is_empty() || group.len() > 256 || group.chars().any(char::is_control)
+        }) {
+            return Err("web.oidc.admin_group must be 1..=256 characters".into());
+        }
+        if oidc.sync_role && oidc.admin_group.is_none() {
+            return Err("web.oidc.sync_role needs web.oidc.admin_group".into());
+        }
         Ok(())
     }
 
@@ -743,6 +883,21 @@ impl Config {
         }
         self.validate_fallback()?;
         self.validate_acceleration()?;
+        if r.mode == Mode::Recursive {
+            let recursive_budget =
+                (u32::from(r.attempts) + u32::from(r.dnssec)).saturating_mul(r.upstream_timeout_ms);
+            let available = if r.fallback.enabled {
+                r.fallback.recursive_timeout_ms
+            } else {
+                self.limits.query_timeout_ms
+            };
+            if recursive_budget > available {
+                return Err(
+                    "recursive attempts plus DNSSEC recovery must fit the recursive deadline"
+                        .into(),
+                );
+            }
+        }
         if r.upstream_ca.is_some()
             && !r
                 .upstreams
@@ -1194,6 +1349,8 @@ mod tests {
     fn warm_and_prefetch_are_off_by_default_and_bounded() {
         let mut config: Config = toml::from_str("schema_version = 1").unwrap();
         assert!(!config.resolver.warm.enabled && !config.resolver.prefetch.enabled);
+        assert!(config.resolver.local_zones);
+        assert!(!config.resolver.diagnostics);
         assert_eq!(config.resolver.nameserver_cache_entries, 1024);
         config.validate().unwrap();
         let parsed: Config = toml::from_str(
@@ -1240,6 +1397,18 @@ mod tests {
         );
         assert!(
             toml::from_str::<Config>("schema_version = 1\n[resolver.warm]\nbogus = 1").is_err()
+        );
+        let local: Config = toml::from_str(
+            "schema_version = 1\n[resolver]\nlocal_zones = false\ndiagnostics = true\n",
+        )
+        .unwrap();
+        assert!(!local.resolver.local_zones && local.resolver.diagnostics);
+        let mut over_budget = Config::default();
+        over_budget.resolver.attempts = 5;
+        over_budget.resolver.upstream_timeout_ms = 2000;
+        assert!(
+            over_budget.validate().is_err(),
+            "retries leave time for recovery"
         );
     }
 
@@ -1452,5 +1621,69 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn oidc_config(extra: &str) -> Result<Config, String> {
+        Config::parse(
+            &format!(
+                "schema_version = 1\n[web]\nhttp = ['127.0.0.1:8080']\n[web.oidc]\nenabled = true\nissuer = 'https://id.example/application/o/lumen/'\nclient_id = 'lumen'\nredirect_url = 'https://dns.example/api/login/oidc/callback'\n{extra}"
+            ),
+            Path::new("/etc/lumen"),
+        )
+    }
+
+    #[test]
+    fn external_login_is_off_by_default_and_validated_when_on() {
+        let default = Config {
+            schema_version: 1,
+            ..Config::default()
+        };
+        assert!(!default.web.oidc.enabled);
+        default.validate().unwrap();
+
+        let config = oidc_config("client_secret_file = 'secret'\nca_file = '/ca.pem'\n").unwrap();
+        config.validate().unwrap();
+        // Relative files resolve beside the config file.
+        assert_eq!(
+            config.web.oidc.client_secret_file.as_deref(),
+            Some(Path::new("/etc/lumen/secret"))
+        );
+        assert_eq!(config.web.oidc.username_claim, "preferred_username");
+
+        for bad in [
+            "label = ''\n",
+            "username_claim = 'a b'\n",
+            "admin_group = ''\n",
+            "client_id = ''\n",
+            "unknown = 1\n",
+        ] {
+            let result = oidc_config(bad).and_then(|config| {
+                config.validate()?;
+                Ok(())
+            });
+            assert!(result.is_err(), "{bad}");
+        }
+        let mut config = oidc_config("").unwrap();
+        config.web.oidc.issuer = "http://id.example/".into();
+        assert!(config.validate().is_err(), "plain http to a remote issuer");
+        config.web.oidc.issuer = "http://127.0.0.1:9000/".into();
+        config.validate().unwrap();
+        config.web.oidc.issuer = "http://localhost.evil.example/".into();
+        assert!(config.validate().is_err());
+        config.web.oidc.issuer = "https://id.example/".into();
+        config.web.oidc.redirect_url = "https://dns.example/somewhere".into();
+        assert!(
+            config.validate().is_err(),
+            "an override needs the callback path"
+        );
+        config.web.oidc.redirect_url = String::new();
+        config.validate().unwrap();
+        config.web.oidc.redirect_url = "https://dns.example/api/login/oidc/callback".into();
+        config.web.oidc.sync_role = true;
+        assert!(config.validate().is_err(), "role sync needs a group");
+        config.web.oidc.admin_group = Some("lumen-admins".into());
+        config.validate().unwrap();
+        config.web.http.clear();
+        assert!(config.validate().is_err(), "needs a web listener");
     }
 }

@@ -364,8 +364,16 @@ fn source_ssrf_and_schema_guards() {
 
 #[tokio::test]
 async fn private_https_target_rejected_before_connect() {
-    assert!(fetch::download("https://127.0.0.1/list").await.is_err());
-    assert!(fetch::download("https://[::1]/list").await.is_err());
+    assert!(
+        fetch::download("https://127.0.0.1/list", &cache::Validators::default())
+            .await
+            .is_err()
+    );
+    assert!(
+        fetch::download("https://[::1]/list", &cache::Validators::default())
+            .await
+            .is_err()
+    );
 }
 
 #[test]
@@ -459,7 +467,22 @@ async fn https_import_verifies_tls_and_bounds_responses() {
         (b"HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1/secret\r\nContent-Length: 0\r\n\r\n".to_vec(), true, false),
         (b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n".to_vec(), true, false),
         (format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", MAX_LIST_BYTES + 1).into_bytes(), true, false),
-        (b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 0\r\n\r\n".to_vec(), true, false),
+        ({
+            use std::io::Write as _;
+            let mut encoder = flate2::write::GzEncoder::new(
+                Vec::new(),
+                flate2::Compression::default(),
+            );
+            encoder.write_all(b"ads.example").unwrap();
+            let body = encoder.finish().unwrap();
+            let mut response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .into_bytes();
+            response.extend(body);
+            response
+        }, true, true),
         (b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nads.example".to_vec(), false, false),
         ({ let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec(); response.extend_from_slice(format!("{:x}\r\n", MAX_LIST_BYTES + 1).as_bytes()); response.extend(vec![b'a'; MAX_LIST_BYTES + 1]); response.extend_from_slice(b"\r\n0\r\n\r\n"); response }, true, false),
     ];
@@ -497,20 +520,86 @@ async fn https_import_verifies_tls_and_bounds_responses() {
         // Local fixture bypasses only production URL/address admission; TLS stays verified.
         let url =
             reqwest::Url::parse(&format!("https://localhost:{}/list", address.port())).unwrap();
-        let result = fetch::read_response(&client, url).await;
+        let result = fetch::read_response(&client, url, &cache::Validators::default()).await;
         assert_eq!(result.is_ok(), success, "{result:?}");
         if success {
-            assert_eq!(
-                parse(&result.unwrap(), Format::Domains)
-                    .unwrap()
-                    .rules
-                    .len(),
-                1
-            );
+            let fetch::Download::Changed(bytes, _) = result.unwrap() else {
+                panic!("fixture returned 304");
+            };
+            assert_eq!(parse(&bytes, Format::Domains).unwrap().rules.len(), 1);
         }
         task.abort();
         let _ = task.await;
     }
+}
+
+#[tokio::test]
+async fn stale_download_uses_http_validators_and_accepts_not_modified() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let server_tls = rustls::ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert.der().clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der()).into(),
+        )
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut tls = tokio_rustls::TlsAcceptor::from(Arc::new(server_tls))
+            .accept(stream)
+            .await
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while request.len() < 4096 && !request.ends_with(b"\r\n\r\n") {
+            tls.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        tls.write_all(b"HTTP/1.1 304 Not Modified\r\nETag: \"v2\"\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        String::from_utf8(request).unwrap().to_ascii_lowercase()
+    });
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert.der().clone()).unwrap();
+    let tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let client = reqwest::Client::builder()
+        .tls_backend_preconfigured(tls)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve("localhost", address)
+        .build()
+        .unwrap();
+    let url = reqwest::Url::parse(&format!("https://localhost:{}/list", address.port())).unwrap();
+    let validators = cache::Validators {
+        etag: Some("\"v1\"".into()),
+        last_modified: Some("Wed, 11 Nov 2026 19:00:00 GMT".into()),
+    };
+    let fetch::Download::NotModified(next) = fetch::read_response(&client, url, &validators)
+        .await
+        .unwrap()
+    else {
+        panic!("fixture did not return not-modified");
+    };
+    assert_eq!(next.etag.as_deref(), Some("\"v2\""));
+    assert_eq!(
+        next.last_modified.as_deref(),
+        Some("Wed, 11 Nov 2026 19:00:00 GMT")
+    );
+    let request = task.await.unwrap();
+    assert!(request.contains("if-none-match: \"v1\""));
+    assert!(request.contains("if-modified-since: wed, 11 nov 2026 19:00:00 gmt"));
 }
 
 #[tokio::test]
@@ -695,8 +784,13 @@ async fn reloads_reuse_downloaded_lists_and_only_a_refresh_downloads_again() {
     );
 
     // Cached: the same list loads with no network at all.
-    cache::put(url, Format::Domains, cached("ads.example"));
-    cache::put(unused, Format::Domains, cached("old.example"));
+    cache::put(url, Format::Domains, cached("ads.example"), Instant::now());
+    cache::put(
+        unused,
+        Format::Domains,
+        cached("old.example"),
+        Instant::now(),
+    );
     let config = Config {
         lists: vec![remote("ads", url, 86400)],
         ..Config::default()
@@ -725,7 +819,7 @@ async fn reloads_reuse_downloaded_lists_and_only_a_refresh_downloads_again() {
     assert!(cache::get(url, Format::Hosts, None).is_none());
 
     // A refresh always downloads again, fails here, and keeps the live rules.
-    cache::put(url, Format::Domains, cached("ads.example"));
+    cache::put(url, Format::Domains, cached("ads.example"), Instant::now());
     let live = Filter::load(config).await.unwrap();
     assert!(live.refresh().await.is_err());
     assert!(live.explain("ads.example", ip(), 0).blocked);
@@ -735,4 +829,40 @@ async fn reloads_reuse_downloaded_lists_and_only_a_refresh_downloads_again() {
     second.inherit_metrics(&live);
     assert_eq!(second.metrics.blocked.load(Ordering::Relaxed), 7);
     assert!(!second.decision_log());
+
+    // Managed mode can reuse a raw body after restart without storing its URL in a filename or
+    // header. A zero refresh interval still exposes the validators for a conditional request.
+    let directory = tempfile::tempdir().unwrap();
+    cache::configure_disk(directory.path()).unwrap();
+    let secret_url = "https://downloads.invalid/private.txt?token=do-not-store";
+    let validators = cache::Validators {
+        etag: Some("\"v1\"".into()),
+        last_modified: Some("Wed, 11 Nov 2026 19:00:00 GMT".into()),
+    };
+    cache::disk_put(
+        secret_url,
+        Format::Domains,
+        b"disk.example\n",
+        validators.clone(),
+    )
+    .unwrap();
+    let hit = cache::disk_get(secret_url, Format::Domains, Some(Duration::from_secs(60))).unwrap();
+    assert!(hit.fresh);
+    assert_eq!(hit.bytes, b"disk.example\n");
+    assert_eq!(hit.validators, validators);
+    assert!(
+        !cache::disk_get(secret_url, Format::Domains, Some(Duration::ZERO))
+            .unwrap()
+            .fresh
+    );
+    let stored = std::fs::read(
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path(),
+    )
+    .unwrap();
+    assert!(!stored.windows(5).any(|part| part == b"token"));
 }

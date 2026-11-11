@@ -36,7 +36,7 @@ New to the ideas? Read [Concepts](docs/getting-started/concepts.md) for a plain-
 | 🛡️ **Filters per device** | Block ads, trackers, or categories globally, or with different rules and schedules for each device. |
 | 🖥️ **Easy to manage** | A built-in web console and a `lumenctl` command-line tool, with safe reloads that roll back on failure. |
 | 📊 **Visible** | Opt-in aggregate metrics for Prometheus, Grafana, and Home Assistant. |
-| 🪶 **Small** | An idle Lumen uses about 9 MiB of memory. |
+| 🪶 **Small** | An idle Lumen uses about 8 MiB of memory (about 11 MiB with the web console), and answers cached or blocked names in about 0.03 ms. |
 
 ## Features
 
@@ -49,13 +49,13 @@ New to the ideas? Read [Concepts](docs/getting-started/concepts.md) for a plain-
 | **Timeout fallback** | Optional forwarding **only** after a recursive timeout, never for DNSSEC failures or normal answers |
 | **Filtering** | Allow and block rules, hosts, domain, and Adblock-style lists, one-click popular lists, and configurable block replies |
 | **Per-client policy** | Device, subnet, group, profile, category, and UTC-scheduled rules, with explainable decisions |
-| **Web console** | First-run setup, accounts and roles, optional two-step verification, live overview, filtering, devices, and DNS settings, in [English, German, Italian, Spanish, and Dutch](docs/guides/translations.md) |
+| **Web console** | First-run setup, one Users page for accounts and roles, optional two-step verification and optional, experimental single sign-on (OpenID Connect), live overview, filtering, devices, and DNS settings, in [English, German, Italian, Spanish, and Dutch](docs/guides/translations.md) |
 | **Query history** | Opt-in. Recent lookups in memory, or saved for 1 to 90 days, anonymous or with the device, with search and one-click deletion |
 | **Operations** | Validated TOML config, optional SQLite state, staged reloads with rollback, audit log, and signed webhooks |
 
 ## Quick start
 
-To build from source you need Rust 1.88 or newer; a release download needs nothing. By default Lumen listens only on **loopback port 5353**, validates DNSSEC, and uses no outside provider.
+To build from source you need Rust 1.89 or newer; a release download needs nothing. By default Lumen listens only on **loopback port 5353**, validates DNSSEC, and uses no outside provider.
 
 ```sh
 git clone https://github.com/StruktSource/lumen-dns.git
@@ -116,11 +116,11 @@ Lumen is a Rust workspace with a single shared resolver pipeline and deliberatel
 
 ## Project status
 
-**Implemented:** recursive and forwarding DNS, five transports, DNSSEC, per-device filtering, managed mode, the web console in five languages, opt-in query history, an authenticated API, metrics, and deployment files for six platforms.
+**Implemented:** recursive and forwarding DNS, five transports, DNSSEC, per-device filtering, managed mode, the web console in five languages, opt-in query history, optional single sign-on, an authenticated API, metrics, and deployment files for six platforms.
 
 **Still ahead:** certificate and trust-anchor automation, split DNS and local records, high availability, more interoperability and soak testing, real-hardware validation, and independent security review. These are **roadmap items, not current capabilities**.
 
-See the [roadmap](docs/project/roadmap.md), the [verification record](docs/project/verification.md), and [performance notes](docs/project/performance.md). There is no verified production throughput or latency claim yet.
+See the [roadmap](docs/project/roadmap.md), the [verification record](docs/project/verification.md), and [performance notes](docs/project/performance.md). Measured idle memory and loopback latency are recorded there; there is no verified production throughput claim yet.
 
 ## Documentation
 

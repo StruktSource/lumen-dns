@@ -71,7 +71,11 @@ Good to know:
 
 ### Online source requirements
 
-Downloads must use HTTPS on port 443 with a valid public-root certificate. Lumen rejects credentials, fragments, redirects, proxies, compressed bodies, non-200 responses, and private or special-use target addresses. Lookups are pinned to the connection to resist DNS rebinding. Error messages never print URL credentials or tokens.
+Downloads must use HTTPS on port 443 with a valid public-root certificate. Lumen rejects credentials, fragments, redirects, proxies, non-200 responses (other than 304 Not Modified), and private or special-use target addresses. Lookups are pinned to the connection to resist DNS rebinding. Error messages never print URL credentials or tokens.
+
+**Lighter downloads.** Lumen asks for compressed transfer (gzip, Brotli, deflate, or zstd) and the 64 MiB limit applies to the **decompressed** list. It remembers each list's `ETag` and `Last-Modified` and sends them back as `If-None-Match` and `If-Modified-Since`, so an unchanged list costs a `304` instead of a full download.
+
+**Disk cache (managed mode).** With `--state`, downloaded lists are also kept in a `filter-cache` folder beside the state database (Unix mode `0700`, files `0600`; at most 128 lists and 512 MiB). After a restart a list that is still inside its `refresh_secs` is read from disk instead of downloaded, and an older one is revalidated with a `304` request. The cache holds public list text only, never credentials, and a damaged or oversized file is ignored and downloaded again. Without `--state` nothing is written to disk.
 
 The host's DNS is used to find list servers, so make sure it works **before** Lumen starts. Do not rely only on Lumen to resolve its own list hosts.
 
@@ -171,7 +175,7 @@ Synthetic answers have a TTL of zero, no DNSSEC flag or signatures, and are neve
 
 - `refresh_secs` defaults to 86400. Use 60 to 604800, or `0` to disable periodic refresh for a source.
 - Every 30 seconds Lumen checks which sources are due, fetches and parses them all, checks the combined rule budget, builds a candidate, then publishes one snapshot. **Queries see either the old or the new generation, never a mix.** Any failure keeps the whole live generation, and a failed source waits for its next interval.
-- Only **one** previous generation is kept, in memory. Restarting reloads the configured sources, and rollback never edits source files.
+- Only **one** previous generation is kept, in memory. Restarting reloads the configured sources (from the disk cache in managed mode when still fresh), and rollback never edits source files.
 
 Ways to trigger a refresh or rollback:
 

@@ -65,6 +65,10 @@ All metrics use stable `lumen_dns_` names (and `lumen_filter_` for filtering) wi
 **About the histograms**
 
 - The two recursion histograms have 11 fixed buckets from 1 ms to 5 s.
+- With `resolver.diagnostics = true`, four extra counters show recursive walk attempts,
+  timeout retries, timeouts, and other failures, plus
+  `lumen_dns_recursive_attempt_duration_seconds`. These series have fixed cardinality and no
+  query names, authority addresses, or client labels. They are hidden while diagnostics are off.
 - The client histogram includes cache hits, so its sub-millisecond bucket roughly tracks your cache hit ratio. Priming and refresh traffic is excluded because it is counted in the background histogram.
 
 ## Logs and privacy

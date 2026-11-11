@@ -2,7 +2,7 @@
 //! Service lifecycle, resource admission, and aggregate metrics.
 
 mod transport;
-pub use lumen_filter::{Filter, activity};
+pub use lumen_filter::{Filter, activity, configure_download_cache};
 pub use lumen_resolver::Transport;
 pub use transport::{ConsoleOptions, RunningServer};
 
@@ -480,6 +480,10 @@ impl lumen_web::Host for Service {
 
     fn take_unsaved_history(&self) -> Vec<lumen_web::QueryRecord> {
         std::mem::take(&mut *self.unsaved.lock().expect("unsaved lock"))
+    }
+
+    fn oidc(&self) -> Option<lumen_config::Oidc> {
+        Some(self.config.web.oidc.clone()).filter(|oidc| oidc.enabled)
     }
 }
 

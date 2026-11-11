@@ -13,7 +13,7 @@ Everyday checks (format, Clippy with warnings denied, and offline tests with the
 
 ```sh
 ./scripts/dev.sh check
-cargo +1.88.0 check --workspace --all-targets --locked    # minimum Rust version
+cargo +1.89.0 check --workspace --all-targets --locked    # minimum Rust version
 cargo build --workspace --release --locked
 cargo audit
 cargo audit --file fuzz/Cargo.lock
@@ -196,3 +196,134 @@ All three answered before the deadline. This is a dated smoke check, not a laten
 - Automatic trust-anchor rollover, signed images, reproducible releases, and **independent security review**
 
 See the [roadmap](roadmap.md) for how these are tracked.
+
+## 2026-11-11 — v0.6.0 audit and transport budgets
+
+Local macOS ARM64 checks pass:
+
+- `./scripts/dev.sh check`: formatting, locked all-target workspace Clippy with
+  `-D warnings`, 116 tests and all doc tests.
+- `cargo test --locked -p lumen-filter`: 17 tests and doc tests.
+- `cargo test -p lumen-resolver -p lumen-core --locked`: 36 tests; the final full
+  workspace run also includes the added signed encrypted DNSSEC policy cases.
+- `cargo check --workspace --all-targets --locked` and
+  `cargo +1.88.0 check --workspace --all-targets --locked`.
+- `cargo build --release --locked --workspace` with portable ThinLTO.
+- `cargo run --locked --bin lumen -- --config FILE --check` for
+  `config/lumen.toml`, `config/forward.example.toml`, `config/filtering.example.toml`.
+- `python3 scripts/verify-release.py --version v0.6.0`, changed Markdown local-link
+  checks, and `git diff --check`.
+
+Controlled loopback fixtures verify silent TLS to successful DoH, failed TLS to
+successful DoH, usable time for later transports, a bounded all-silent provider with
+configured attempts=2, 12 concurrent queries, cancellation/shutdown socket cleanup,
+plaintext rejection, and final signed positive/negative/DNSSEC-bogus results without
+contacting a second encrypted transport. Existing ranked/fastest/round-robin/race
+strategy tests pass. No public DNS is needed. TLS is used to model controlled silence;
+live firewall-dropped QUIC, long-running leak/soak tests and non-macOS runtime behavior
+for these changes remain unverified locally.
+
+Before this work PR #34 head `d53e71f` had a failing dependency audit:
+`libsqlite3-sys 0.38.2`, RUSTSEC-2026-0459 (upgrade requires >=0.39.0).
+Other jobs in CI run 43047695110 passed. This pre-existing dependency issue was not
+silenced by the resolver work; see the SQLite follow-up below for its later fix. Copilot reported insufficient review quota; no approval
+was recorded. No new local security scan was run, per project instructions.
+
+Hosted checks for the updated head remain pending. No throughput, cold-recursion
+latency, native CPU, or platform-wide release-validation claim is made by this audit.
+
+## 2026-11-11 — SQLite dependency follow-up
+
+Updated `rusqlite` 0.40.2 to 0.41.1 and bundled `libsqlite3-sys` 0.38.2 to 0.39.1
+for RUSTSEC-2026-0459. Retained `bundled` and `fallible_uint`; no store schema or
+SQL changes. Minimum Rust is now 1.89, matching rusqlite's upstream requirement;
+CI and source-build docs use the same version.
+
+`cargo audit` and `cargo audit --file fuzz/Cargo.lock` pass. Fuzz locked metadata
+passes unchanged because its dependency graph does not contain rusqlite/SQLite.
+All jobs other than the dependency audit passed on prior head `39db41a`, including
+six native targets, both OCI runtime jobs, Kubernetes/Helm, Podman, fuzz and MSRV.
+The updated dependency still needs a fresh hosted CI run before release claims.
+
+Local follow-up checks pass: `./scripts/dev.sh check` (116 tests/doc tests, format,
+Clippy with denied warnings), `cargo +1.89.0 check --workspace --all-targets --locked`,
+`cargo build --release --locked --workspace`, all three shipped config checks,
+`python3 scripts/verify-release.py --version v0.6.0`, and `git diff --check`.
+
+## 2026-11-11 — bounded recursion and local-only zones
+
+Controlled local resolver fixtures cover a silent first recursive walk followed by a
+successful second walk, the per-attempt and total elapsed bounds, cache-backed iterative
+delegation, and cancellation cleanup. Only timeouts retry; existing negative-answer and
+DNSSEC-failure policy stays final. The SOA/NS unsigned-zone recovery loop now has one shared
+attempt-sized deadline.
+
+Local-zone unit tests cover authoritative apex SOA and NS, NXDOMAIN with SOA for names below
+empty zones, NODATA for resolver discovery, the `home.arpa` DS+DO public-proof exception,
+`.local` leak prevention, private/shared IPv4 reverse zones, local IPv6 reverse zones, and
+`service.arpa`. Public `8.8.8.8.in-addr.arpa` and `ipv4only.arpa` are shown to bypass local
+handling. These tests use no public DNS.
+
+`cargo test -p lumen-resolver -p lumen-config --locked` passes 41 tests and doc tests.
+`./scripts/dev.sh check` passes format, locked all-target Clippy with denied warnings, 119
+workspace tests, and all doc tests. Rust 1.89 locked all-target workspace check, portable
+release workspace build, all three shipped config checks, JavaScript syntax checks, and
+`scripts/verify-release.py --version v0.6.0` also pass. Hosted cross-platform results remain
+pending. No statistically significant public cold-query gain or exact per-authority timing is
+claimed.
+
+## 2026-11-11 — list download revalidation and disk cache
+
+`./scripts/dev.sh check` (format, Clippy with warnings denied, locked workspace tests, doc
+tests) passed on macOS ARM64. `lumen-filter` tests cover a gzip-compressed list download
+(decoded, within the size limit), a stale list revalidated with `If-None-Match` /
+`If-Modified-Since` that accepts `304 Not Modified`, and the disk cache: restart reuse inside
+the refresh interval, a kept stale body for revalidation, separate entries per format,
+validators stripped of control characters, damaged, truncated and bad-header files ignored and
+removed, oversized lists refused, and the 128-entry cap. Not covered: the 512 MiB byte cap,
+a decompression bomb, Windows file-permission behavior of the cache folder (Unix modes only),
+a live public list server, and disk-full behavior.
+
+## 2026-11-11 — optional external login (OpenID Connect)
+
+> Later change: `redirect_url` became an optional override. By default the callback address is built from the `Host` header and `X-Forwarded-Proto` of each request, and the token request repeats the address the sign-in started with. Tests cover `orb.local`-style names, IPv4 with a port, bracketed IPv6, `X-Forwarded-Proto`, rejected `Host` values (slash, space, `@`, `?`), the override, and the setup and settings forms showing it read-only. Behind a real reverse proxy this is untested.
+
+
+Unit and console tests run the whole flow against a standards-shaped provider on loopback:
+discovery, redirect with PKCE (S256), state bound to the browser by a `Lax` cookie, single-use
+state, direct code exchange, and rejection of a wrong issuer, audience, `azp`, expiry, future
+issue time, nonce, missing subject, and a replayed callback. They also show the feature is off
+by default, a failed attempt sets no session, an admin-group member starts as an administrator
+and the role never changes on later sign-ins, a provider name that matches the local `anna` gets
+a separate account, identities go away with their account, and waiting sign-ins and discovery
+bodies are bounded. Config validation covers URL, callback path, claim and label limits.
+Not verified: live Authentik, Authelia, Pocket ID, Octelium, or Keycloak servers; a provider
+behind a private CA; TLS to a real provider; behavior behind a reverse proxy that rewrites the
+host. The ID token signature is deliberately not checked (see the guide).
+
+### External login follow-up: linking, role sync, single logout, setup step
+
+Console tests cover the whole story against the loopback provider: a signed-in person links an
+account (CSRF required, one link per account and per identity, the callback needs no session
+cookie), a later provider sign-in reaches that same account without creating another, group
+membership promotes it with `sync_role`, losing the group demotes it, the last administrator is
+never demoted, and without `sync_role` the role is left alone. Single logout returns the
+provider's logout address only for sessions that carry the marker cookie; password sign-ins do
+not. Unlinking needs the right password. The setup step rejects non-HTTPS issuers, a missing
+client ID, a wrong callback path, and role sync without a group **before** creating the account,
+and stages a valid `[web.oidc]` for reload. Store tests cover link, unlink and the uniqueness
+rules. Not verified: browsers (the wizard step and account card were syntax-checked, not
+clicked through), live providers, providers that require `id_token_hint` for logout, and a
+reverse proxy that changes the host.
+
+### One Users page and the single sign-on settings form
+
+Console tests cover the new admin endpoints: saving `[web.oidc]` stages a new revision and
+queues a reload, invalid settings are refused, turning it off is always allowed, non-admins get
+403, `POST /api/oidc/test` answers in the body without saving, and the people list marks
+accounts tied to a provider identity. A provider check against the loopback provider never
+requests tokens. The pages were rendered in a headless DOM (jsdom) with stubbed data: all four
+Users tabs for an administrator, only *My account* for a user, both System tabs, the check and
+save buttons, and the guard that blocks saving while DNS settings are unapplied. Not verified:
+a real browser (layout, focus, keyboard use), a real provider, and a screen reader. The
+translations of the new strings were written by hand and not reviewed by native speakers.

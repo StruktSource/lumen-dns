@@ -6,6 +6,7 @@
 
 mod console;
 mod host;
+mod oidc;
 pub use console::Console;
 pub use host::{
     Counters, Explained, HistoryDetail, HistoryMode, HistorySettings, Host, ListInfo, QueryRecord,
@@ -72,11 +73,13 @@ const ASSETS: &[Asset] = &[
     asset!("/assets/js/view-overview.js", JS, "js/view-overview.js"),
     asset!("/assets/js/view-activity.js", JS, "js/view-activity.js"),
     asset!("/assets/js/view-devices.js", JS, "js/view-devices.js"),
+    asset!("/assets/js/view-modules.js", JS, "js/view-modules.js"),
+    asset!("/assets/js/view-trafficmap.js", JS, "js/view-trafficmap.js"),
     asset!("/assets/js/view-filtering.js", JS, "js/view-filtering.js"),
     asset!("/assets/js/view-dns.js", JS, "js/view-dns.js"),
-    asset!("/assets/js/view-access.js", JS, "js/view-access.js"),
+    asset!("/assets/js/view-users.js", JS, "js/view-users.js"),
+    asset!("/assets/js/view-console.js", JS, "js/view-console.js"),
     asset!("/assets/js/view-system.js", JS, "js/view-system.js"),
-    asset!("/assets/js/view-account.js", JS, "js/view-account.js"),
     asset!("/assets/js/activity-bar.js", JS, "js/activity-bar.js"),
     asset!("/assets/js/app.js", JS, "js/app.js"),
 ];
@@ -499,6 +502,7 @@ mod tests {
             certificate: None,
             private_key: None,
             max_connections: 4,
+            ..Web::default()
         }
     }
 
@@ -683,6 +687,7 @@ mod tests {
             certificate: Some(directory.path().join("cert.pem")),
             private_key: Some(directory.path().join("key.pem")),
             max_connections: 4,
+            ..Web::default()
         };
         let tls = tls_config(&config).unwrap();
         assert_eq!(tls.alpn_protocols, [b"h2".to_vec(), b"http/1.1".to_vec()]);

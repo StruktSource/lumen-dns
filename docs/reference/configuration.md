@@ -45,6 +45,7 @@ lumen --config FILE --check
 | `web.https` | Empty. When set, serves direct TLS 1.3 with HTTP/2 and HTTP/1.1 |
 | `web.certificate`, `web.private_key` | Required together when `web.https` is set |
 | `web.max_connections` | `64`. Shared web connection limit, 1 to 1024 |
+| `web.oidc` | Optional external console login, off by default: [External login](../guides/external-login.md) |
 | `listen` | Listener and client-access settings: [below](#listeners) |
 | `resolver` | Mode, cache, DNSSEC, and upstreams: [below](#resolver) |
 | `limits` | Shared admission and I/O limits: [below](#limits) |
@@ -78,9 +79,11 @@ lumen --config FILE --check
 | `upstreams` | `[]` | Up to 8 custom endpoints, which rank after any providers. In forward mode you need at least one provider or upstream. Rejected in recursive mode |
 | `providers` | `[]` | Up to 8 bundled provider selections, in rank order, each used once. They expand to at most 128 addresses together with the custom upstreams |
 | `strategy` | unset | Forward mode only: `failover`, `fastest`, `round_robin`, or `race`. Unset keeps the older behavior (`failover` for automatic transports, otherwise `fastest`). See [Upstream providers](../guides/upstream-providers.md#use-several-providers) |
-| `attempts` | `2` | 1 to 5 forwarding attempts |
-| `upstream_timeout_ms` | `2000` | 1 to 30000. Per-attempt forwarding timeout |
+| `attempts` | `2` | 1 to 5. Forwarding retries, or full recursive-walk attempts after a timeout |
+| `upstream_timeout_ms` | `2000` | 1 to 30000. Per-attempt forwarding or recursive-walk timeout |
 | `recursion_depth` | `24` | 1 to 64. Bounds recursive query and nameserver recursion |
+| `local_zones` | `true` | Serve registered local-only zones locally. Set `false` only when another local DNS path owns them |
+| `diagnostics` | `false` | Export extra fixed-cardinality recursive attempt counters and timing. Never includes names, server IPs, or clients |
 
 ### Caches
 
@@ -103,7 +106,9 @@ Capacities count **entries, not bytes of memory**. Record sizes, separate caches
 | `hedge_ms` | `0` (off) | `0` or 100 to 5000. Starts one extra recursion for lookups still unanswered after this long; the first usable answer wins. Measurements were inconclusive, see [Performance](../project/performance.md) |
 | `fallback` | Disabled | Timeout-only forwarding. See [`[resolver.fallback]`](#resolverfallback) |
 
-Recursive transport retries and timeouts use Hickory's bounded internal policy, and the outer query deadline applies to both modes. Recursive mode filters private, loopback, link-local, and other special-use authority addresses (Hickory's recommended server filters), and custom root hints do not disable that boundary. It never silently switches to a public forwarding resolver.
+Each recursive walk is capped by `upstream_timeout_ms`. Only a timeout can start another walk, up to `attempts`; DNS answers and DNSSEC failures stay final. The extra unsigned-zone SOA/NS recovery work shares one further attempt-sized budget. Configuration must fit those attempts and recovery inside the recursive deadline. Hickory still chooses and retries authorities inside each walk. The outer query deadline applies to both modes. Recursive mode filters private, loopback, link-local, and other special-use authority addresses (Hickory's recommended server filters), and custom root hints do not disable that boundary. It never silently switches to a public forwarding resolver.
+
+With `local_zones = true`, Lumen serves the current IANA IPv4 and IPv6 locally-served reverse zones, `home.arpa`, `resolver.arpa`, and `service.arpa` without public leakage. Empty-zone apex SOA/NS and negative replies follow RFC 6303. `home.arpa` DS queries with the DO bit still recurse for the public insecure-delegation proof. `resolver.arpa` returns NODATA because Lumen does not advertise a Designated Resolver. `.local` is stopped locally because it belongs to mDNS; Lumen does not bridge multicast DNS. Public reverse DNS and `ipv4only.arpa` are unchanged.
 
 ### `[resolver.fallback]`
 

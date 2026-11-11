@@ -47,16 +47,29 @@ L.loadRevisions = async () => { L.S.revisions = await L.api('GET', '/api/config/
 
 /* What each page needs before it can draw. The draft config is only (re)loaded when it is clean. */
 const NEEDS = {
-  overview: () => [L.loadStatus(), L.loadSeries(), L.can('admin') ? L.loadConfig() : null],
+  overview: () => [L.loadStatus(), L.loadSeries(), L.loadSettings(), L.can('admin') ? L.loadConfig() : null],
   activity: () => [L.loadStatus(), L.loadHistory()],
   filtering: () => [L.loadStatus(), L.loadDevices(), L.S.draft ? null : L.loadConfig()],
   devices: () => [L.loadDevices(), L.can('admin') ? (L.S.draft ? null : L.loadConfig()) : null],
   dns: () => [L.loadProviders(), L.S.draft ? null : L.loadConfig()],
-  access: () => [L.loadUsers(), L.loadSettings(), L.loadAudit(), L.S.draft ? null : L.loadConfig()],
-  system: () => [L.loadStatus(), L.loadRevisions(), L.S.draft ? null : L.loadConfig()],
-  account: () => [L.loadSettings()]
+  users: () => [L.loadSettings(), L.can('admin') ? L.loadUsers() : null, L.can('admin') ? L.loadAudit() : null, L.can('admin') && !L.S.draft ? L.loadConfig() : null],
+  system: () => [L.loadStatus(), L.loadRevisions(), L.loadSettings(), L.S.draft ? null : L.loadConfig()],
+  /* The map's code is only fetched, and its data only loaded, while the module is on and its page is open. */
+  trafficmap: () => [L.moduleOn('traffic-map') ? L.lazy('/assets/js/view-trafficmap.js').then(() => L.loadTraffic()) : null]
 };
-L.loadPage = async page => { await Promise.all((NEEDS[page] ? NEEDS[page]() : []).filter(Boolean)); };
+/* Load a script once, on demand. */
+const scripts = new Map();
+L.lazy = src => {
+  if (!scripts.has(src)) scripts.set(src, new Promise((ok, no) => {
+    const s = document.createElement('script'); s.src = src; s.onload = ok;
+    s.onerror = () => { scripts.delete(src); no(new Error('Could not load this part of the console.')); };
+    document.head.append(s);
+  }));
+  return scripts.get(src);
+};
+/* Modules load first: a module page decides from them whether it has anything to fetch. They change rarely, so a
+   recent answer is reused instead of asking on every page change. */
+L.loadPage = async page => { if (!L.S.modules || page === 'modules' || Date.now() - (L.S.modulesAt || 0) > 60000) await L.loadModules(); await Promise.all((NEEDS[page] ? NEEDS[page]() : []).filter(Boolean)); };
 
 /* Change the lists right away, with no draft and no Apply bar. `mutate(filtering)` edits a filtering
    section and returns a function that undoes the edit. It runs on the saved settings, so unsaved edits elsewhere

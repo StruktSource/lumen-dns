@@ -34,8 +34,8 @@ Get Lumen answering DNS questions on your own computer in a few minutes. By defa
 3. Unpack it and check the version:
 
    ```sh
-   tar -xzf lumen-v0.5.8-linux-amd64.tar.gz   # use the archive you downloaded
-   cd lumen-v0.5.8
+   tar -xzf lumen-v0.6.0-linux-amd64.tar.gz   # use the archive you downloaded
+   cd lumen-v0.6.0
    ./lumen --version
    ```
 
@@ -54,7 +54,7 @@ Continue with [Ask Lumen a question](#ask-lumen-a-question).
 
 ## Option B: build from source
 
-**You need:** Rust 1.88 or newer (stable is recommended; CI uses 1.95.0), Git, and optionally `dig` for testing.
+**You need:** Rust 1.89 or newer (stable is recommended; CI uses 1.95.0), Git, and optionally `dig` for testing.
 
 ```sh
 git clone https://github.com/StruktSource/lumen-dns.git
@@ -95,7 +95,9 @@ Start Lumen in [managed mode](../guides/managed-mode.md) by adding a state file,
 ./lumen --config config/lumen.toml --state ./data/state.db
 ```
 
-A guided setup creates your administrator account and, optionally, installs starter block lists. See the [Web console](../guides/web-console.md).
+A guided setup creates your administrator account and, optionally, connects an identity provider and installs starter block lists. See the [Web console](../guides/web-console.md).
+
+Afterwards, open **Users** in the sidebar. Under **My account**, turn on two-step verification. As an administrator, **People** manages accounts and **Sign-in** is where you can switch on [single sign-on](../guides/external-login.md) with Authentik, Authelia, Pocket ID, or another OpenID Connect provider.
 
 ### Try filtering
 

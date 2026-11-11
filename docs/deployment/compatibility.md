@@ -67,6 +67,11 @@ at the status shown above, and nothing here should be read as tested.
   from CI.
 - **Long-running and failure behavior**: crash, power-loss, and native Windows
   service-control behavior are unverified.
+- **Block-list disk cache on Windows**: the cache folder's owner-only permissions are
+  applied on Unix only; Windows relies on the state directory's own access rules.
+- **External login**: only a local test provider has been used. Authentik, Authelia,
+  Pocket ID, Octelium, and Keycloak installations, and the console in real browsers and
+  screen readers, have not been tried.
 - **Client-IP preservation**: behind Kubernetes load balancers and NAT it
   depends on the cluster network and is not tested.
 

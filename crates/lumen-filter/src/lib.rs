@@ -14,6 +14,7 @@ use rules::{ParsedList, Rule, domain_hash};
 use std::{
     collections::HashMap,
     net::IpAddr,
+    path::Path,
     sync::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -21,6 +22,14 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
+
+/// Keep downloaded list bodies beside managed state for restart reuse and HTTP revalidation.
+///
+/// # Errors
+/// Returns an error when the directory cannot be created or restricted.
+pub fn configure_download_cache(path: &Path) -> Result<(), String> {
+    cache::configure_disk(path)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Decision {
@@ -182,16 +191,18 @@ impl Snapshot {
                     if key.exact() && suffix != name {
                         continue;
                     }
-                    let hit = Hit {
-                        domain: suffix.to_owned(),
-                        exact: key.exact(),
-                        allow: key.allow(),
-                        list: Some(list),
-                    };
-                    if key.allow() {
-                        return Some(hit);
-                    }
-                    if blocked.is_none() {
+                    // Keep looking for an allow, but do not allocate another domain for a
+                    // block that cannot replace the most-specific match already found.
+                    if key.allow() || blocked.is_none() {
+                        let hit = Hit {
+                            domain: suffix.to_owned(),
+                            exact: key.exact(),
+                            allow: key.allow(),
+                            list: Some(list),
+                        };
+                        if key.allow() {
+                            return Some(hit);
+                        }
                         blocked = Some(hit);
                     }
                 }
@@ -633,17 +644,22 @@ async fn load_list(
         }
     }
     activity::state(&id, "downloading");
-    let work = activity::scope(&id, load_list_inner(source));
+    let work = activity::scope(&id, load_list_inner(source, use_cache));
     let result = tokio::select! {
         result = work => result,
         () = activity::cancelled() => Err(CANCELLED.to_owned()),
     };
     match result {
-        Ok(parsed) => {
-            activity::ready(&id, parsed.rules.len());
-            let list = Arc::new(parsed);
+        Ok(loaded) => {
+            activity::ready(&id, loaded.parsed.rules.len());
+            let list = Arc::new(loaded.parsed);
             let fetched = match &source.url {
-                Some(url) => cache::put(url, source.format, Arc::clone(&list)),
+                Some(url) => cache::put(
+                    url,
+                    source.format,
+                    Arc::clone(&list),
+                    loaded.fetched.unwrap_or_else(Instant::now),
+                ),
                 None => Instant::now(),
             };
             Ok((list, fetched))
@@ -654,13 +670,47 @@ async fn load_list(
         }
     }
 }
-async fn load_list_inner(source: &config::List) -> Result<ParsedList, String> {
+
+struct LoadedList {
+    parsed: ParsedList,
+    fetched: Option<Instant>,
+}
+
+async fn load_list_inner(source: &config::List, use_cache: bool) -> Result<LoadedList, String> {
     let source = source.clone();
-    let bytes = if let Some(url) = &source.url {
-        fetch::download(url).await?
+    let (bytes, fetched) = if let Some(url) = &source.url {
+        let disk_url = url.clone();
+        let format = source.format;
+        let max_age = (use_cache && source.refresh_secs != 0)
+            .then(|| Duration::from_secs(u64::from(source.refresh_secs)));
+        let disk = tokio::task::spawn_blocking(move || cache::disk_get(&disk_url, format, max_age))
+            .await
+            .map_err(|_| "filter disk cache reader stopped")?;
+        if let Some(hit) = disk.as_ref().filter(|hit| use_cache && hit.fresh) {
+            (hit.bytes.clone(), Some(hit.fetched))
+        } else {
+            let validators = disk
+                .as_ref()
+                .map_or_else(cache::Validators::default, |hit| hit.validators.clone());
+            let (bytes, validators) = match fetch::download(url, &validators).await? {
+                fetch::Download::Changed(bytes, validators) => (bytes, validators),
+                fetch::Download::NotModified(validators) => (
+                    disk.ok_or("list answered 304 without a cached body")?.bytes,
+                    validators,
+                ),
+            };
+            let disk_url = url.clone();
+            let disk_bytes = bytes.clone();
+            tokio::task::spawn_blocking(move || {
+                cache::disk_put(&disk_url, format, &disk_bytes, validators)
+            })
+            .await
+            .map_err(|_| "filter disk cache writer stopped")??;
+            (bytes, Some(Instant::now()))
+        }
     } else {
         let source = source.clone();
-        tokio::task::spawn_blocking(move || {
+        let bytes = tokio::task::spawn_blocking(move || {
             use std::io::Read;
             if let Some(path) = &source.path {
                 if !std::fs::metadata(path)
@@ -681,12 +731,14 @@ async fn load_list_inner(source: &config::List) -> Result<ParsedList, String> {
             }
         })
         .await
-        .map_err(|_| "filter file reader stopped")??
+        .map_err(|_| "filter file reader stopped")??;
+        (bytes, None)
     };
     activity::state(&source.id, "parsing");
-    tokio::task::spawn_blocking(move || rules::parse(&bytes, source.format))
+    let parsed = tokio::task::spawn_blocking(move || rules::parse(&bytes, source.format))
         .await
-        .map_err(|_| "filter parser stopped")?
+        .map_err(|_| "filter parser stopped")??;
+    Ok(LoadedList { parsed, fetched })
 }
 
 #[cfg(test)]

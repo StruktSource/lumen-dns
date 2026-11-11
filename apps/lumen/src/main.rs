@@ -3,7 +3,7 @@
 
 use lumen_api::RunningApi;
 use lumen_config::Config;
-use lumen_core::{ConsoleOptions, Filter, RunningServer, activity};
+use lumen_core::{ConsoleOptions, Filter, RunningServer, activity, configure_download_cache};
 use lumen_store::{Command as ControlCommand, Store};
 use std::sync::Arc;
 use std::{
@@ -131,6 +131,11 @@ async fn main() -> io::Result<()> {
 
 #[allow(clippy::too_many_lines)] // Keep managed DNS/API rollback in one state machine.
 async fn run_managed(config_path: &Path, state_path: &Path) -> io::Result<()> {
+    let cache_path = state_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("filter-cache");
+    configure_download_cache(&cache_path).map_err(io::Error::other)?;
     let mut store = Store::open(state_path).map_err(io::Error::other)?;
     if store.config().map_err(io::Error::other)?.is_none() {
         let bytes = lumen_config::read_bounded(config_path, 65536).map_err(io::Error::other)?;

@@ -2,7 +2,7 @@
 
 Where Lumen is today and where it is going. This page replaces the former separate *progress*, *TODO*, and *product plan* documents.
 
-_Last updated 2026-11-09 for version 0.5.9._
+_Last updated 2026-11-11 for version 0.6.0._
 
 > [!IMPORTANT]
 > Lumen is **pre-release**. A checked box means *implemented, documented, and covered by the checks in the [verification record](verification.md)*. It does **not** mean production-ready, and unrun platform checks or planned features are never marked as shipped.
@@ -21,6 +21,7 @@ _Last updated 2026-11-09 for version 0.5.9._
 - Privacy-safe Prometheus metrics, a Grafana dashboard, and Home Assistant examples
 - Block lists that install in the background without restarting anything, are never downloaded twice by accident, and can be cancelled
 - Forward mode with up to 8 ranked providers and a choice of ranked fallback, fastest first, round-robin, or race
+- Optional external console login through OpenID Connect providers (off by default)
 - Native packages for six platforms and container images for `linux/amd64` and `linux/arm64`
 
 **Still ahead**
@@ -53,7 +54,7 @@ Principles that shape every decision:
 
 ### Foundation
 
-- [x] Rust workspace, Apache-2.0, SemVer (currently `0.5.9`)
+- [x] Rust workspace, Apache-2.0, SemVer (currently `0.6.0`)
 - [x] README, contributor guide, security policy, and code of conduct
 - [x] Architecture, threat model, privacy defaults, and protocol scope
 - [x] CI for Linux, macOS, Windows, lint, tests, and the minimum Rust version
@@ -152,7 +153,7 @@ Each item has to keep Lumen's defaults intact: private, bounded, and explicit op
 
 - [x] The web console in English (default), German, Italian, Spanish, and Dutch
 - [x] A translation framework: message catalogs keyed by the English text, a per-browser choice, a console default for administrators, a browser-language fallback, and locale-aware numbers
-- [x] A language step in the setup wizard, and language settings under My account and Users & access
+- [x] A language step in the setup wizard, and language settings under Users → My account and System → Console
 - [x] A documented way to add or improve a translation, with tests that keep the catalogs complete and current ([Languages and translations](../guides/translations.md))
 - [ ] Translate the remaining long help texts on the DNS settings and Filtering pages
 - [ ] More languages
@@ -164,31 +165,34 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### High priority: do next
 
-1. **Transport failover when a provider's first transport is silent.** A blocked QUIC port can stall a whole provider today, because the forwarding library gives one query a single deadline. Needs a per-transport budget. See [Upstream providers](../guides/upstream-providers.md#how-failover-works).
+1. **Logic-led cleanup and optimization (v0.6.0).** Completed with local checks; selected changes and verification are in [the audit](optimization-audit.md) and [verification](verification.md). Implemented and checked: response ownership transfer, discarded filter-match allocation removal, and portable ThinLTO. Large I/O, allocator, arena, tree and parser rewrites are rejected or deferred with reasons.
+2. **Silent first encrypted transport failover (v0.6.0).** Implement bounded per-transport shares inside the provider deadline, preserve final DNS/DNSSEC results and encrypted-only policy. Local checks pass; cross-platform hosted CI remains pending. See [provider behavior](../guides/upstream-providers.md#how-failover-works).
+3. **Cold recursive DNSSEC latency diagnosis and recovery (v0.6.0 bounded work complete).** Each full walk now has a Lumen attempt budget; only timeouts retry, and attempts plus the one DNSSEC recovery budget must fit the outer deadline. The extra SOA/NS ancestor scan shares one budget instead of multiplying waits. Opt-in fixed-cardinality attempt metrics expose timing, timeout, retry, and failure counts without names or addresses. A local fixture proves a silent first walk times out and the next walk can finish. Usable and authenticated negative answers and DNSSEC failures remain final. **Still open:** Hickory 0.26.3 does not expose privacy-safe per-authority timing through its stable recursor API, so exact authority-hop attribution and a statistically significant public-network latency gain are not claimed.
+4. **Local-only DNS names (v0.6.0 complete).** Default-on, operator-disableable local answering covers the current IANA RFC 6303/RFC 7793 reverse registry, `home.arpa`, `resolver.arpa`, `service.arpa`, and `.local` leak prevention. Empty zones return authoritative SOA/NS/NXDOMAIN/NODATA, the DNSSEC `home.arpa` DS exception still gets the public proof, and DDR returns local NODATA. Tests prove public reverse DNS and `ipv4only.arpa` are not blanket-blocked. Lumen does not bridge mDNS or yet provide per-zone conditional forwarding. See [resolver behavior](../guides/resolver-modes.md#cold-recursion-and-local-names).
 
 ### Medium priority: soon
 
-2. **CSS themes** for the console.
-3. **Finish the translations:** the remaining long help texts, and more languages.
+5. **Optional external login: done in 0.6.0** ([guide](../guides/external-login.md)). Authorization code with PKCE for any OpenID Connect provider, off by default, built-in login kept. Includes linking an existing account, optional group-to-role sync, optional single logout, and a setup-wizard step. **Experimental.** Not yet checked against live Authentik, Authelia, Pocket ID, or Octelium installations; back-channel logout and per-group roles beyond one admin group are not built.
+6. **CSS themes** for the console.
+7. **Finish the translations:** the remaining long help texts, and more languages.
 
 ### Lower priority: later
 
-4. **Faster, lighter list downloads.** Ideas, roughly in order of payoff: conditional requests (`ETag` / `If-Modified-Since`) so an unchanged list costs almost nothing; downloading several lists at once with a bound; asking for compressed transfer; keeping downloaded lists on disk so a restart does not fetch them again; and delta updates for very large lists. Lists already stay in memory across reloads, so changing settings no longer downloads them again.
-5. **Weighted random load balancing** across providers (spreading by recent speed rather than evenly), as some filter apps offer. Round-robin and fastest-first cover most of it today.
+6. **Faster, lighter list downloads (partly done in 0.6.0).** Done: conditional requests (`ETag` / `Last-Modified`), compressed transfer, and a bounded disk cache in managed mode so a restart does not fetch fresh lists again. Still open: downloading several lists at once with a bound, and delta updates for very large lists.
+7. **Weighted random load balancing** across providers (spreading by recent speed rather than evenly), as some filter apps offer. Round-robin and fastest-first cover most of it today.
 
-6. **Trust-anchor rollover automation and certificate lifecycle tooling.**
-7. **Split DNS, local records, and conditional forwarding.**
-8. **Recursion speed evidence:** a statistically significant cold-query result and an expiry-refresh benchmark (see [Recursion speed](#recursion-speed-issue-9)).
+8. **Trust-anchor rollover automation and certificate lifecycle tooling.**
+9. **Split DNS, local records, and conditional forwarding.**
 
 ### Large efforts, before or after 1.0
 
-9. **Independent security review.** Required before a stable release.
-10. **High availability and cluster configuration replication.**
-11. **Optional DNS threat feeds and enterprise policy features.**
+10. **Independent security review.** Required before a stable release.
+11. **High availability and cluster configuration replication.**
+12. **Optional DNS threat feeds and enterprise policy features.**
 
 ### Not now
 
-12. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
+13. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
 
 ## Side projects
 
@@ -202,12 +206,12 @@ Important work that does not add a feature. It can be done in any order and by a
 
 ## Recursion speed (Issue #9)
 
-Implemented and partly measured.
+Implemented.
 
 - [x] Reproducible A/B benchmark with trial-level statistics (`scripts/recursion_bench.py`)
 - [x] Shared in-flight recursion, startup priming, opt-in expiry refresh and hedging, and latency metrics
-- [ ] Show a statistically significant public-network cold single-query gain. The first 12-trial run was **not** significant; a deterministic local test does prove that priming reduces authority round trips and latency
-- [ ] Benchmark expiry refresh (it has unit tests only)
+
+No significant public-network cold-query gain is claimed: the first 12-trial run was not significant, while a deterministic local test shows that priming reduces authority round trips and latency. Expiry refresh has unit tests only.
 
 Results and caveats: [Performance](performance.md).
 

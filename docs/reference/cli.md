@@ -86,6 +86,8 @@ Shows whether a name would be blocked for a client, and why. It works offline fr
 | `lumenctl user reset-password --state FILE --name NAME --password stdin\|generate` | Set a new password and end that account's sessions |
 | `lumenctl user reset-2fa --state FILE --name NAME` | Remove two-step verification and end that account's sessions |
 
+These work for accounts created by [single sign-on](../guides/external-login.md) too. Such an account starts with a random password nobody knows, so `reset-password` gives it a local fallback.
+
 `--password stdin` reads one line from standard input:
 
 ```sh

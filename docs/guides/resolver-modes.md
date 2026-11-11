@@ -61,7 +61,7 @@ Full field list: [Configuration: resolver](../reference/configuration.md#resolve
 
 ### Encrypted transport failover
 
-With `protocol = "auto"`, Lumen builds an encrypted-only list for a provider, in the order you set (default: QUIC, then HTTPS, then TLS). It moves to the next transport **only** after a connection, transport, or timeout error. An upstream SERVFAIL can move to the next configured provider, but a usable DNS answer (including NXDOMAIN) or local DNSSEC failure is final. It never falls back to plain text.
+With `protocol = "auto"`, Lumen builds an encrypted-only list for a provider, in the order you set (default: QUIC, then HTTPS, then TLS). It moves to the next transport **only** after a connection, transport, or timeout error. An upstream SERVFAIL can move to the next configured provider, but a usable DNS answer (including NXDOMAIN) or local DNSSEC failure is final. It never falls back to plain text. Each automatic transport gets the remaining provider budget divided by the number of transports left; early failures donate unused time to later transports. All tiers share one provider deadline, including silent handshakes and DNSSEC work. The outer client deadline still applies.
 
 ## Which should I choose?
 
@@ -130,3 +130,30 @@ How expiry refresh stays safe:
 - [Upstream providers](upstream-providers.md)
 - [DNSSEC and trust anchors](../reference/dnssec-and-trust.md)
 - [Configuration reference](../reference/configuration.md#resolver)
+
+## Cold recursion and local names
+
+Cold validating recursion can require delegation, DS/DNSKEY, denial and CNAME walks.
+A quick direct provider reply does not measure this work. Startup warming and shared
+recursion still do not remove slow authorities or DNSSEC work.
+
+Lumen now caps each full recursive walk with `upstream_timeout_ms` and retries only a
+timeout, up to `attempts`. Hickory keeps completed cache work between walks. A usable DNS
+answer, authenticated negative answer, or DNSSEC failure is final. The extra SOA/NS scan used
+to recover a proven unsigned ancestor has one shared attempt-sized budget, rather than one
+unbounded wait per ancestor. The outer query deadline remains the final cap. This is a bounded
+failure-recovery change, not a claim that public cold-query speed is now proven.
+
+Set `diagnostics = true` for aggregate recursive-attempt timing and outcome metrics. They have
+fixed labels and contain no query names, authority IPs, or client data. Hickory does not expose
+safe per-authority timing through its stable recursor API, so Lumen does not turn on Hickory's
+verbose trace events, which can include DNS names, addresses, and response data.
+
+With `local_zones = true` (the default), Lumen answers the IANA locally-served reverse zones
+under [RFC 6303](https://www.rfc-editor.org/rfc/rfc6303.html) and RFC 7793. It also handles
+[`home.arpa`](https://www.rfc-editor.org/rfc/rfc8375.html),
+[`resolver.arpa`](https://www.rfc-editor.org/rfc/rfc9462.html), and `service.arpa` locally.
+Apple DNS-SD queries inside private reverse zones therefore fail fast with a correct local
+negative answer. `.local` never goes to public DNS, but Lumen is not an mDNS bridge. Public
+reverse zones and `ipv4only.arpa` still recurse normally. Disable `local_zones` only when a
+separate local authority or conditional DNS path owns these names.

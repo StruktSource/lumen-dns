@@ -3,15 +3,90 @@
 Measurements of how Lumen performs, with the method and the limits of each one.
 
 > [!NOTE]
-> **The short version.** Lumen is small: an idle process uses roughly 9 MiB of memory and no measurable CPU, and the release binary is about 11.5 MiB. Lumen has **no verified production throughput or latency claim yet**. The measurements below are snapshots from one machine, not guarantees.
+> **The short version.** Lumen is small: an idle process uses roughly 8 MiB of memory (about 11 MiB with the web console and state database, as in a normal install) and no measurable CPU. Answering from the filter or the cache takes about 0.03 ms at the median on loopback, and memory stays under 16 MiB under heavy local load. The release binary is about 18.5 MiB. Lumen has **no verified production throughput claim yet**. The measurements below are snapshots from one machine, not guarantees.
 
 | Question | Answer | Details |
 | :--- | :--- | :--- |
-| How much memory does it idle at? | About 9 MiB (8.98 MiB without filtering, 9.37 MiB with a small active filter) | [Phase 2 comparison](#2026-10-30--phase-2-filtering-comparison) |
+| How much memory does it idle at? | About 11 MiB with the web console and state database; 7.72 MiB DNS-only without filtering, 8.37 MiB with a small active filter (v0.6.0) | [v0.6.0 snapshot](#2026-11-12--v060-idle-and-load-snapshot) |
+| How fast does it answer once it knows the answer? | Median 0.03 ms for a cached name and 0.02 ms for a blocked name with one query in flight; p99 under 1.5 ms with 64 in flight | [v0.6.0 snapshot](#2026-11-12--v060-idle-and-load-snapshot) |
+| What does heavy load cost? | Peak 11–13 MiB RSS DNS-only, 14–16 MiB with the console, and about 2 cores at most for 9,000 answers per second from one client | [v0.6.0 snapshot](#2026-11-12--v060-idle-and-load-snapshot) |
 | Do the recursion speed-ups work? | Shared recursion clearly helped identical-query bursts. A cold single-query gain was **not** statistically significant | [Cold-cache A/B](#2026-10-31--cold-cache-recursion-ab-issue-9) |
 | How much memory do big block lists need? | About 19 MiB for Hagezi Pro, about 150 MiB for roughly 2.4 million rules | [Filtering guide](../guides/filtering.md#limits-and-memory) |
 
-The idle snapshots are local measurements, not throughput or latency benchmarks; no DNS requests were sent for them. The cold-cache section measures latency with real queries. The computer was not a dedicated server and other system activity was not controlled. Results are specific to each run.
+The idle snapshots are local measurements, not throughput or latency benchmarks; no DNS requests were sent for them. The v0.6.0 section adds loopback load and the cold-cache section measures latency with real queries. The computer was not a dedicated server and other system activity was not controlled. Results are specific to each run.
+
+## 2026-11-12 — v0.6.0 idle and load snapshot
+
+The first run with real load, on the v0.6.0 tree (commit `2bff0e9`). Raw tables and JSON are in
+[`benchmarks/2026-11-12-load/`](benchmarks/2026-11-12-load/load-table.md).
+
+| Environment | Value |
+| --- | --- |
+| CPU / OS | Apple M4, 10 logical cores, 16 GiB, macOS 27.3, ARM64 |
+| Build | `cargo build --release --locked -p lumen`, rustc 1.95.0 (portable ThinLTO) |
+| Runtime | Native process, UDP on loopback, recursive mode, DNSSEC on, one blocked name |
+| Network | The test machine uses Tailscale DNS in front of NextDNS. Lumen resolves iteratively on its own, so neither affected the results; only the one cold lookup used the internet |
+
+**Idle** (30 `ps` samples one second apart, after 2 s warm-up, no queries):
+
+| Scenario | Mean CPU | Mean RSS | Process CPU time |
+| --- | ---: | ---: | ---: |
+| Filtering disabled | 0.0% | 7.72 MiB | 0:00.01 → 0:00.01 |
+| Small active filter | 0.0% | 8.37 MiB | 0:00.01 → 0:00.01 |
+
+The release executable is **18.52 MiB** (19,423,888 bytes), up from 11.52 MiB at the Phase 2 snapshot. That compares different commits and includes every dependency and feature added since (console, single sign-on, query history, more transports); it is not attributed to any one change. Idle memory went down: 8.98 → 7.72 MiB without filtering.
+
+**Load** (10 s per scenario, closed loop: each worker keeps a fixed number of queries in flight; UDP, A records):
+
+| Scenario | Answered/s | p50 | p95 | p99 | Max | Mean CPU | Peak CPU | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Blocked name, 1 in flight | 8,000 | 0.024 ms | 0.040 ms | 0.076 ms | 0.4 ms | 7% | 18% | 11.3 MiB |
+| Blocked name, 8 in flight | 9,000 | 0.075 ms | 0.134 ms | 0.175 ms | 0.6 ms | 22% | 83% | 11.3 MiB |
+| Blocked name, 64 in flight | 9,000 | 0.738 ms | 1.088 ms | 1.266 ms | 2.3 ms | 51% | 172% | 11.4 MiB |
+| Cached name, 1 in flight | 8,000 | 0.033 ms | 0.047 ms | 0.091 ms | 0.7 ms | 14% | 38% | 11.5 MiB |
+| Cached name, 8 in flight | 9,000 | 0.088 ms | 0.167 ms | 0.249 ms | 6.3 ms | 30% | 108% | 12.0 MiB |
+| Cached name, 64 in flight | 9,000 | 0.698 ms | 1.162 ms | 1.417 ms | 2.5 ms | 47% | 180% | 12.6 MiB |
+| Cached name, shipped 100/s limit | 100 | 0.182 ms | 0.785 ms | 0.990 ms | 1.2 ms | 0% | 1% | 11.8 MiB |
+
+Other results:
+
+- The first (cold) recursive lookup of `example.com`, with an empty cache, took **617 ms** over the internet. This is one sample, not a distribution; see the cold-cache A/B below for that.
+- RSS was 8.17 MiB before load and **11.80 MiB five seconds after** it stopped. Lumen does not return all of the memory it touched right away, so expect idle after a busy period to sit a few MiB above a fresh start.
+- Every answer in the blocked scenarios was `NXDOMAIN` and every answer in the cached scenarios was `NOERROR`; no wrong answers were seen.
+
+How to read this:
+
+- **Throughput is capped by the per-client rate limit, not by Lumen's CPU.** One loopback client is one IP, and the limiter allows at most 10,000 queries per second per IP (the table raises it from the default 100 to that maximum). The "Answered/s" column therefore shows the limiter, and the 1 s dropped-query timeout of the load tool, rather than the daemon's ceiling. Peak CPU stayed below two cores of ten. The last row shows the shipped default working as documented: exactly 100 answers per second, the rest dropped.
+- **Latency is the useful number.** It is the time from send to reply on loopback, so it excludes the network. Real clients add their own round trip. Blocked and cached answers cost about the same, as both skip recursion.
+- Loopback, one client IP, one machine, a Python load generator, A records only, no DNSSEC-signed cached name, no TCP, DoH, DoT or DoQ. This is not a capacity claim for a network of devices.
+
+**With the web console running.** A normal install also runs the console and a managed-mode state database (`--state`). The same scenarios with the console on a loopback port (raw data: [`load-console-table.md`](benchmarks/2026-11-12-load/load-console-table.md)):
+
+| Scenario | Answered/s | p50 | p95 | p99 | Max | Mean CPU | Peak CPU | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Blocked name, 1 in flight | 8,000 | 0.021 ms | 0.036 ms | 0.086 ms | 0.5 ms | 7% | 24% | 14.0 MiB |
+| Blocked name, 8 in flight | 9,000 | 0.071 ms | 0.135 ms | 0.187 ms | 0.8 ms | 22% | 78% | 14.0 MiB |
+| Blocked name, 64 in flight | 9,000 | 0.744 ms | 1.178 ms | 1.387 ms | 3.1 ms | 50% | 181% | 14.1 MiB |
+| Cached name, 1 in flight | 8,000 | 0.030 ms | 0.044 ms | 0.099 ms | 0.7 ms | 13% | 36% | 14.5 MiB |
+| Cached name, 8 in flight | 9,000 | 0.081 ms | 0.151 ms | 0.199 ms | 1.0 ms | 31% | 106% | 15.0 MiB |
+| Cached name, 64 in flight | 9,000 | 0.691 ms | 1.154 ms | 1.407 ms | 2.6 ms | 72% | 208% | 15.7 MiB |
+| Cached name, shipped 100/s limit | 100 | 0.189 ms | 0.649 ms | 0.802 ms | 0.9 ms | 0% | 1% | 14.1 MiB |
+
+- **Idle with the console:** 10.90 MiB RSS (10.70 MiB right after start), 0.0% mean CPU and 0.3% peak over 15 s. The console and state database add about 3 MiB over the DNS-only 7.7 MiB.
+- **After load:** 14.12 MiB five seconds after the load stopped, so a busy period leaves a few MiB behind.
+- **Console page:** the console's `GET /` (HTTP 200, a 2,111-byte shell; scripts and styles load separately) took 0.14 ms at the median and 0.31 ms at p99 over 200 requests on loopback. DNS latency was within noise of the DNS-only run, so serving the console does not slow DNS answers at these rates.
+- The cold first lookup of `example.com` took 631 ms (617 ms without the console), a single sample.
+- Query history was off, as shipped. The same loopback, single-client and rate-limit caveats apply.
+
+### Repeat the load test
+
+```sh
+cargo build --release --locked -p lumen
+./scripts/load_bench.py --seconds 10 --output /tmp/lumen-load.md
+./scripts/load_bench.py --console --seconds 10 --output /tmp/lumen-load-console.md   # with the web console
+```
+
+The script needs Python 3 and a Unix-like `ps`. It starts and stops its own daemon on an ephemeral loopback port and does not touch your configuration.
 
 ## 2026-10-31 — Cold-cache recursion A/B (Issue #9)
 
@@ -58,8 +133,9 @@ What the data supports:
   regression proves the mechanism, not a production-network latency claim.
 - **Slow tail unchanged.** About 3% of cold queries time out in both variants. They
   concentrate on a few domains (openbsd.org, videolan.org, torproject.org) whose
-  authoritative servers do not answer. Hickory's recursor fixes its per-attempt
-  timeout and one outstanding request, so Lumen cannot shorten it.
+  authoritative servers do not answer. Hickory's recursor fixes its pool
+  timeout and one outstanding authority request. Its current public options do not
+  expose these settings to Lumen.
 - **Warm lookups:** the median stayed 0.1 ms. The warm pass re-queries the same names,
   so its tail follows the cold failures (2 vs 5 timeouts) and is not a cache-hit
   regression claim either way.
@@ -154,3 +230,11 @@ Server throughput, latency, cache behavior, large-list scaling, and sustained
 load measurements remain future work. Those tests need a controlled local
 upstream and a load generator so public-network variance does not become a Lumen
 performance claim.
+
+## v0.6.0 logic-led audit
+
+[Optimization decisions](optimization-audit.md) record current hot paths, selected
+cleanup and rejected/deferred ideas. Response ownership transfer and skipped discarded
+filter-match allocations remove known work; portable ThinLTO enables cross-crate code
+optimization. No new latency, throughput or memory measurement is claimed. Native CPU
+builds are opt-in local artifacts, separate from standard portable releases.

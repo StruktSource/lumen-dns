@@ -29,6 +29,7 @@ Welcome! This is the map to everything written about Lumen, a self-hosted DNS re
 - [Encrypted DNS](guides/encrypted-dns.md): serve DNS-over-TLS, DNS-over-HTTPS, and DNS-over-QUIC.
 - [Filtering](guides/filtering.md): block lists, rules, per-device profiles, and schedules.
 - [Web console](guides/web-console.md): accounts, setup, two-step verification, and HTTPS.
+- [External login](guides/external-login.md): optional console sign-in through Authentik, Authelia, Pocket ID, and other OpenID Connect providers.
 - [Query history](guides/query-history.md): the opt-in record of lookups, with retention and an anonymous mode.
 - [Languages and translations](guides/translations.md): switch language, or add and improve one.
 - [Managed mode](guides/managed-mode.md): persistent settings, `lumenctl`, and safe reloads.
@@ -60,5 +61,5 @@ Welcome! This is the map to everything written about Lumen, a self-hosted DNS re
 - [Roadmap and status](project/roadmap.md): what works today and what is planned.
 - [Versioning and releases](project/versioning.md): version rules and how to verify a download.
 - [Verification record](project/verification.md): tests and checks that have actually been run.
-- [Performance](project/performance.md) and [raw benchmarks](project/benchmarks/2026-10-31-recursion/ab-report.md)
+- [Performance](project/performance.md) and raw benchmarks: [load and idle](project/benchmarks/2026-11-12-load/load-table.md), [recursion A/B](project/benchmarks/2026-10-31-recursion/ab-report.md)
 - [Contributing](../CONTRIBUTING.md) · [Code of conduct](../CODE_OF_CONDUCT.md) · [Changelog](../CHANGELOG.md)
