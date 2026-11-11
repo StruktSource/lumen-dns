@@ -8,7 +8,7 @@ Lumen 0.6.0 adds console features, fixes setup forwarding selection, and bounds 
 - **Modules and a Traffic map.** Turn on optional modules under *Modules*. The Traffic map shows your DNS traffic as a tree you can drag and zoom: server, domain endings, then domains.
 - **A sidebar you can hide.** Press `[` or use the button in the sidebar header to get more room.
 - **Overview refreshes every 10 seconds, and you can change that.** An *Auto reload* slider under *System → Console* offers 1, 2, 5, 10, 30, 60 seconds or off, saved on the server for everyone.
-- **One Users page, and optional single sign-on.** *Users & access* and *My account* are now one **Users** menu point. Administrators can add a *Sign in with …* button for Authentik, Authelia, Pocket ID, Octelium, or any OpenID Connect provider under *Users → Sign-in*, and people can link their existing account. It is off by default and password sign-in always stays.
+- **One Users page, and optional, experimental single sign-on.** *Users & access* and *My account* are now one **Users** menu point. Administrators can add a *Sign in with …* button for Authentik, Authelia, Pocket ID, Octelium, or any OpenID Connect provider under *Users → Sign-in*, and people can link their existing account. It is **experimental**: not yet tested against live provider installations. It is off by default and password sign-in always stays.
 - **Setup keeps your resolver choice.** Picking *Use another resolver* (Quad9) now results in forward mode instead of falling back to recursive.
 
 ## Resolver changes
@@ -18,7 +18,8 @@ Lumen 0.6.0 adds console features, fixes setup forwarding selection, and bounds 
 - A silent first encrypted transport no longer consumes the provider's whole deadline. Each transport gets its share of remaining time; only transport failures/timeouts advance transports. DNSSEC failures and usable answers stay final; upstream SERVFAIL may still advance providers.
 - Recursive walks now use the configured attempt timeout and retry only after a timeout. Extra DNSSEC recovery work has one shared budget. Optional aggregate diagnostics contain no names, authority IPs, or clients.
 - Registered local reverse zones, `home.arpa`, `resolver.arpa`, `service.arpa`, and `.local` requests are handled locally by default. Public reverse DNS and `ipv4only.arpa` still work. Set `resolver.local_zones = false` only when another local DNS path owns these names.
-- Small response/filter allocation cleanups and portable ThinLTO are included. No new benchmark gain is claimed. Native CPU tuning stays opt-in and separate from release artifacts.
+- Small response/filter allocation cleanups and portable ThinLTO are included. No benchmark gain from them is claimed.
+- **Measured on an Apple M4:** an idle Lumen with the web console and state database uses about 10.9 MiB (7.7 MiB without the console) and no measurable CPU. Cached and blocked answers take about 0.03 ms at the median on loopback, and memory peaks near 16 MiB under heavy local load. The release binary is 18.5 MiB. See `docs/project/performance.md`. Native CPU tuning stays opt-in and separate from release artifacts.
 - See `docs/project/optimization-audit.md` for rejected and deferred I/O, allocator, parser and data-structure changes. No statistically significant public cold-recursion gain is claimed, and Hickory does not expose privacy-safe per-authority timing through its stable API.
 
 ## Check the download

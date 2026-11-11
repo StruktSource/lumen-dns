@@ -34,8 +34,8 @@ Get Lumen answering DNS questions on your own computer in a few minutes. By defa
 3. Unpack it and check the version:
 
    ```sh
-   tar -xzf lumen-v0.5.8-linux-amd64.tar.gz   # use the archive you downloaded
-   cd lumen-v0.5.8
+   tar -xzf lumen-v0.6.0-linux-amd64.tar.gz   # use the archive you downloaded
+   cd lumen-v0.6.0
    ./lumen --version
    ```
 

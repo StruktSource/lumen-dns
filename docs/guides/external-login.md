@@ -2,6 +2,9 @@
 
 Let people sign in to the web console with an identity provider you already run, such as **Authentik**, **Authelia**, **Pocket ID**, **Octelium**, Keycloak, or any other standard OpenID Connect provider. It is **off by default**, and the built-in username and password login always stays available, so a provider outage cannot lock you out.
 
+> [!WARNING]
+> **Experimental in 0.6.0.** Single sign-on has not yet been checked against live Authentik, Authelia, Pocket ID, or Octelium installations, so expect rough edges and report them. It is off by default and the built-in login always stays, so you can lock yourself out only if you remove that account.
+
 > [!NOTE]
 > This signs people in to the **web console** only. It does not change DNS, filtering, or the management API.
 

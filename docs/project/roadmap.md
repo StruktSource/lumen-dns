@@ -172,7 +172,7 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### Medium priority: soon
 
-5. **Optional external login: done in 0.6.0** ([guide](../guides/external-login.md)). Authorization code with PKCE for any OpenID Connect provider, off by default, built-in login kept. Includes linking an existing account, optional group-to-role sync, optional single logout, and a setup-wizard step. Not yet checked against live Authentik, Authelia, Pocket ID, or Octelium installations; back-channel logout and per-group roles beyond one admin group are not built.
+5. **Optional external login: done in 0.6.0** ([guide](../guides/external-login.md)). Authorization code with PKCE for any OpenID Connect provider, off by default, built-in login kept. Includes linking an existing account, optional group-to-role sync, optional single logout, and a setup-wizard step. **Experimental.** Not yet checked against live Authentik, Authelia, Pocket ID, or Octelium installations; back-channel logout and per-group roles beyond one admin group are not built.
 6. **CSS themes** for the console.
 7. **Finish the translations:** the remaining long help texts, and more languages.
 

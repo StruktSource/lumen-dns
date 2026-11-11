@@ -11,9 +11,9 @@ Get the `linux-amd64` or `linux-arm64` archive for your version, plus `SHA256SUM
 
 ```sh
 sha256sum --check SHA256SUMS --ignore-missing
-gh attestation verify lumen-v0.5.8-linux-amd64.tar.gz --repo StruktSource/lumen-dns
-tar -xzf lumen-v0.5.8-linux-amd64.tar.gz
-cd lumen-v0.5.8
+gh attestation verify lumen-v0.6.0-linux-amd64.tar.gz --repo StruktSource/lumen-dns
+tar -xzf lumen-v0.6.0-linux-amd64.tar.gz
+cd lumen-v0.6.0
 ./lumen --version
 ./lumenctl --version
 ```

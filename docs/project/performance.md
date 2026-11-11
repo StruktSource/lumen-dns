@@ -3,13 +3,13 @@
 Measurements of how Lumen performs, with the method and the limits of each one.
 
 > [!NOTE]
-> **The short version.** Lumen is small: an idle process uses roughly 8 MiB of memory and no measurable CPU. Answering from the filter or the cache takes about 0.03 ms at the median on loopback, and memory stays near 12 MiB under heavy local load. The release binary is about 18.5 MiB. Lumen has **no verified production throughput claim yet**. The measurements below are snapshots from one machine, not guarantees.
+> **The short version.** Lumen is small: an idle process uses roughly 8 MiB of memory (about 11 MiB with the web console and state database, as in a normal install) and no measurable CPU. Answering from the filter or the cache takes about 0.03 ms at the median on loopback, and memory stays under 16 MiB under heavy local load. The release binary is about 18.5 MiB. Lumen has **no verified production throughput claim yet**. The measurements below are snapshots from one machine, not guarantees.
 
 | Question | Answer | Details |
 | :--- | :--- | :--- |
-| How much memory does it idle at? | About 8 MiB (7.72 MiB without filtering, 8.37 MiB with a small active filter) in v0.6.0 | [v0.6.0 snapshot](#2026-11-12--v060-idle-and-load-snapshot) |
+| How much memory does it idle at? | About 11 MiB with the web console and state database; 7.72 MiB DNS-only without filtering, 8.37 MiB with a small active filter (v0.6.0) | [v0.6.0 snapshot](#2026-11-12--v060-idle-and-load-snapshot) |
 | How fast does it answer once it knows the answer? | Median 0.03 ms for a cached name and 0.02 ms for a blocked name with one query in flight; p99 under 1.5 ms with 64 in flight | [v0.6.0 snapshot](#2026-11-12--v060-idle-and-load-snapshot) |
-| What does heavy load cost? | Peak 11–13 MiB RSS and under 1 core of CPU at 9,000 answers per second from one client | [v0.6.0 snapshot](#2026-11-12--v060-idle-and-load-snapshot) |
+| What does heavy load cost? | Peak 11–13 MiB RSS DNS-only, 14–16 MiB with the console, and about 2 cores at most for 9,000 answers per second from one client | [v0.6.0 snapshot](#2026-11-12--v060-idle-and-load-snapshot) |
 | Do the recursion speed-ups work? | Shared recursion clearly helped identical-query bursts. A cold single-query gain was **not** statistically significant | [Cold-cache A/B](#2026-10-31--cold-cache-recursion-ab-issue-9) |
 | How much memory do big block lists need? | About 19 MiB for Hagezi Pro, about 150 MiB for roughly 2.4 million rules | [Filtering guide](../guides/filtering.md#limits-and-memory) |
 
@@ -60,11 +60,30 @@ How to read this:
 - **Latency is the useful number.** It is the time from send to reply on loopback, so it excludes the network. Real clients add their own round trip. Blocked and cached answers cost about the same, as both skip recursion.
 - Loopback, one client IP, one machine, a Python load generator, A records only, no DNSSEC-signed cached name, no TCP, DoH, DoT or DoQ. This is not a capacity claim for a network of devices.
 
+**With the web console running.** A normal install also runs the console and a managed-mode state database (`--state`). The same scenarios with the console on a loopback port (raw data: [`load-console-table.md`](benchmarks/2026-11-12-load/load-console-table.md)):
+
+| Scenario | Answered/s | p50 | p95 | p99 | Max | Mean CPU | Peak CPU | Peak RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Blocked name, 1 in flight | 8,000 | 0.021 ms | 0.036 ms | 0.086 ms | 0.5 ms | 7% | 24% | 14.0 MiB |
+| Blocked name, 8 in flight | 9,000 | 0.071 ms | 0.135 ms | 0.187 ms | 0.8 ms | 22% | 78% | 14.0 MiB |
+| Blocked name, 64 in flight | 9,000 | 0.744 ms | 1.178 ms | 1.387 ms | 3.1 ms | 50% | 181% | 14.1 MiB |
+| Cached name, 1 in flight | 8,000 | 0.030 ms | 0.044 ms | 0.099 ms | 0.7 ms | 13% | 36% | 14.5 MiB |
+| Cached name, 8 in flight | 9,000 | 0.081 ms | 0.151 ms | 0.199 ms | 1.0 ms | 31% | 106% | 15.0 MiB |
+| Cached name, 64 in flight | 9,000 | 0.691 ms | 1.154 ms | 1.407 ms | 2.6 ms | 72% | 208% | 15.7 MiB |
+| Cached name, shipped 100/s limit | 100 | 0.189 ms | 0.649 ms | 0.802 ms | 0.9 ms | 0% | 1% | 14.1 MiB |
+
+- **Idle with the console:** 10.90 MiB RSS (10.70 MiB right after start), 0.0% mean CPU and 0.3% peak over 15 s. The console and state database add about 3 MiB over the DNS-only 7.7 MiB.
+- **After load:** 14.12 MiB five seconds after the load stopped, so a busy period leaves a few MiB behind.
+- **Console page:** the console's `GET /` (HTTP 200, a 2,111-byte shell; scripts and styles load separately) took 0.14 ms at the median and 0.31 ms at p99 over 200 requests on loopback. DNS latency was within noise of the DNS-only run, so serving the console does not slow DNS answers at these rates.
+- The cold first lookup of `example.com` took 631 ms (617 ms without the console), a single sample.
+- Query history was off, as shipped. The same loopback, single-client and rate-limit caveats apply.
+
 ### Repeat the load test
 
 ```sh
 cargo build --release --locked -p lumen
 ./scripts/load_bench.py --seconds 10 --output /tmp/lumen-load.md
+./scripts/load_bench.py --console --seconds 10 --output /tmp/lumen-load-console.md   # with the web console
 ```
 
 The script needs Python 3 and a Unix-like `ps`. It starts and stops its own daemon on an ephemeral loopback port and does not touch your configuration.

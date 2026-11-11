@@ -8,6 +8,10 @@ Scenarios run against a native release daemon on loopback:
 * cached   - one real name, resolved once, then answered from the cache
 * default  - the cached case under the shipped 100 queries/second per-IP limit
 
+With `--console` the daemon also runs the web console on a loopback port with a
+managed-mode state database (`--state`), as a normal home install does. Idle use is
+sampled and the console's static page latency is measured before the DNS load.
+
 Each scenario is closed-loop: every worker keeps a fixed window of queries
 in flight. The per-IP limit is raised to its 10000 maximum except for the
 `default` scenario, so one loopback client cannot exceed 10000 queries/second.
@@ -117,7 +121,8 @@ class Sampler(threading.Thread):
             self.stop.wait(0.5)
 
 
-def config(path: Path, port: int, qps: int) -> None:
+def config(path: Path, port: int, qps: int, web_port: int | None = None) -> None:
+    web = f'\n[web]\nhttp = ["127.0.0.1:{web_port}"]\n' if web_port else ""
     path.write_text(
         f'''schema_version = 1
 
@@ -126,6 +131,7 @@ udp = ["127.0.0.1:{port}"]
 tcp = ["127.0.0.1:{port}"]
 allow_clients = ["127.0.0.0/8"]
 
+{web}
 [resolver]
 mode = "recursive"
 dnssec = true
@@ -140,13 +146,24 @@ block = ["blocked.example"]
     )
 
 
-def start(qps: int) -> tuple[subprocess.Popen[bytes], int]:
+WEB_PORT: int | None = None
+
+
+def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    cfg = Path(tempfile.mkdtemp()) / "lumen.toml"
-    config(cfg, port, qps)
-    proc = subprocess.Popen([str(BINARY), "--config", str(cfg)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return s.getsockname()[1]
+
+
+def start(qps: int, console: bool = False) -> tuple[subprocess.Popen[bytes], int]:
+    global WEB_PORT
+    port = free_port()
+    WEB_PORT = free_port() if console else None
+    directory = Path(tempfile.mkdtemp())
+    cfg = directory / "lumen.toml"
+    config(cfg, port, qps, WEB_PORT)
+    extra = ["--state", str(directory / "state.db")] if console else []
+    proc = subprocess.Popen([str(BINARY), "--config", str(cfg), *extra], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(100):
         try:
             socket.create_connection(("127.0.0.1", port), 0.1).close()
@@ -203,6 +220,7 @@ def main() -> None:
     ap.add_argument("--seconds", type=float, default=10)
     ap.add_argument("--output", type=Path)
     ap.add_argument("--cached-name", default="example.com")
+    ap.add_argument("--console", action="store_true", help="also run the web console with a state database")
     args = ap.parse_args()
 
     report: dict = {}
@@ -218,10 +236,27 @@ def main() -> None:
         ("cached, window 64", 10000, cached, 2, 32),
         ("cached, shipped 100 qps limit", 100, cached, 1, 8),
     ]
-    proc, port = start(10000)
+    proc, port = start(10000, args.console)
     current_qps = 10000
     try:
         report["idle_before_mib"] = rss_now(proc.pid)
+        if args.console:
+            idle = Sampler(proc.pid)
+            idle.start()
+            time.sleep(15)
+            idle.stop.set()
+            idle.join()
+            report["console_idle"] = {"cpu_mean": statistics.fmean(idle.cpu), "cpu_peak": max(idle.cpu), "rss_mib": statistics.fmean(idle.rss) / 1024}
+            times = []
+            for _ in range(200):
+                t0 = time.perf_counter()
+                with socket.create_connection(("127.0.0.1", WEB_PORT), 2) as c:
+                    c.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    body = b""
+                    while chunk := c.recv(65536):
+                        body += chunk
+                times.append((time.perf_counter() - t0) * 1000)
+            report["console_page"] = {"status": body.split(b"\r\n", 1)[0].decode(), "bytes": len(body), "p50": statistics.median(times), "p99": pct(times, 0.99)}
         # Warm the cache once with a real recursive lookup and time that cold query.
         t = time.perf_counter()
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -237,7 +272,7 @@ def main() -> None:
             if qps != current_qps:
                 proc.terminate()
                 proc.wait(5)
-                proc, port = start(qps)
+                proc, port = start(qps, args.console)
                 current_qps = qps
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s.settimeout(10)
@@ -263,6 +298,10 @@ def main() -> None:
     cold = report["cold_ms"]
     lines += ["", f"Cold first lookup of `{args.cached_name}`: {cold:.0f} ms." if cold else "Cold lookup timed out.",
               f"RSS before load {report['idle_before_mib']:.2f} MiB, 5 s after load {report['idle_after_mib']:.2f} MiB."]
+    if "console_idle" in report:
+        ci, cp = report["console_idle"], report["console_page"]
+        lines += ["", f"Console enabled (state database, web on loopback): idle {ci['rss_mib']:.2f} MiB RSS, {ci['cpu_mean']:.1f}% mean CPU ({ci['cpu_peak']:.1f}% peak) over 15 s.",
+                  f"Console page `GET /` ({cp['status']}, {cp['bytes']:,} bytes): p50 {cp['p50']:.2f} ms, p99 {cp['p99']:.2f} ms over 200 requests."]
     text = "\n".join(lines) + "\n"
     print(text)
     if args.output:
