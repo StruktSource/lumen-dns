@@ -276,9 +276,10 @@ claimed.
 
 `./scripts/dev.sh check` (format, Clippy with warnings denied, locked workspace tests, doc
 tests) passed on macOS ARM64. `lumen-filter` tests cover a gzip-compressed list download
-(decoded, within the size limit) and a stale list revalidated with `If-None-Match` /
-`If-Modified-Since` that accepts `304 Not Modified` and keeps its body. Not covered by a
-dedicated test: restart reuse straight from the disk cache, damaged or oversized cache files,
-the 128-entry and 512 MiB caps, and a decompression bomb. Not verified: Windows
-file-permission behavior of the cache folder (Unix modes only), a live public list server, and
-disk-full behavior.
+(decoded, within the size limit), a stale list revalidated with `If-None-Match` /
+`If-Modified-Since` that accepts `304 Not Modified`, and the disk cache: restart reuse inside
+the refresh interval, a kept stale body for revalidation, separate entries per format,
+validators stripped of control characters, damaged, truncated and bad-header files ignored and
+removed, oversized lists refused, and the 128-entry cap. Not covered: the 512 MiB byte cap,
+a decompression bomb, Windows file-permission behavior of the cache folder (Unix modes only),
+a live public list server, and disk-full behavior.

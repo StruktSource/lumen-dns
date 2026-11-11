@@ -102,11 +102,13 @@ pub(crate) fn configure_disk(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn disk_path(url: &str, format: Format) -> Option<PathBuf> {
-    let directory = DISK
-        .lock()
+fn disk_directory() -> Option<PathBuf> {
+    DISK.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()?;
+        .clone()
+}
+
+fn disk_path(directory: &Path, url: &str, format: Format) -> PathBuf {
     let mut hash = Sha256::new();
     hash.update(match format {
         Format::Domains => b"domains:".as_slice(),
@@ -122,7 +124,7 @@ fn disk_path(url: &str, format: Format) -> Option<PathBuf> {
             let _ = write!(out, "{byte:02x}");
             out
         });
-    Some(directory.join(format!("{name}.cache")))
+    directory.join(format!("{name}.cache"))
 }
 
 fn clean_validator(value: Option<String>) -> Option<String> {
@@ -130,7 +132,16 @@ fn clean_validator(value: Option<String>) -> Option<String> {
 }
 
 pub(crate) fn disk_get(url: &str, format: Format, max_age: Option<Duration>) -> Option<DiskHit> {
-    let path = disk_path(url, format)?;
+    disk_get_in(&disk_directory()?, url, format, max_age)
+}
+
+fn disk_get_in(
+    directory: &Path,
+    url: &str,
+    format: Format,
+    max_age: Option<Duration>,
+) -> Option<DiskHit> {
+    let path = disk_path(directory, url, format);
     let metadata = fs::metadata(&path).ok()?;
     if metadata.len() > (crate::rules::MAX_LIST_BYTES + MAX_HEADER_BYTES) as u64 {
         let _ = fs::remove_file(path);
@@ -180,12 +191,23 @@ pub(crate) fn disk_put(
     bytes: &[u8],
     validators: Validators,
 ) -> Result<(), String> {
+    match disk_directory() {
+        Some(directory) => disk_put_in(&directory, url, format, bytes, validators),
+        None => Ok(()),
+    }
+}
+
+fn disk_put_in(
+    directory: &Path,
+    url: &str,
+    format: Format,
+    bytes: &[u8],
+    validators: Validators,
+) -> Result<(), String> {
     if bytes.len() > crate::rules::MAX_LIST_BYTES {
         return Err("filter list exceeds the disk cache limit".into());
     }
-    let Some(path) = disk_path(url, format) else {
-        return Ok(());
-    };
+    let path = disk_path(directory, url, format);
     let header = DiskHeader {
         fetched: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -244,5 +266,94 @@ fn prune(directory: &Path) {
             count -= 1;
             bytes = bytes.saturating_sub(size);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One test owns the process-wide cache directory so parallel tests cannot interfere.
+    #[test]
+    fn disk_cache_reuses_revalidates_rejects_damage_and_stays_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        let url = "https://lists.example/hosts.txt";
+        let validators = Validators {
+            etag: Some("\"v1\"".into()),
+            last_modified: Some("Wed, 11 Nov 2026 19:00:00 GMT".into()),
+        };
+        assert!(disk_get_in(dir, url, Format::Hosts, None).is_none());
+        disk_put_in(
+            dir,
+            url,
+            Format::Hosts,
+            b"0.0.0.0 ads.example\n",
+            validators.clone(),
+        )
+        .unwrap();
+
+        // A restart inside the refresh interval reuses the body without a download.
+        let hit = disk_get_in(dir, url, Format::Hosts, Some(Duration::from_secs(3600))).unwrap();
+        assert!(hit.fresh);
+        assert_eq!(hit.bytes, b"0.0.0.0 ads.example\n");
+        assert_eq!(hit.validators, validators);
+        // Another format of the same URL is a different entry.
+        assert!(disk_get_in(dir, url, Format::Domains, None).is_none());
+        // Past its interval the body is kept so it can be revalidated with a 304.
+        let stale = disk_get_in(dir, url, Format::Hosts, Some(Duration::ZERO)).unwrap();
+        assert!(!stale.fresh);
+        assert_eq!(stale.validators.etag.as_deref(), Some("\"v1\""));
+
+        // Control characters in a validator are dropped, never replayed into a header.
+        disk_put_in(
+            dir,
+            url,
+            Format::Hosts,
+            b"x",
+            Validators {
+                etag: Some("bad\r\nx: y".into()),
+                last_modified: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            disk_get_in(dir, url, Format::Hosts, None)
+                .unwrap()
+                .validators
+                .etag,
+            None
+        );
+
+        // Damaged files are ignored and removed instead of trusted.
+        let path = disk_path(dir, url, Format::Hosts);
+        fs::write(&path, b"not a cache file").unwrap();
+        assert!(disk_get_in(dir, url, Format::Hosts, None).is_none());
+        assert!(!path.exists());
+        fs::write(&path, [MAGIC, &u32::MAX.to_be_bytes()[..]].concat()).unwrap();
+        assert!(disk_get_in(dir, url, Format::Hosts, None).is_none());
+        assert!(!path.exists());
+        disk_put_in(dir, url, Format::Hosts, b"x", Validators::default()).unwrap();
+        let mut truncated = fs::read(&path).unwrap();
+        truncated.truncate(MAGIC.len() + 6);
+        fs::write(&path, truncated).unwrap();
+        assert!(disk_get_in(dir, url, Format::Hosts, None).is_none());
+
+        // Oversized lists are refused, and the entry count stays capped.
+        let oversized = vec![b'a'; crate::rules::MAX_LIST_BYTES + 1];
+        assert!(disk_put_in(dir, url, Format::Hosts, &oversized, Validators::default()).is_err());
+        for index in 0..MAX_ENTRIES + 10 {
+            let url = format!("https://lists.example/{index}.txt");
+            disk_put_in(
+                dir,
+                &url,
+                Format::Domains,
+                b"a.example\n",
+                Validators::default(),
+            )
+            .unwrap();
+        }
+        let files = fs::read_dir(dir).unwrap().count();
+        assert!(files <= MAX_ENTRIES, "{files} cache files");
     }
 }

@@ -75,7 +75,7 @@ Downloads must use HTTPS on port 443 with a valid public-root certificate. Lumen
 
 **Lighter downloads.** Lumen asks for compressed transfer (gzip, Brotli, deflate, or zstd) and the 64 MiB limit applies to the **decompressed** list. It remembers each list's `ETag` and `Last-Modified` and sends them back as `If-None-Match` and `If-Modified-Since`, so an unchanged list costs a `304` instead of a full download.
 
-**Disk cache (managed mode).** With `--state`, downloaded lists are also kept in a `filter-cache` folder beside the state database (Unix mode `0700`, files `0600`; at most 128 lists and 512 MiB). After a restart a list that is still inside its `refresh_secs` is read from disk instead of downloaded, and an older one is revalidated with a `304` request. The cache holds public list text only, never credentials, and a damaged or oversized file is ignored and downloaded again (this recovery path has no dedicated test yet). Without `--state` nothing is written to disk.
+**Disk cache (managed mode).** With `--state`, downloaded lists are also kept in a `filter-cache` folder beside the state database (Unix mode `0700`, files `0600`; at most 128 lists and 512 MiB). After a restart a list that is still inside its `refresh_secs` is read from disk instead of downloaded, and an older one is revalidated with a `304` request. The cache holds public list text only, never credentials, and a damaged or oversized file is ignored and downloaded again. Without `--state` nothing is written to disk.
 
 The host's DNS is used to find list servers, so make sure it works **before** Lumen starts. Do not rely only on Lumen to resolve its own list hosts.
 
