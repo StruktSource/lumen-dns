@@ -24,16 +24,67 @@ use hickory_server::{
 };
 use lumen_config::ForwardStrategy;
 use std::{
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 /// How long a provider that just failed is skipped before it is tried again.
 const REST_AFTER_FAILURE: Duration = Duration::from_secs(10);
 
+/// One provider, split into ordered encrypted transports only in automatic mode.
+/// Resolvers and their bounded caches are shared across concurrent lookups.
+pub(crate) struct Provider<P: RuntimeProvider> {
+    transports: Vec<Resolver<P>>,
+    budget: Option<Duration>,
+}
+
+impl<P: RuntimeProvider> Provider<P> {
+    pub(crate) fn new(transports: Vec<Resolver<P>>, budget: Option<Duration>) -> Self {
+        Self { transports, budget }
+    }
+
+    pub(crate) fn validates(&self) -> bool {
+        self.transports
+            .first()
+            .is_some_and(|resolver| resolver.options().validate)
+    }
+
+    pub(crate) async fn lookup(&self, name: Name, rtype: RecordType) -> Result<Lookup, NetError> {
+        let deadline = self
+            .budget
+            .map(|budget| tokio::time::Instant::now() + budget);
+        let mut last = NetError::NoConnections;
+        for (index, resolver) in self.transports.iter().enumerate() {
+            let lookup = resolver.lookup(name.clone(), rtype);
+            let result = if let Some(deadline) = deadline {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(NetError::Timeout);
+                }
+                // An early failure donates its unused share to later transports. The last
+                // transport may use all remaining time, never a fresh provider deadline.
+                let left = u32::try_from(self.transports.len() - index).unwrap_or(u32::MAX);
+                tokio::time::timeout(remaining / left, lookup)
+                    .await
+                    .unwrap_or(Err(NetError::Timeout))
+            } else {
+                lookup.await
+            };
+            match result {
+                Err(error) if try_next_transport(&error) => last = error,
+                result => return result,
+            }
+        }
+        Err(last)
+    }
+}
+
 /// One provider's forwarder and how fast it has been answering.
 struct Member<P: RuntimeProvider> {
-    resolver: Resolver<P>,
+    resolver: Arc<Provider<P>>,
     /// Recent response time in microseconds. Zero until the first answer.
     speed: AtomicU64,
     /// Milliseconds since the pool started until which the provider is left alone. Zero
@@ -75,8 +126,8 @@ pub(crate) struct ForwardPool<P: RuntimeProvider> {
 }
 
 /// Errors that say the provider could not be reached or did not answer in time, as opposed
-/// to a DNS answer. Only these move on to the next provider.
-fn try_next_provider(error: &NetError) -> bool {
+/// to a DNS answer. Only these move on to the next encrypted transport.
+fn try_next_transport(error: &NetError) -> bool {
     matches!(
         error,
         NetError::Timeout
@@ -93,14 +144,21 @@ fn try_next_provider(error: &NetError) -> bool {
             | NetError::RustlsError(_)
             | NetError::QueryCaseMismatch
             | NetError::Truncated
-            | NetError::Dns(
+    )
+}
+
+fn try_next_provider(error: &NetError) -> bool {
+    try_next_transport(error)
+        || matches!(
+            error,
+            NetError::Dns(
                 DnsError::ResponseCode(ResponseCode::ServFail)
                     | DnsError::NoRecordsFound(NoRecords {
                         response_code: ResponseCode::ServFail,
                         ..
-                    }),
+                    })
             )
-    )
+        )
 }
 
 /// The order in which `count` providers are tried for one query.
@@ -126,7 +184,7 @@ pub(crate) fn order_for(
 
 impl<P: RuntimeProvider> ForwardPool<P> {
     pub(crate) fn new(
-        resolvers: Vec<Resolver<P>>,
+        resolvers: Vec<Provider<P>>,
         strategy: ForwardStrategy,
         penalty: Duration,
     ) -> Self {
@@ -134,7 +192,7 @@ impl<P: RuntimeProvider> ForwardPool<P> {
             members: resolvers
                 .into_iter()
                 .map(|resolver| Member {
-                    resolver,
+                    resolver: Arc::new(resolver),
                     speed: AtomicU64::new(0),
                     resting_until: AtomicU64::new(0),
                 })
@@ -150,7 +208,7 @@ impl<P: RuntimeProvider> ForwardPool<P> {
     pub(crate) fn validates(&self) -> bool {
         self.members
             .first()
-            .is_some_and(|member| member.resolver.options().validate)
+            .is_some_and(|member| member.resolver.validates())
     }
 
     fn now_ms(&self) -> u64 {
@@ -292,5 +350,11 @@ mod tests {
             ResponseCode::ServFail,
         )));
         assert!(try_next_provider(&no_records));
+        assert!(!try_next_transport(&servfail));
+        assert!(!try_next_transport(&no_records));
+        let bogus = NetError::from(DnsError::DnssecBogus);
+        assert!(!try_next_transport(&bogus));
+        assert!(!try_next_provider(&bogus));
+        assert!(!try_next_transport(&nxdomain));
     }
 }

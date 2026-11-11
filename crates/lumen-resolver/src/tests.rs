@@ -418,7 +418,7 @@ async fn recursion_timeout_invokes_fallback_once() {
                 recursor: Arc::new(recursor),
                 accel: Arc::new(Accel::new(Arc::clone(&metrics), Prefetch::default())),
                 fallback: Some(FallbackBackend {
-                    resolver: Box::new(forward),
+                    resolver: Box::new(forward::Provider::new(vec![forward], None)),
                     recursive_timeout: Duration::from_millis(30),
                     timeout: Duration::from_millis(250),
                     metrics: Arc::clone(&metrics),
@@ -926,4 +926,21 @@ fn answers_never_show_the_random_case_used_upstream() {
         matches!(&message.answers[0].data, RData::CNAME(t) if t.0.to_ascii() == "target.example.net.")
     );
     assert_eq!(message.answers[1].name.to_ascii(), "target.example.net.");
+}
+
+#[test]
+fn automatic_transport_rejects_plaintext_even_without_config_expansion() {
+    let settings = lumen_config::Resolver {
+        automatic_transport: true,
+        ..lumen_config::Resolver::default()
+    };
+    for protocol in [UpstreamProtocol::Udp, UpstreamProtocol::Tcp] {
+        let upstream = Upstream {
+            address: "127.0.0.1:53".parse().unwrap(),
+            protocol,
+            server_name: None,
+            doh_path: None,
+        };
+        assert!(forward_provider(&settings, &[upstream], ResolverOpts::default(), None).is_err());
+    }
 }

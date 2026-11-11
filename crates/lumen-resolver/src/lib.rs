@@ -354,7 +354,7 @@ fn forward_zone(
             // Another provider is the retry, so a silent one costs one timeout, not two.
             member_options.attempts = 1;
         }
-        members.push(forward_resolver(
+        members.push(forward_provider(
             settings,
             &settings.upstreams[start..start + size],
             member_options,
@@ -378,6 +378,57 @@ fn group_sizes(provider_groups: &[usize], count: usize) -> Vec<usize> {
     let used: usize = groups.iter().sum();
     groups.extend(std::iter::repeat_n(1, count.saturating_sub(used)));
     groups
+}
+
+fn forward_provider(
+    settings: &lumen_config::Resolver,
+    upstreams: &[lumen_config::Upstream],
+    options: ResolverOpts,
+    anchors: Option<Arc<TrustAnchors>>,
+) -> Result<forward::Provider<TokioRuntimeProvider>, String> {
+    if !settings.automatic_transport {
+        return Ok(forward::Provider::new(
+            vec![forward_resolver(settings, upstreams, options, anchors)?],
+            None,
+        ));
+    }
+    // Automatic mode is encrypted-only even for callers that bypass config expansion.
+    if upstreams.iter().any(|upstream| {
+        matches!(
+            upstream.protocol,
+            UpstreamProtocol::Udp | UpstreamProtocol::Tcp
+        )
+    }) {
+        return Err("automatic transports must be encrypted".into());
+    }
+    let mut tiers: Vec<Vec<lumen_config::Upstream>> = Vec::new();
+    for upstream in upstreams {
+        if let Some(tier) = tiers
+            .iter_mut()
+            .find(|tier| tier[0].protocol == upstream.protocol)
+        {
+            tier.push(upstream.clone());
+        } else {
+            tiers.push(vec![upstream.clone()]);
+        }
+    }
+    let budget = options.timeout;
+    let mut transports = Vec::new();
+    for tier in &tiers {
+        let mut tier_options = options.clone();
+        // Keep the provider's configured response-cache bound across all its transports.
+        tier_options.cache_size /= tiers.len() as u64;
+        if tiers.len() > 1 {
+            tier_options.attempts = 1;
+        }
+        transports.push(forward_resolver(
+            settings,
+            tier,
+            tier_options,
+            anchors.clone(),
+        )?);
+    }
+    Ok(forward::Provider::new(transports, Some(budget)))
 }
 
 fn forward_resolver(
@@ -522,7 +573,7 @@ fn recursive_zone(
         fallback_options.attempts = usize::from(settings.fallback.attempts);
         fallback_options.timeout = Duration::from_millis(u64::from(settings.fallback.timeout_ms));
         Some(FallbackBackend {
-            resolver: Box::new(forward_resolver(
+            resolver: Box::new(forward_provider(
                 settings,
                 &settings.fallback.upstreams,
                 fallback_options,
@@ -598,7 +649,7 @@ enum Backend<P: hickory_server::net::runtime::RuntimeProvider> {
     Forward(Box<forward::ForwardPool<P>>),
 }
 struct FallbackBackend<P: hickory_server::net::runtime::RuntimeProvider> {
-    resolver: Box<hickory_server::resolver::Resolver<P>>,
+    resolver: Box<forward::Provider<P>>,
     recursive_timeout: Duration,
     timeout: Duration,
     metrics: Arc<Metrics>,

@@ -692,6 +692,7 @@ async fn dnssec_valid_bogus_wrong_anchor_and_signed_denial() {
         store::in_memory::InMemoryZoneHandler,
         zone_handler::{AxfrPolicy, Catalog, ZoneType},
     };
+    use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
     let roots = Name::root();
     let zone = ". 60 IN SOA ns. hostmaster. 1 60 60 60 60\n. 60 IN NS ns.\nns. 60 IN A 127.0.0.1\nvalid.example. 60 IN A 192.0.2.1\nbogus.example. 60 IN A 192.0.2.2\n";
     let (_, records) = Parser::new(zone, None, Some(roots.clone()))
@@ -733,6 +734,27 @@ async fn dnssec_valid_bogus_wrong_anchor_and_signed_denial() {
     catalog.upsert(roots.into(), vec![Arc::new(zone)]);
     let mut authority = Server::new(catalog);
     authority.register_socket(socket);
+    // Serve the same signed zone over TLS for automatic-transport policy checks.
+    let (tls_directory, cert) = certificates();
+    let key = PrivateKeyDer::from_pem_file(tls_directory.path().join("key.pem")).unwrap();
+    let mut tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![cert], key)
+    .unwrap();
+    tls_config.alpn_protocols = vec![b"dot".to_vec()];
+    let tls_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tls_address = tls_listener.local_addr().unwrap();
+    authority
+        .register_tls_listener_with_tls_config(
+            tls_listener,
+            Duration::from_secs(2),
+            Arc::new(tls_config),
+        )
+        .unwrap();
     let authority = tokio::spawn(async move {
         authority.block_until_done().await.unwrap();
     });
@@ -764,6 +786,59 @@ async fn dnssec_valid_bogus_wrong_anchor_and_signed_denial() {
         ResponseCode::NXDomain
     );
     server.shutdown().await;
+    // A usable positive or negative answer, and a local DNSSEC failure, must all
+    // end the provider lookup without connecting to its next encrypted transport.
+    let unused = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unused_address = unused.local_addr().unwrap();
+    let contacted = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&contacted);
+    let unused_task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = unused.accept().await.unwrap();
+            count.fetch_add(1, Ordering::Relaxed);
+            drop(stream);
+        }
+    });
+    let mut automatic = cfg.clone();
+    automatic.resolver.automatic_transport = true;
+    automatic.resolver.upstream_ca = Some(tls_directory.path().join("cert.pem"));
+    automatic.resolver.upstreams = vec![
+        Upstream {
+            address: tls_address,
+            protocol: UpstreamProtocol::Tls,
+            server_name: Some("localhost".into()),
+            doh_path: None,
+        },
+        Upstream {
+            address: unused_address,
+            protocol: UpstreamProtocol::Https,
+            server_name: Some("localhost".into()),
+            doh_path: Some("/dns-query".into()),
+        },
+    ];
+    let mut encrypted_server = RunningServer::start(automatic).await.unwrap();
+    for (name, expected) in [
+        ("valid.example.", ResponseCode::NoError),
+        ("absent.example.", ResponseCode::NXDomain),
+        ("bogus.example.", ResponseCode::ServFail),
+    ] {
+        assert_eq!(
+            udp(bind, &query(name, RecordType::A))
+                .await
+                .metadata
+                .response_code,
+            expected,
+            "{name}"
+        );
+        assert_eq!(
+            contacted.load(Ordering::Relaxed),
+            0,
+            "DNS results are final across transports"
+        );
+    }
+    encrypted_server.shutdown().await;
+    unused_task.abort();
+    let _ = unused_task.await;
     let der = EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP256SHA256).unwrap();
     let key = EcdsaSigningKey::from_pkcs8(&der, Algorithm::ECDSAP256SHA256).unwrap();
     let wrong = DNSKEY::new(true, true, false, key.to_public_key().unwrap());
@@ -848,10 +923,11 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
     cfg.resolver.upstream_ca = Some(directory.path().join("cert.pem"));
     // A listener that accepts and immediately drops connections fails the TLS handshake at
     // once on every OS. A closed port does not: Windows keeps retrying the connect.
-    let broken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let broken = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let broken_address = broken.local_addr().unwrap();
-    std::thread::spawn(move || {
-        for stream in broken.incoming() {
+    let broken_task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = broken.accept().await.unwrap();
             drop(stream);
         }
     });
@@ -913,6 +989,137 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
         "a DNS answer must not trigger transport failover"
     );
     server.shutdown().await;
+    // A TCP peer accepts the TLS connection but sends no handshake bytes. This is
+    // controlled silence, independent of firewall/OS connect timeout behavior.
+    let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_address = silent.local_addr().unwrap();
+    let silent_connections = std::sync::Arc::new(AtomicUsize::new(0));
+    let seen = std::sync::Arc::clone(&silent_connections);
+    let silence = tokio::spawn(async move {
+        let mut clients = JoinSet::new();
+        loop {
+            let (mut stream, _) = silent.accept().await.unwrap();
+            let seen = std::sync::Arc::clone(&seen);
+            clients.spawn(async move {
+                struct Active(std::sync::Arc<AtomicUsize>);
+                impl Drop for Active {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+                seen.fetch_add(1, Ordering::Relaxed);
+                let _active = Active(seen);
+                let mut bytes = [0; 4096];
+                while matches!(stream.read(&mut bytes).await, Ok(n) if n > 0) {}
+            });
+            while clients.try_join_next().is_some() {}
+        }
+    });
+    let encrypted = |protocol, address| Upstream {
+        address,
+        protocol,
+        server_name: Some("localhost".into()),
+        doh_path: (protocol == UpstreamProtocol::Https).then(|| "/dns-query".into()),
+    };
+    let bind = self::address("127.0.0.1");
+    let mut cfg = config(https, bind);
+    cfg.resolver.automatic_transport = true;
+    cfg.resolver.attempts = 2;
+    cfg.resolver.upstream_timeout_ms = 1_000;
+    cfg.resolver.upstream_ca = Some(directory.path().join("cert.pem"));
+    cfg.resolver.upstreams = vec![
+        encrypted(UpstreamProtocol::Tls, silent_address),
+        encrypted(UpstreamProtocol::Https, https),
+    ];
+    let mut server = RunningServer::start(cfg.clone()).await.unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        udp(bind, &query("silent-first.example.", RecordType::A))
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::NoError
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "second transport got time to answer"
+    );
+    // Concurrent unique queries all share bounded resolver state and finish after silence.
+    let mut clients = JoinSet::new();
+    for i in 0..12 {
+        clients.spawn(async move {
+            udp(
+                bind,
+                &query(&format!("silent-concurrent-{i}.example."), RecordType::A),
+            )
+            .await
+        });
+    }
+    while let Some(reply) = clients.join_next().await {
+        assert_eq!(reply.unwrap().metadata.response_code, ResponseCode::NoError);
+    }
+    server.shutdown().await;
+    timeout(Duration::from_secs(2), async {
+        while silent_connections.load(Ordering::Relaxed) != 0 {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("timed-out TLS attempts release sockets");
+
+    // Both encrypted transports stay silent: no plaintext query is sent, and the
+    // provider expires once, even with attempts=2 and a longer outer query timeout.
+    cfg.resolver.upstreams[1] = encrypted(UpstreamProtocol::Https, silent_address);
+    cfg.limits.query_timeout_ms = 3_000;
+    let before = fixture.queries.load(Ordering::Relaxed);
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        udp(bind, &query("all-silent.example.", RecordType::A))
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::ServFail
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(1_800),
+        "one overall provider deadline"
+    );
+    assert_eq!(
+        fixture.queries.load(Ordering::Relaxed),
+        before,
+        "no plaintext downgrade"
+    );
+    // Cancel work while a transport is silent. Shutdown must reap query tasks and sockets.
+    let mut clients = JoinSet::new();
+    for i in 0..12 {
+        clients.spawn(async move {
+            udp(bind, &query(&format!("cancel-{i}.example."), RecordType::A)).await
+        });
+    }
+    timeout(Duration::from_secs(2), async {
+        while silent_connections.load(Ordering::Relaxed) == 0 {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    timeout(Duration::from_secs(2), server.shutdown())
+        .await
+        .expect("shutdown cancels silent queries");
+    clients.abort_all();
+    while clients.join_next().await.is_some() {}
+    timeout(Duration::from_secs(2), async {
+        while silent_connections.load(Ordering::Relaxed) != 0 {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("cancelled TLS attempts release sockets");
+    silence.abort();
+    let _ = silence.await;
+    broken_task.abort();
+    let _ = broken_task.await;
     upstream.shutdown().await;
 }
 
