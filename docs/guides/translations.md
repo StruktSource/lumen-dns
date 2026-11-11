@@ -10,7 +10,7 @@ There are three places, from the most personal to the most general:
 | :--- | :--- | :--- |
 | **The language menu** on the sign-in page, in the setup wizard, and in the sidebar | Anyone | Switches this browser right away and remembers the choice |
 | **My account → Language** | Each signed-in user | Same, with an extra entry that follows the console default |
-| **Users & access → Console → Default language** | Administrators | Sets the language for the sign-in page and for everyone who has not picked their own |
+| **System → Console → Default language** | Administrators | Sets the language for the sign-in page and for everyone who has not picked their own |
 
 The console picks the language in this order:
 

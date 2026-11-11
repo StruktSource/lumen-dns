@@ -63,10 +63,23 @@ Filtering implements bounded parsers, verified HTTPS with public-IP pinning, ato
 - Schedules rely on the host's UTC clock.
 - Query-name filtering is **not** CNAME-chain inspection and **not** a network firewall.
 - Optional decision logs disclose names and client IPs only when you enable them.
+- In managed mode downloaded list text is cached in a `filter-cache` folder beside the state database (Unix modes `0700` and `0600`, at most 128 files and 512 MiB). It is public data. Files that are damaged, truncated, or too large are ignored and removed, validators are stripped of control characters before they are replayed, and the decompressed size obeys the same 64 MiB list limit as a normal download.
 
 ## Management and the console
 
 The management API uses bearer tokens, scoped roles, audit, and rate limits. It has no browser session or cookie authentication, so CSRF is not an API credential path. The web console has its own sessions, CSRF protection, lockouts, and optional two-step verification, described in the [web console guide](../guides/web-console.md). Remote exposure of either is outside the supported boundary, so keep them on loopback or behind HTTPS. Query history is optional and disabled by default. When an administrator enables it, the retention, the anonymous mode, and deletion are described in [Query history](../guides/query-history.md). Any signed-in console user can *read* the history that exists, because the Activity page is shared by design, so enable the detailed *device and address* mode only if that is acceptable for every account.
+
+### External login (optional)
+
+[External login](../guides/external-login.md) adds a way into the console, so it is part of the console's trust boundary and stays **off by default**.
+
+- **What is trusted.** The identity provider and the TLS connection to it. Lumen validates the ID token's issuer, audience, expiry, issue time, and nonce, but not its signature, because the token comes straight from the token endpoint over a verified TLS connection (OpenID Connect Core 3.1.3.7). A compromised provider, or one reached through a TLS-intercepting proxy, can therefore sign anyone in. Choose a provider you run or trust, and add `ca_file` only for your own CA.
+- **Browser binding and replay.** Each sign-in carries a one-time `state` in a short-lived `HttpOnly`, `SameSite=Lax` cookie and a PKCE verifier. A state works once, expires after 10 minutes, and at most 256 can wait. Starts and callbacks share the per-address throttle.
+- **No account takeover by name.** Accounts are tied to the provider's `(issuer, subject)`, never to a username, so a provider user called `admin` gets a separate account. Linking an existing account needs the signed-in person's CSRF-protected request and finishes only in the same browser; unlinking needs the account's password.
+- **Privilege.** `admin_group` makes members administrators at their first sign-in, and with `sync_role` on every sign-in. That delegates administrator rights to whoever controls the group at the provider. The last administrator is never demoted.
+- **Network reach.** The issuer is operator-configured and Lumen contacts it from the host, including private addresses. There is no redirect following and no proxy use, and responses are capped at 64 KiB.
+- **What is not stored or shown.** Provider tokens are never stored, and the browser only ever sees one generic failure message. Reasons go to the audit log.
+- **Not covered.** Back-channel logout, so an account that is disabled at the provider keeps any console session already open until it ends (30 minutes idle, 12 hours at most) or an administrator deletes the account.
 
 ## Limits of these guarantees
 

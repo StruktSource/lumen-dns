@@ -7,6 +7,8 @@ Let people sign in to the web console with an identity provider you already run,
 
 ## Turn it on
 
+In the console, an administrator turns it on under **Users → Sign-in → Single sign-on**: fill in the provider, press **Check provider** to see whether it answers (nothing is saved or signed in by that check), then **Save and apply**. Lumen restarts its listeners for a moment, and password sign-in keeps working. The same settings can be written in the configuration file, as below.
+
 You need [managed mode](managed-mode.md) (`--state`), a web listener, and a client registered with your provider:
 
 - **Redirect URL:** `https://<your console address>/api/login/oidc/callback` (exactly this path).
@@ -43,13 +45,13 @@ You can also turn it on in the first-run setup (the **Single sign-on** step), wh
 
 ## How it fits the existing accounts
 
-- **An account per person.** The first sign-in creates a normal console account, named from `username_claim` (cleaned to the console's username rules). It appears under *Users & access* like any other and can be given a role or deleted there.
+- **An account per person.** The first sign-in creates a normal console account, named from `username_claim` (cleaned to the console's username rules). It appears under *Users → People* (marked **SSO**) like any other and can be given a role or deleted there.
 - **Never linked by name.** An external person is tied to the provider's stable `(issuer, subject)` pair, **not** to a username. If the provider says someone is called `admin` and a local `admin` exists, they get a separate account such as `admin-1a2b3c4d`. Nobody can take over a local account by choosing a matching name.
 - **Roles.** New accounts are *User*, or *Administrator* when they are in `admin_group`. Unless `sync_role` is on, the role is set only at creation and never changed by later sign-ins, so changing it in the console sticks. Remove someone's access by deleting their account, or by removing them at the provider.
 - **Role sync (`sync_role = true`).** Every external sign-in makes the group decide: members become administrators and everyone else a user, and each change is written to the audit log. The last administrator is never demoted, so you cannot lock yourself out. It applies to **linked** local accounts too, so a local administrator who is not in the group is demoted the next time they sign in through the provider.
 - **Two-step verification.** The provider is responsible for the second factor, so Lumen's own two-step prompt is not asked after an external sign-in.
 - **Sessions** are the same as for password sign-ins: the same cookie, idle and absolute limits, and sign-out. The audit log records `sso` as the sign-in method.
-- **Passwords.** An external account gets a random password nobody knows. An administrator can still set one for it under *Users & access* if you want a local fallback.
+- **Passwords.** An external account gets a random password nobody knows. An administrator can still set one for it under *Users → People* if you want a local fallback.
 
 ## Link an existing account
 
@@ -72,6 +74,20 @@ With `single_logout = true`, signing out of the console also sends the browser t
 - **The ID token's signature is not checked.** OpenID Connect Core (section 3.1.3.7) allows this when the token arrives straight from the token endpoint over TLS, as it does here, which is why Lumen needs no JWT or key-set code. The certificate of the provider is verified, with the bundled public roots plus any `ca_file`.
 - Provider tokens are never stored. Only the issuer, the subject, and the console account are kept.
 - A failed sign-in returns to the login page with one generic message. The reason goes to the audit log, never to the browser.
+
+## Endpoints
+
+These belong to the bundled console and may change between releases; they are not part of the [management API](../reference/management-api.md).
+
+| Route | Who | Purpose |
+| :--- | :--- | :--- |
+| `GET /api/login/oidc` | Anyone | Start a sign-in: redirects to the provider and sets the flow cookie |
+| `GET /api/login/oidc/callback` | The browser that started it | Finish a sign-in or a link, then redirect into the console |
+| `GET /api/me/oidc` | Signed-in person | Whether external login is on and whether this account is linked |
+| `POST /api/me/oidc/link` | Signed-in person (CSRF) | Start linking this account; returns the provider address |
+| `DELETE /api/me/oidc` | Signed-in person (CSRF, password) | Unlink this account |
+| `PUT /api/oidc` | Administrator | Save the settings as a new configuration revision and apply them |
+| `POST /api/oidc/test` | Administrator | Contact the provider and report whether the settings can work; saves nothing |
 
 ## Troubleshooting
 

@@ -101,6 +101,9 @@ docker compose up -d lumen
 
 Restoring removes the newer state first. Keep the backup until the old release starts and both DNS tests pass.
 
+> [!IMPORTANT]
+> **Going back from 0.6.0 to 0.5.x needs that backup.** 0.6.0 migrates the state database to schema 7, and 0.5.x refuses a newer schema. Do not delete the pre-update backup until you are sure you will stay on 0.6.0.
+
 ## Plain Docker
 
 Build locally with `docker build -t lumen:local .`, or use a versioned image:
@@ -120,7 +123,8 @@ Stop with `docker stop --time 15 lumen`. To upgrade, stop and remove only the co
 ## Things to know
 
 - **Access control.** Review `allow_clients` first. The example accepts only private IPv4 and ULA IPv6 ranges. Never expose port 53 to the internet.
-- **State.** The image runs in [managed mode](../guides/managed-mode.md) and keeps accounts, settings, and device policy in `/var/lib/lumen`. Mount a volume there (writable by UID 65532) and keep the root filesystem read-only. Caches and filter snapshots live in memory, so restarts discard them.
+- **State.** The image runs in [managed mode](../guides/managed-mode.md) and keeps accounts, settings, and device policy in `/var/lib/lumen`. Mount a volume there (writable by UID 65532) and keep the root filesystem read-only. DNS caches and filter rollback snapshots live in memory, so restarts discard them. Downloaded block lists are also kept in `/var/lib/lumen/filter-cache` (public list text, bounded to 512 MiB) so a restart does not download fresh lists again; deleting that folder is always safe.
+- **External login.** To offer [single sign-on](../guides/external-login.md), mount the provider's client secret read-only (for example `-v "$PWD/oidc-secret:/run/secrets/oidc:ro"`, then `client_secret_file = "/run/secrets/oidc"`) and register the **public** console address as the redirect URL, for example `https://dns.home.example/api/login/oidc/callback`. The redirect must match what the browser uses, which behind a reverse proxy is the proxy's address, not `127.0.0.1:8080`.
 - **After the first start**, the mounted `lumen.toml` is no longer read. Change settings in the console or with `lumenctl config apply`.
 - **Console setup code.** Docker forwards from a non-loopback address, so first-run setup asks for the code printed by `docker logs lumen`.
 - **HTTPS.** Port 8080 serves the web console and is published on host loopback only. Put any reverse proxy in front to terminate HTTPS or HTTP/3. See [Web console](../guides/web-console.md#https-and-remote-access).

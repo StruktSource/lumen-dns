@@ -312,3 +312,15 @@ and stages a valid `[web.oidc]` for reload. Store tests cover link, unlink and t
 rules. Not verified: browsers (the wizard step and account card were syntax-checked, not
 clicked through), live providers, providers that require `id_token_hint` for logout, and a
 reverse proxy that changes the host.
+
+### One Users page and the single sign-on settings form
+
+Console tests cover the new admin endpoints: saving `[web.oidc]` stages a new revision and
+queues a reload, invalid settings are refused, turning it off is always allowed, non-admins get
+403, `POST /api/oidc/test` answers in the body without saving, and the people list marks
+accounts tied to a provider identity. A provider check against the loopback provider never
+requests tokens. The pages were rendered in a headless DOM (jsdom) with stubbed data: all four
+Users tabs for an administrator, only *My account* for a user, both System tabs, the check and
+save buttons, and the guard that blocks saving while DNS settings are unapplied. Not verified:
+a real browser (layout, focus, keyboard use), a real provider, and a screen reader. The
+translations of the new strings were written by hand and not reviewed by native speakers.

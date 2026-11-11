@@ -21,11 +21,11 @@ On the **first** managed start, Lumen stores your TOML file as **revision 1** an
 
 Database facts:
 
-- It is created at schema 1 and migrated transactionally to the current schema 6. A database made by a newer Lumen is rejected, so back it up before you upgrade.
+- It is created at schema 1 and migrated transactionally to the current schema 7 (0.6.0 added the table that ties console accounts to single sign-on identities). Migration is one-way: a database made by a newer Lumen is rejected by an older one, so back it up before you upgrade and keep the backup if you may want to go back.
 - On Unix the file mode is restricted to `0600`. The service account needs read and write access to the database **directory**.
 - One database belongs to one daemon. Never share it between instances.
 - **Back it up** with SQLite-aware tooling while Lumen is stopped, or with the SQLite backup API. Do not just copy a live file.
-- It holds config revisions, devices, accounts, console settings (such as the language), the control queue, daemon status, and the audit log. **Saved [query history](query-history.md)** is stored in it too, but only if you turn that on. It does **not** hold filter rollback snapshots, DNS caches, or secrets from external key files.
+- It holds config revisions, devices, accounts (and, for [single sign-on](external-login.md), the provider identity each account is tied to, but never a provider token), console settings (such as the language), the control queue, daemon status, and the audit log. **Saved [query history](query-history.md)** is stored in it too, but only if you turn that on. It does **not** hold filter rollback snapshots, DNS caches, or secrets from external key files. Downloaded block-list text is kept next to it in a `filter-cache` folder (public data only, bounded to 128 lists and 512 MiB, safe to delete) so a restart does not download fresh lists again; see [Filtering](filtering.md#online-source-requirements).
 
 ## Change the configuration safely
 

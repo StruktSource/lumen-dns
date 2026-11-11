@@ -50,7 +50,7 @@ gh attestation verify lumen-v0.5.8-<platform>.<extension> --repo StruktSource/lu
 2. Replace **both** `lumen` and `lumenctl` from the same archive. Never mix versions.
 3. Container and Helm users should **pin** the image tag (for example `0.5.8`) rather than `latest`.
 4. Validate your config with the new binary: `lumen --config FILE --check`.
-5. In [managed mode](../guides/managed-mode.md), the database migrates itself on first start. A database from a newer Lumen is rejected, so back it up first.
+5. In [managed mode](../guides/managed-mode.md), the database migrates itself on first start. A database from a newer Lumen is rejected, so back it up first. Migration is one-way: 0.6.0 moves the database to schema 7, which 0.5.x cannot read.
 
 ## Contributor notes
 

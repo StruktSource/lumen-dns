@@ -41,11 +41,11 @@ Lumen is a Rust workspace. Each crate owns one concern:
 | `lumen-proto` | Wire bounds, full-consumption decoding, query validation, safe error responses |
 | `lumen-config` | Startup schema, safe defaults, access-list and limit validation, bounded config reads |
 | `lumen-resolver` | Mode, hints, anchors, verified upstream config, Hickory catalog adapter |
-| `lumen-filter` | Rule normalization, policy selection, bounded imports, snapshots, schedules, synthetic replies |
-| `lumen-store` | SQLite migrations, config revisions, devices, control queue, daemon status, accounts, console settings, and opt-in saved query history |
+| `lumen-filter` | Rule normalization, policy selection, bounded imports, snapshots, schedules, synthetic replies, list downloads with HTTP revalidation and the bounded disk cache |
+| `lumen-store` | SQLite migrations, config revisions, devices, control queue, daemon status, accounts and their optional single sign-on identity, console settings, and opt-in saved query history |
 | `lumen-core` | Transport tasks, shared admission, metrics, service lifecycle |
 | `lumen-api` | Loopback `/v1` auth, roles, rate limits, audit, control queue, signed webhooks |
-| `lumen-web` | Embedded console UI, session-authenticated `/api`, strict routes and headers, HTTP/1.1, HTTP/2, direct TLS |
+| `lumen-web` | Embedded console UI (one *Users* page, System, DNS, Filtering, …), session-authenticated `/api`, optional OpenID Connect sign-in, strict routes and headers, HTTP/1.1, HTTP/2, direct TLS |
 | `apps/lumen` | Strict startup arguments and OS signals |
 | `apps/lumenctl` | Local config, device, reload, filter, status, shutdown, user, and decision controls |
 
@@ -79,7 +79,7 @@ Native binaries, OCI images, Docker Compose, Podman, Kubernetes, Proxmox, and Un
 
 ## Resource bounds
 
-Transport admission bounds live tasks, message allocations, HTTP and QUIC streams, and deadlines. Cache limits count entries, so OS or container limits remain the way to impose a strict process-memory ceiling. Recursive authorities in private or special-use address ranges are denied by Hickory's recommended filters. All the numbers are in the [configuration reference](../reference/configuration.md#limits).
+Transport admission bounds live tasks, message allocations, HTTP and QUIC streams, and deadlines. Cache limits count entries, so OS or container limits remain the way to impose a strict process-memory ceiling. The one disk cache, downloaded block lists in managed mode, is capped at 128 files and 512 MiB and lives beside the state database. Recursive authorities in private or special-use address ranges are denied by Hickory's recommended filters. All the numbers are in the [configuration reference](../reference/configuration.md#limits).
 
 ## Contracts Lumen keeps
 
@@ -87,6 +87,7 @@ Transport admission bounds live tasks, message allocations, HTTP and QUIC stream
 - **Protocol errors stay protocol errors.** DNS errors use DNS response codes. Startup errors are local and never dump configuration, keys, query packets, or query names.
 - **Stable metrics.** Names start with `lumen_dns_` and carry no client or domain labels. See [Monitoring](../guides/monitoring.md).
 - **A separate, authenticated API.** The management API starts at `/v1`, with authentication, scoped authorization, rate limits, and durable audit applied before dispatch. DNS-over-HTTPS is a DNS transport, not a management API.
+- **External login is optional and additive.** It is off by default, never replaces the built-in login, and keeps no provider token. See [External login](../guides/external-login.md).
 - **State is opt-in and local.** SQLite holds config revisions and devices only with `--state`. Hot DNS caches remain bounded in memory. Query history is off unless an administrator turns it on, and external telemetry does not exist.
 - **Nothing implicit.** Operators opt into each encrypted listener and each upstream, and recursive mode has no implicit upstream fallback.
 

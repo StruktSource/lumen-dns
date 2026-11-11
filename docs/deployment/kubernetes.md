@@ -17,11 +17,13 @@ helm upgrade --install lumen deploy/helm/lumen --namespace lumen --create-namesp
 
 - An internal `ClusterIP` Service publishing UDP and TCP 53.
 - A pod running as UID 65532 with a read-only root filesystem, dropped capabilities, resource limits, a seccomp profile, a 30-second termination grace period, and **no service-account token mounted**.
-- **One replica** in managed mode with a small PVC (the chart's `persistence.*` values) for accounts and settings. SQLite must not be shared by multiple pods, and high-availability state replication is future work.
+- **One replica** in managed mode with a small PVC (the chart's `persistence.*` values) for accounts, settings, and the downloaded block-list cache (`filter-cache`, safe to lose). SQLite must not be shared by multiple pods, and high-availability state replication is future work.
 
 ## Configure it
 
 1. **Edit the config ACL** for your real pod and client networks.
+
+For [single sign-on](../guides/external-login.md), keep the OIDC client secret in a Kubernetes Secret mounted read-only as a file and point `client_secret_file` at it; register the Ingress address (not the pod address) as the redirect URL.
 2. **Review the NetworkPolicy.** The default accepts DNS only from the same namespace and permits resolver egress on DNS and encrypted-DNS ports. It lists both Service port 53 and pod target port 5353 so CNIs that enforce before or after Service translation behave the same. Check it against your cluster's CNI.
 3. **Encrypted DNS (optional).** Mount an existing TLS Secret through `tls.existingSecret`. The config must name files under `/etc/lumen/tls`.
 4. **Dual-stack (optional).** Set Helm `service.ipFamilyPolicy` and `service.ipFamilies`. This is unverified.

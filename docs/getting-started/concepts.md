@@ -79,10 +79,13 @@ You opt in to each feature deliberately.
 | Term | Meaning |
 | :--- | :--- |
 | **Allowlist / CIDR** | A range of addresses written like `192.168.1.0/24`. Lumen only answers clients inside the allowed ranges. |
-| **Cache** | Remembered answers, so repeated questions are fast. Lumen's caches are bounded and live in memory only. |
+| **Cache** | Remembered answers, so repeated questions are fast. Lumen's DNS caches are bounded and live in memory only. In managed mode, downloaded block lists are also kept in a small bounded folder on disk so restarts are quicker. |
+| **ETag** | A tag a list server sends with a download. Lumen sends it back later so an unchanged list costs a tiny "not modified" reply instead of a full download. |
 | **Loopback** | The address that always means "this computer" (`127.0.0.1` or `::1`). |
 | **NXDOMAIN** | The DNS reply "this name does not exist". Lumen uses it for blocked names by default. |
+| **Single sign-on (SSO)** | Signing in to the console through an identity provider you already run (Authentik, Authelia, Pocket ID, and others) using OpenID Connect. Optional and off by default; see [External login](../guides/external-login.md). |
 | **Root hints** | The built-in list of the internet's 13 root server groups, where recursion starts. |
+| **Two-step verification (2FA)** | A second proof when signing in, from an authenticator app. Each person turns it on under **Users → My account**. |
 | **Trust anchor** | The root signing key that DNSSEC validation starts from. |
 | **TTL** | How long an answer may be remembered before it must be looked up again. |
 | **Upstream** | A resolver that Lumen forwards questions to. |

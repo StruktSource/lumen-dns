@@ -95,7 +95,9 @@ Start Lumen in [managed mode](../guides/managed-mode.md) by adding a state file,
 ./lumen --config config/lumen.toml --state ./data/state.db
 ```
 
-A guided setup creates your administrator account and, optionally, installs starter block lists. See the [Web console](../guides/web-console.md).
+A guided setup creates your administrator account and, optionally, connects an identity provider and installs starter block lists. See the [Web console](../guides/web-console.md).
+
+Afterwards, open **Users** in the sidebar. Under **My account**, turn on two-step verification. As an administrator, **People** manages accounts and **Sign-in** is where you can switch on [single sign-on](../guides/external-login.md) with Authentik, Authelia, Pocket ID, or another OpenID Connect provider.
 
 ### Try filtering
 

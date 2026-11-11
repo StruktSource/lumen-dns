@@ -31,6 +31,19 @@ Decisions use code-path reasoning; no throughput or latency improvement is claim
 No Linux-only I/O backend, new allocator, parser replacement, arena, tree, Bloom filter,
 explicit SIMD or custom crypto is included.
 
+## Release profile measurements (informational)
+
+One locked release build of `lumen` and `lumenctl` per setting, on one machine (Apple M4, macOS ARM64, Rust 1.95.0, cold target directory). Sizes are bytes of the `lumen` binary before and after `strip`. This measures size and build time only; it makes **no** runtime speed claim.
+
+| Setting | Build time | `lumen` size | After strip |
+| :--- | ---: | ---: | ---: |
+| Cargo default (`codegen-units = 16`, no LTO) | 35 s | 16.9 MiB | 14.1 MiB |
+| `lto = "thin"` (the v0.6.0 choice) | 53 s | 17.6 MiB | 14.9 MiB |
+| `lto = "thin"`, `codegen-units = 1` | 51 s | 13.9 MiB | 12.0 MiB |
+| `lto = "fat"`, `codegen-units = 1` | 73 s | 10.6 MiB | 9.3 MiB |
+
+Reading it: ThinLTO with the default 16 code-generation units was **not smaller** than the default build on this machine, and it cost about 50% more build time. The size win comes with `codegen-units = 1`, which also serializes code generation. Fat LTO is smallest but takes twice the build time of the default. v0.6.0 keeps ThinLTO because it stays portable and keeps unwind semantics; if binary size or build time matters, `codegen-units = 1` is the next candidate, and it should be judged with a runtime measurement first, which this audit does not have.
+
 ## Optional machine-local build
 
 ```sh

@@ -69,9 +69,20 @@ The overview shows aggregate counters only. **[Query history](query-history.md)*
 
 ### Language
 
-The console is available in English, German, Italian, Spanish, and Dutch. The setup wizard asks first, each person can choose their own under **My account**, and administrators set the default under **Users & access → Console**. See [Languages and translations](translations.md).
+The console is available in English, German, Italian, Spanish, and Dutch. The setup wizard asks first, each person can choose their own under **Users → My account**, and administrators set the default under **System → Console**. See [Languages and translations](translations.md).
 
 ## Accounts and sign-in
+
+Everything about people lives on one page, **Users** in the sidebar:
+
+| Tab | Who | What |
+| :--- | :--- | :--- |
+| **My account** | Everyone | Change your password, turn on two-step verification, link your account to single sign-on, pick language and theme, sign out |
+| **People** | Administrators | Add, edit, reset, and delete accounts; see who uses single sign-on or two-step verification |
+| **Sign-in** | Administrators | [Single sign-on](external-login.md) settings and the idle sign-out time, with the count of accounts that use two-step verification |
+| **Audit log** | Administrators | Who did what, newest first |
+
+People who are not administrators see only *My account*. Older links to *Users & access* and *My account* still land in the right place. Where the console itself is served, its default language, the Overview auto reload, and monitoring moved to **System → Console**.
 
 | Role | Can do |
 | :--- | :--- |
@@ -95,7 +106,7 @@ lumenctl user reset-password --state FILE --name NAME --password generate
 
 ### Two-step verification (TOTP)
 
-Optional per account, under **My account**. It works with any authenticator app (RFC 6238: SHA-1, 6 digits, 30 seconds), such as Google Authenticator, Authy, 1Password, or Aegis.
+Optional per account, under **Users → My account**. It works with any authenticator app (RFC 6238: SHA-1, 6 digits, 30 seconds), such as Google Authenticator, Authy, 1Password, or Aegis.
 
 1. Turning it on asks for your password and shows a **setup key** and an `otpauth://` link. There is no QR code.
 2. Enter one valid code to activate it.
@@ -105,7 +116,7 @@ Optional per account, under **My account**. It works with any authenticator app 
 
 The secret is stored in the state database (mode `0600`) because the server must compute codes. Recovery codes are stored only as hashes.
 
-Lost phone and codes? An administrator can remove two-step verification under **Users & access**, or run `lumenctl user reset-2fa --state FILE --name NAME`. Either way, that account's sessions end.
+Lost phone and codes? An administrator can remove two-step verification under **Users → People**, or run `lumenctl user reset-2fa --state FILE --name NAME`. Either way, that account's sessions end.
 
 ## HTTPS and remote access
 
@@ -146,7 +157,7 @@ The image keeps accounts and settings in `/var/lib/lumen` (a volume writable by 
 
 ## The console API
 
-The console talks to `/api/*` on the same listener. This is an **internal interface** for the bundled UI and may change between releases. For automation, use the [management API](../reference/management-api.md) with its scoped tokens.
+The console talks to `/api/*` on the same listener. This is an **internal interface** for the bundled UI and may change between releases. For automation, use the [management API](../reference/management-api.md) with its scoped tokens. The routes behind [external login](external-login.md#endpoints) are listed with that feature.
 
 ## Related
 

@@ -153,7 +153,7 @@ Each item has to keep Lumen's defaults intact: private, bounded, and explicit op
 
 - [x] The web console in English (default), German, Italian, Spanish, and Dutch
 - [x] A translation framework: message catalogs keyed by the English text, a per-browser choice, a console default for administrators, a browser-language fallback, and locale-aware numbers
-- [x] A language step in the setup wizard, and language settings under My account and Users & access
+- [x] A language step in the setup wizard, and language settings under Users → My account and System → Console
 - [x] A documented way to add or improve a translation, with tests that keep the catalogs complete and current ([Languages and translations](../guides/translations.md))
 - [ ] Translate the remaining long help texts on the DNS settings and Filtering pages
 - [ ] More languages
