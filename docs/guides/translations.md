@@ -26,9 +26,9 @@ On first run, the setup wizard starts with a language picker. The language you c
 
 ## What is translated
 
-The parts you use every day are translated: navigation, sign-in and two-step verification, the whole setup wizard, Overview, Activity and query history, Devices, Users & access, System, My account, dialogs, confirmations, and common error messages.
+The whole console is translated: navigation, sign-in and two-step verification, the setup wizard, every page, editors, dialogs, confirmations, help text, and common error messages.
 
-The **DNS settings** and **Filtering** editor pages are translated for their headings, labels, and buttons, but many of their longer explanatory paragraphs, and a few rarely used labels elsewhere, are not translated yet and appear in English. Names such as list titles, protocol names, and file paths are never translated. Text sent by the server, such as a download error from a list publisher, can also stay in English.
+Names such as list titles, protocol names, and file paths are not translated. Text supplied at runtime, such as a list publisher's download error, can also stay in English because it is not part of a locale catalog.
 
 Anything without a translation falls back to English, so a missing entry never breaks a page.
 
