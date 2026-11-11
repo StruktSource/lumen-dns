@@ -34,6 +34,33 @@ function disable2fa() {
     actions: [{ label: 'Cancel' }, { label: 'Turn off', kind: 'danger', onClick: async () => { try { await L.api('POST', '/api/me/2fa/disable', { password: st.pw, code: st.code }); L.session.totp_enabled = false; L.toast('Two-step verification is off.'); L.rerender(); } catch (e) { err.textContent = e.message; return false; } } }] });
 }
 
+/* Single sign-on: link or unlink this account. Only shown when an administrator turned external login on. */
+function unlinkSso(then) {
+  const st = { pw: '' }; const err = h('div', { class: 'err', role: 'alert' });
+  L.modal({ title: 'Unlink single sign-on', body: [h('p', { style: 'margin:0' }, 'You will sign in with your username and password only.'), L.pwField(st, 'pw', { label: 'Your password', meter: false, autocomplete: 'current-password', id: 'unlink-pw' }), err],
+    actions: [{ label: 'Cancel' }, { label: 'Unlink', kind: 'danger', onClick: async () => { try { await L.api('DELETE', '/api/me/oidc', { password: st.pw }); L.toast('Single sign-on is unlinked.'); then(); } catch (e) { err.textContent = e.message; return false; } } }] });
+}
+function ssoCard() {
+  const card = h('div', { class: 'card', style: 'display:none' });
+  const paint = s => {
+    const name = s.label || ''; card.style.display = '';
+    card.replaceChildren(h('div', { class: 'card-h' }, h('h3', {}, 'Single sign-on'), h('span', { class: 'pill ' + (s.linked ? 'ok' : 'off') }, s.linked ? 'Linked' : 'Not linked')),
+      h('div', { class: 'card-b stack' }, h('p', { class: 'hint', style: 'margin:0' }, s.linked ? L.t('You can sign in with {name} or with your password.', { name }) : L.t('Link this account to {name} to sign in with one click. Your username, role and settings stay the same.', { name })),
+        h('div', {}, s.linked ? h('button', { class: 'btn danger', onclick: () => unlinkSso(load) }, 'Unlink')
+          : h('button', { class: 'btn primary', onclick: async e => { e.target.disabled = true; try { location.href = (await L.api('POST', '/api/me/oidc/link')).url; } catch (x) { e.target.disabled = false; L.toast(x.message, 'bad'); } } }, L.t('Link {name}', { name })))));
+  };
+  const load = () => L.api('GET', '/api/me/oidc').then(s => { if (s.available) paint(s); else card.style.display = 'none'; }).catch(() => {});
+  if (L.meta?.oidc) load();
+  return card;
+}
+/* The provider sends people back here after linking. Show one notice and tidy the address. */
+function ssoNotice() {
+  const r = new URLSearchParams(location.search).get('sso');
+  if (r !== 'linked' && r !== 'link-failed') return;
+  history.replaceState(null, '', location.pathname + location.hash);
+  setTimeout(() => (r === 'linked' ? L.toast('Your account is now linked.') : L.toast('Linking did not work. That identity may already be used by another account.', 'bad')), 0);
+}
+
 L.views.account = () => {
   const me = L.session; const f = { cur: '', pw: '', pw2: '' }; const err = h('div', { class: 'err', role: 'alert' });
   const save = async () => {
@@ -44,7 +71,7 @@ L.views.account = () => {
     try { const r = await L.api('POST', '/api/me/password', { current: f.cur, password: f.pw }); L.session = r.user; L.csrf = r.csrf; L.toast('Password changed. Other sessions were signed out.'); location.hash = '#/overview'; L.render(); }
     catch (e) { err.textContent = e.message; if (btn) btn.disabled = false; }
   };
-  const theme = { v: document.documentElement.dataset.theme };
+  const theme = { v: document.documentElement.dataset.theme }; ssoNotice();
   return [L.pageHead('My account', L.t('Signed in as {name}.', { name: me.name })),
     me.must_change ? h('div', { class: 'note warn', style: 'margin-bottom:16px' }, L.ic('alert'), h('p', {}, h('b', {}, 'Choose your own password. '), 'An administrator gave you a temporary one.')) : null,
     h('div', { class: 'grid g2' },
@@ -53,6 +80,7 @@ L.views.account = () => {
         h('div', {}, h('button', { class: 'btn primary', type: 'submit' }, 'Change password')))),
       h('div', { class: 'stack' },
         h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h3', {}, 'Two-step verification'), h('span', { class: 'pill ' + (me.totp_enabled ? 'ok' : 'off') }, me.totp_enabled ? 'On' : 'Off')), h('div', { class: 'card-b stack' }, h('p', { class: 'hint', style: 'margin:0' }, me.totp_enabled ? 'Signing in needs a code from your authenticator app. You also have single-use recovery codes.' : 'Add a second step so a stolen password is not enough to sign in.'), h('div', {}, me.totp_enabled ? h('button', { class: 'btn danger', onclick: disable2fa }, 'Turn off') : h('button', { class: 'btn primary', onclick: enable2fa }, L.ic('shield'), 'Turn on')))),
+        ssoCard(),
         h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h3', {}, 'Account')), h('div', { class: 'card-b' }, h('dl', { class: 'kv' }, h('dt', {}, 'Username'), h('dd', {}, me.name), h('dt', {}, 'Role'), h('dd', {}, L.ROLE_LABEL[me.role]), h('dt', {}, 'Auto sign-out'), h('dd', {}, L.t('after {n} min idle', { n: L.S.settings.session_idle_minutes }))))),
         h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h3', {}, 'Appearance')), h('div', { class: 'card-b' }, L.f.seg(theme, 'v', [['light', 'Light'], ['dark', 'Dark']], { onChange: () => { document.documentElement.dataset.theme = theme.v; localStorage.setItem('lumen-theme', theme.v); L.rerender(); } }))),
         h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('h3', {}, 'Language')), h('div', { class: 'card-b stack' },

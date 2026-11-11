@@ -26,7 +26,7 @@ L.signedIn = data => {
   L.session = data.user; L.csrf = data.csrf;
   location.hash = data.user.must_change ? '#/account' : '#/overview'; L.render();
 };
-L.logout = async () => { try { await L.api('POST', '/api/logout'); } catch { /* already gone */ } L.session = null; L.csrf = ''; L.S.draft = null; L.meta = await L.api('GET', '/api/state').catch(() => L.meta); location.hash = '#/login'; L.render(); };
+L.logout = async () => { let r = null; try { r = await L.api('POST', '/api/logout'); } catch { /* already gone */ } L.session = null; L.csrf = ''; L.S.draft = null; L.meta = await L.api('GET', '/api/state').catch(() => L.meta); /* Signed in through the provider: end its session too. */ if (r?.redirect) { location.href = r.redirect; return; } location.hash = '#/login'; L.render(); };
 L.onSignedOut = () => { L.toast('Your session ended. Sign in again.', 'bad'); location.hash = '#/login'; L.render(); };
 
 /* ---------- shell ---------- */
