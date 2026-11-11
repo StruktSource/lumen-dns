@@ -2,7 +2,7 @@
 
 Where Lumen is today and where it is going. This page replaces the former separate *progress*, *TODO*, and *product plan* documents.
 
-_Last updated 2026-11-09 for version 0.6.0._
+_Last updated 2026-11-11 for version 0.6.0._
 
 > [!IMPORTANT]
 > Lumen is **pre-release**. A checked box means *implemented, documented, and covered by the checks in the [verification record](verification.md)*. It does **not** mean production-ready, and unrun platform checks or planned features are never marked as shipped.
@@ -164,31 +164,33 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### High priority: do next
 
-1. **Transport failover when a provider's first transport is silent.** A blocked QUIC port can stall a whole provider today, because the forwarding library gives one query a single deadline. Needs a per-transport budget. See [Upstream providers](../guides/upstream-providers.md#how-failover-works).
+1. **Logic-led full codebase cleanup and optimization.** Review the full codebase to simplify, minimize, and optimize it. Do not make any optimization until a code audit confirms that Lumen does not already implement it and a reasoned review shows that it makes sense for the real code path. Evaluate Linux `io_uring` where it can replace `epoll`; `SO_REUSEPORT`; batched vector I/O with `recvmmsg`/`sendmmsg` instead of one-at-a-time `recvfrom`; zero-copy paths and direct buffers; `jemalloc` or `mimalloc` instead of glibc `malloc`; arena allocation for DNS requests; radix trees or tries with Bloom-filter pre-checks instead of hash maps; compact string encoding; cache-local B-trees or pointer tries; replacing performance-critical parts of Hickory DNS with a minimal wire parser based on `nom` or `zerocopy`; and a full release-build optimization pass with aggressive link-time optimization, code-generation settings, native CPU targeting, and modern SIMD such as AVX2 or AVX-512. Keep only changes that pass this logical audit and have acceptable portability, safety, memory, and maintenance costs.
+2. **Transport failover when a provider's first transport is silent.** A blocked QUIC port can stall a whole provider today, because the forwarding library gives one query a single deadline. Needs a per-transport budget. See [Upstream providers](../guides/upstream-providers.md#how-failover-works).
 
 ### Medium priority: soon
 
-2. **CSS themes** for the console.
-3. **Finish the translations:** the remaining long help texts, and more languages.
+3. **Optional external login.** Let administrators opt in to Authentik, Authelia, Octelium, and similar self-hosted identity or access platforms as console login methods. Keep Lumen's built-in login available and keep external login disabled by default.
+4. **CSS themes** for the console.
+5. **Finish the translations:** the remaining long help texts, and more languages.
 
 ### Lower priority: later
 
-4. **Faster, lighter list downloads.** Ideas, roughly in order of payoff: conditional requests (`ETag` / `If-Modified-Since`) so an unchanged list costs almost nothing; downloading several lists at once with a bound; asking for compressed transfer; keeping downloaded lists on disk so a restart does not fetch them again; and delta updates for very large lists. Lists already stay in memory across reloads, so changing settings no longer downloads them again.
-5. **Weighted random load balancing** across providers (spreading by recent speed rather than evenly), as some filter apps offer. Round-robin and fastest-first cover most of it today.
+6. **Faster, lighter list downloads.** Ideas, roughly in order of payoff: conditional requests (`ETag` / `If-Modified-Since`) so an unchanged list costs almost nothing; downloading several lists at once with a bound; asking for compressed transfer; keeping downloaded lists on disk so a restart does not fetch them again; and delta updates for very large lists. Lists already stay in memory across reloads, so changing settings no longer downloads them again.
+7. **Weighted random load balancing** across providers (spreading by recent speed rather than evenly), as some filter apps offer. Round-robin and fastest-first cover most of it today.
 
-6. **Trust-anchor rollover automation and certificate lifecycle tooling.**
-7. **Split DNS, local records, and conditional forwarding.**
-8. **Recursion speed evidence:** a statistically significant cold-query result and an expiry-refresh benchmark (see [Recursion speed](#recursion-speed-issue-9)).
+8. **Trust-anchor rollover automation and certificate lifecycle tooling.**
+9. **Split DNS, local records, and conditional forwarding.**
+10. **Recursion speed evidence:** a statistically significant cold-query result and an expiry-refresh benchmark (see [Recursion speed](#recursion-speed-issue-9)).
 
 ### Large efforts, before or after 1.0
 
-9. **Independent security review.** Required before a stable release.
-10. **High availability and cluster configuration replication.**
-11. **Optional DNS threat feeds and enterprise policy features.**
+11. **Independent security review.** Required before a stable release.
+12. **High availability and cluster configuration replication.**
+13. **Optional DNS threat feeds and enterprise policy features.**
 
 ### Not now
 
-12. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
+14. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
 
 ## Side projects
 
