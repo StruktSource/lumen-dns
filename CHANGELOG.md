@@ -4,6 +4,8 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-12
+
 ### Added
 
 - **DNS over HTTP/3 (DoH3).** `listen.doh3` serves `/dns-query` over QUIC with ALPN `h3`, with the same methods, media type, status codes, limits, certificate, and `allow_clients` rules as DoH over HTTP/2. Metrics gain an `http3` transport label (the former `other` label moves to a new index but keeps its name).
@@ -11,12 +13,6 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 - **Your own DNS zones (opt-in).** `[[zones]]` serves authoritative records from zone files or inline text, with split-horizon `views` by client network, DNS-SD as ordinary records, and `[[forwarders]]` for conditional forwarding of a domain to specific resolvers. These names bypass the response caches. See [Your own DNS zones](docs/guides/authoritative-dns.md).
 - **Dynamic updates (RFC 2136) and zone transfers.** A zone with a `journal` accepts TSIG-signed updates scoped per key to names and record types, saved to a SQLite journal. `transfer_keys` allow AXFR and IXFR over TCP, TSIG-signed, bounded to one DNS message. IXFR is answered as a full transfer, and NOTIFY is not sent. The vendored `hickory-server` now uses `rusqlite` 0.41 and treats IXFR like AXFR under the same policy (see `vendor/README.md`).
 - **Certificate renewal without restart.** Renewed PEM files for DoT, DoH, DoH3, and DoQ are checked every 30 seconds, verified, and swapped in; bad files keep the old pair serving. New metrics export expiry and reload counts. The web console's HTTPS certificate still needs a restart.
-
-
-## [0.7.0] - 2026-11-12
-
-### Added
-
 - **Serve-stale (RFC 8767), opt-in.** `[resolver.serve_stale]` answers from an expired entry for up to `max_age_secs` while one background refresh runs. Replies carry a short TTL, and expired DNSSEC-authenticated data is never served. Stale data is also used when live resolution times out.
 - **Persistent DNS cache, opt-in.** `[resolver.persistent_cache]` saves bounded responses in a separate mode `0600` SQLite file so restarts start warm. It stores names and answers, never clients. A corrupt file is moved aside and rebuilt.
 - **Regular-expression filter rules.** `regex_allow` and `regex_block`, global or per profile, whole-name, linear-time, and size-limited. `filter-explain` shows the matching pattern.
@@ -30,7 +26,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Not included
 
-Authoritative zones, split-horizon views, RFC 2136, AXFR/IXFR, zone signing, DoH over HTTP/3, DNSCrypt, and native ECH are **not** available in this release.
+Zone signing, built-in ACME issuance, RFC 5011 trust-anchor rollover, native ECH, DHCP, DNSCrypt or DoH3 upstreams, and Anonymized DNSCrypt are **not** available in this release.
 
 ## [0.6.0] - 2026-11-09
 

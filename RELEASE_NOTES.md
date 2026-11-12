@@ -1,6 +1,6 @@
 # Lumen 0.7.0
 
-Lumen 0.7.0 adds optional stale answers, an optional persistent cache, and stronger filtering. All new features are off by default.
+Lumen 0.7.0 adds optional stale answers, a persistent cache, stronger filtering, two new encrypted transports, and your own DNS zones. All new features are off by default.
 
 ## Highlights
 
@@ -8,9 +8,14 @@ Lumen 0.7.0 adds optional stale answers, an optional persistent cache, and stron
 - **Persistent DNS cache.** Enable `[resolver.persistent_cache]` to keep bounded responses across restarts in a separate SQLite file. It holds queried names and answers, never clients. Exclude it from backups.
 - **Regex rules, CNAME blocking, SafeSearch.** `regex_allow`/`regex_block` rules, filtering of CNAME targets in upstream answers, and per-profile `safe_search` for Google, Bing, and YouTube.
 
+- **DoH over HTTP/3 and DNSCrypt v2.** `listen.doh3` serves `/dns-query` over QUIC. `[dnscrypt]` serves encrypted queries over UDP and TCP with rotating signed certificates.
+- **Your own DNS zones.** `[[zones]]` serves records from zone files, with split-horizon `views` and `[[forwarders]]` for conditional forwarding. See [Your own DNS zones](docs/guides/authoritative-dns.md).
+- **Dynamic updates and zone transfers.** TSIG-signed RFC 2136 updates scoped per key to names and types, saved to a SQLite journal, and TSIG-protected AXFR/IXFR over TCP. IXFR is answered as a full transfer, and NOTIFY is not sent.
+- **Certificate renewal without restart.** Renewed DoT, DoH, DoH3, and DoQ certificates are picked up within 30 seconds; a bad file keeps the old pair serving.
+
 ## Not in this release
 
-Authoritative zones, split-horizon DNS, dynamic updates, zone transfers, zone signing, DoH over HTTP/3, DNSCrypt, and native ECH remain on the roadmap.
+Zone signing, built-in ACME issuance, RFC 5011 trust-anchor rollover, native ECH, DHCP, DNSCrypt or DoH3 upstreams, and Anonymized DNSCrypt. DNSCrypt has not been tested against a third-party client.
 
 ## Check the download
 
