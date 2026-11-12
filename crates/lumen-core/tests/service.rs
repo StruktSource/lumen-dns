@@ -8,7 +8,7 @@ use hickory_proto::{
     op::{Edns, Message, Query, ResponseCode},
     rr::{
         Name, RData, Record, RecordType,
-        rdata::{A, AAAA, SOA},
+        rdata::{A, AAAA, CNAME, SOA},
     },
 };
 use lumen_config::{Config, ForwardStrategy, Mode, Upstream, UpstreamProtocol};
@@ -284,6 +284,13 @@ fn mock_response(request: Message, tcp: bool, servfail: bool) -> Message {
                 60,
                 1,
             )),
+        ));
+    } else if text.starts_with("alias.") {
+        response.metadata.authentic_data = true;
+        response.add_answer(Record::from_rdata(
+            name,
+            1,
+            RData::CNAME(CNAME(Name::from_ascii("tracker.example.").unwrap())),
         ));
     } else if q.query_type() == RecordType::AAAA {
         response.add_answer(Record::from_rdata(
@@ -1244,6 +1251,26 @@ async fn filtering_precedes_shared_cache_updates_and_rollback() {
     assert!(!udp(v4, &packet).await.answers.is_empty());
     assert_eq!(fixture.queries.load(Ordering::Relaxed), count);
     assert!(!server.refresh_filter_due().await.unwrap());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cname_chain_filtering_replaces_validated_answer_and_clears_ad() {
+    let fixture = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(fixture.address, bind);
+    cfg.filtering.rules.block = vec!["tracker.example".into()];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+
+    let reply = udp(bind, &query("alias.example.", RecordType::A)).await;
+    assert_eq!(reply.metadata.response_code, ResponseCode::NXDomain);
+    assert!(!reply.metadata.authentic_data);
+    assert!(reply.answers.is_empty());
+    assert_eq!(server.filter().metrics.blocked.load(Ordering::Relaxed), 1);
+    assert_eq!(server.filter().metrics.allowed.load(Ordering::Relaxed), 0);
+    // Hickory follows the CNAME once; policy then replaces the completed chain.
+    assert_eq!(fixture.queries.load(Ordering::Relaxed), 2);
+
     server.shutdown().await;
 }
 

@@ -26,6 +26,9 @@ pub struct Config {
 pub struct Rules {
     pub allow: Vec<String>,
     pub block: Vec<String>,
+    /// Full-name regular expressions. These are compiled once with strict size limits.
+    pub regex_allow: Vec<String>,
+    pub regex_block: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -71,6 +74,8 @@ pub struct Profile {
     pub action: Option<Action>,
     /// Empty means always active. Outside these windows only global rules apply.
     pub schedules: Vec<Schedule>,
+    /// Rewrite supported search services to their documented restricted endpoints.
+    pub safe_search: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -140,10 +145,17 @@ impl Config {
         }
         let manual_count = self.rules.allow.len()
             + self.rules.block.len()
+            + self.rules.regex_allow.len()
+            + self.rules.regex_block.len()
             + self
                 .profiles
                 .iter()
-                .map(|p| p.rules.allow.len() + p.rules.block.len())
+                .map(|p| {
+                    p.rules.allow.len()
+                        + p.rules.block.len()
+                        + p.rules.regex_allow.len()
+                        + p.rules.regex_block.len()
+                })
                 .sum::<usize>();
         if manual_count > crate::rules::MAX_RULES {
             return Err(format!(
@@ -273,6 +285,28 @@ fn validate_rules(rules: &Rules) -> Result<(), String> {
     }
     for rule in rules.allow.iter().chain(&rules.block) {
         Rule::parse(rule, false)?;
+    }
+    let regexes = rules.regex_allow.len() + rules.regex_block.len();
+    if regexes > crate::rules::MAX_REGEX_RULES {
+        return Err(format!(
+            "too many regular-expression rules; maximum is {}",
+            crate::rules::MAX_REGEX_RULES
+        ));
+    }
+    let bytes: usize = rules
+        .regex_allow
+        .iter()
+        .chain(&rules.regex_block)
+        .map(String::len)
+        .sum();
+    if bytes > crate::rules::MAX_REGEX_BYTES {
+        return Err(format!(
+            "regular-expression rules exceed {} bytes",
+            crate::rules::MAX_REGEX_BYTES
+        ));
+    }
+    for pattern in rules.regex_allow.iter().chain(&rules.regex_block) {
+        crate::rules::compile_regex(pattern)?;
     }
     Ok(())
 }

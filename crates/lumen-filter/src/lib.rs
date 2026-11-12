@@ -10,7 +10,7 @@ pub mod rules;
 pub use response::response;
 
 use config::{Action, Config, Profile, Rules};
-use rules::{ParsedList, Rule, domain_hash};
+use rules::{ParsedList, Rule, compile_regex, domain_hash};
 use std::{
     collections::HashMap,
     net::IpAddr,
@@ -151,6 +151,50 @@ impl Index {
     }
 }
 
+struct RegexEntry {
+    source: String,
+    regex: regex::Regex,
+}
+
+#[derive(Default)]
+struct RegexIndex {
+    allow: Vec<RegexEntry>,
+    block: Vec<RegexEntry>,
+}
+
+impl RegexIndex {
+    fn manual(rules: &Rules) -> Result<Self, String> {
+        let compile = |sources: &[String]| {
+            sources
+                .iter()
+                .map(|source| {
+                    Ok(RegexEntry {
+                        source: source.clone(),
+                        regex: compile_regex(source)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        };
+        Ok(Self {
+            allow: compile(&rules.regex_allow)?,
+            block: compile(&rules.regex_block)?,
+        })
+    }
+
+    fn find(&self, name: &str) -> Option<Hit> {
+        self.allow
+            .iter()
+            .find(|entry| entry.regex.is_match(name))
+            .map(|entry| Hit::regex(entry, true))
+            .or_else(|| {
+                self.block
+                    .iter()
+                    .find(|entry| entry.regex.is_match(name))
+                    .map(|entry| Hit::regex(entry, false))
+            })
+    }
+}
+
 /// A rule that decided a query.
 struct Hit {
     domain: String,
@@ -166,6 +210,15 @@ impl Hit {
             exact: entry.rule.exact,
             allow: entry.rule.allow,
             list: entry.list,
+        }
+    }
+
+    fn regex(entry: &RegexEntry, allow: bool) -> Self {
+        Self {
+            domain: format!("/{}/", entry.source),
+            exact: false,
+            allow,
+            list: None,
         }
     }
 }
@@ -228,7 +281,9 @@ struct Refresh {
 pub struct Filter {
     config: Config,
     global: Index,
+    global_regex: RegexIndex,
     profiles: Vec<Index>,
+    profile_regex: Vec<RegexIndex>,
     devices: HashMap<IpAddr, usize>,
     state: RwLock<State>,
     refresh: Mutex<Refresh>,
@@ -255,10 +310,16 @@ impl Filter {
         }
         let live = Arc::new(compile(&config, lists, 1)?);
         let global = Index::manual(&config.rules)?;
+        let global_regex = RegexIndex::manual(&config.rules)?;
         let profiles = config
             .profiles
             .iter()
             .map(|p| Index::manual(&p.rules))
+            .collect::<Result<_, _>>()?;
+        let profile_regex = config
+            .profiles
+            .iter()
+            .map(|p| RegexIndex::manual(&p.rules))
             .collect::<Result<_, _>>()?;
         let devices = config
             .devices
@@ -274,7 +335,9 @@ impl Filter {
         Ok(Self {
             config,
             global,
+            global_regex,
             profiles,
+            profile_regex,
             devices,
             state: RwLock::new(State {
                 live,
@@ -428,7 +491,9 @@ impl Filter {
         };
         let found = active
             .and_then(|(i, _)| self.profiles[i].find(name, |_| true).map(Hit::from_entry))
+            .or_else(|| active.and_then(|(i, _)| self.profile_regex[i].find(name)))
             .or_else(|| self.global.find(name, |_| true).map(Hit::from_entry))
+            .or_else(|| self.global_regex.find(name))
             .or_else(|| {
                 live.find(name, |list| {
                     let list = &self.config.lists[list];
@@ -457,6 +522,15 @@ impl Filter {
                         .unwrap_or_else(|| self.config.action.clone()),
                 );
             }
+        } else if active.is_some_and(|(_, profile)| profile.safe_search)
+            && let Some(target) = safe_search_target(name)
+        {
+            decision.blocked = true;
+            decision.rule = Some(format!("safe_search:{name}"));
+            decision.category = Some("safe_search".into());
+            decision.action = Some(Action::Cname {
+                target: target.into(),
+            });
         }
         decision
     }
@@ -486,6 +560,22 @@ impl Filter {
             &self.metrics.allowed
         }
         .fetch_add(1, Ordering::Relaxed);
+        decision
+    }
+
+    /// Replace the allowed count already recorded for a query when a CNAME target is blocked.
+    #[must_use]
+    pub fn decide_cname_dns(
+        &self,
+        name: &lumen_proto::hickory_proto::rr::Name,
+        client: IpAddr,
+        unix_seconds: u64,
+    ) -> Decision {
+        let decision = self.explain_dns(name, client, unix_seconds);
+        if decision.blocked {
+            self.metrics.allowed.fetch_sub(1, Ordering::Relaxed);
+            self.metrics.blocked.fetch_add(1, Ordering::Relaxed);
+        }
         decision
     }
 
@@ -588,6 +678,19 @@ impl Filter {
         refresh.automatic_paused = true;
         self.metrics.rollbacks.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+}
+
+fn safe_search_target(name: &str) -> Option<&'static str> {
+    match name {
+        "www.google.com" => Some("forcesafesearch.google.com"),
+        "www.bing.com" => Some("strict.bing.com"),
+        "www.youtube.com"
+        | "m.youtube.com"
+        | "youtubei.googleapis.com"
+        | "youtube.googleapis.com"
+        | "www.youtube-nocookie.com" => Some("restrictmoderate.youtube.com"),
+        _ => None,
     }
 }
 

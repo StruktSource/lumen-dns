@@ -7,7 +7,11 @@ pub use lumen_resolver::Transport;
 pub use transport::{ConsoleOptions, RunningServer};
 
 use lumen_config::Config;
-use lumen_proto::{Query, Rcode, is_response, malformed_response};
+use lumen_proto::{
+    Query, Rcode,
+    hickory_proto::{op::Message, rr::RData},
+    is_response, malformed_response,
+};
 use lumen_resolver::Resolver;
 use std::fmt::Write;
 use std::{
@@ -203,7 +207,7 @@ struct Service {
     history: Mutex<std::collections::VecDeque<lumen_web::QueryRecord>>,
     unsaved: Mutex<Vec<lumen_web::QueryRecord>>,
     config: Arc<Config>,
-    resolver: Resolver,
+    resolver: Arc<Resolver>,
     /// Swapped as a whole when lists or rules change, so listeners never restart for that.
     filter: RwLock<Arc<lumen_filter::Filter>>,
     queries: Arc<Semaphore>,
@@ -213,6 +217,36 @@ struct Service {
 }
 
 impl Service {
+    /// Replace an upstream answer whose CNAME chain reaches a blocked name.
+    fn block_cname(
+        filter: &lumen_filter::Filter,
+        query: &Query,
+        response: &[u8],
+        peer: SocketAddr,
+        now: u64,
+        maximum: usize,
+    ) -> Option<Vec<u8>> {
+        let message = Message::from_vec(response).ok()?;
+        for record in &message.answers {
+            let RData::CNAME(target) = &record.data else {
+                continue;
+            };
+            let decision = filter.decide_cname_dns(&target.0, peer.ip().to_canonical(), now);
+            let Some(action) = &decision.action else {
+                continue;
+            };
+            if filter.decision_log() {
+                eprintln!(
+                    "filter client={} cname_target={:?} {decision}",
+                    peer.ip().to_canonical(),
+                    target.0.to_ascii()
+                );
+            }
+            return Some(lumen_filter::response(query, action, maximum));
+        }
+        None
+    }
+
     /// The filter that is live right now.
     fn filter(&self) -> Arc<lumen_filter::Filter> {
         Arc::clone(&self.filter.read().expect("filter lock"))
@@ -267,6 +301,12 @@ impl Service {
             .unwrap_or_default()
             .as_secs();
         let filter = self.filter();
+        let maximum = usize::from(self.config.limits.max_message_bytes);
+        let maximum = if protocol == Transport::Udp {
+            maximum.min(usize::from(query.message.max_payload().max(512)))
+        } else {
+            maximum
+        };
         let decision = filter.decide_dns(
             query.message.queries[0].name(),
             peer.ip().to_canonical(),
@@ -280,12 +320,6 @@ impl Service {
             );
         }
         if let Some(action) = &decision.action {
-            let maximum = usize::from(self.config.limits.max_message_bytes);
-            let maximum = if protocol == Transport::Udp {
-                maximum.min(usize::from(query.message.max_payload().max(512)))
-            } else {
-                maximum
-            };
             let response = lumen_filter::response(&query, action, maximum);
             self.log_query(&query, peer, true, &response, started);
             return Some(self.record_response(response, protocol, started));
@@ -302,15 +336,32 @@ impl Service {
             ),
         )
         .await;
-        let response = match result {
+        let mut response = match result {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => query.response(Rcode::ServFail),
             Err(_) => {
                 self.metrics.timeouts.fetch_add(1, Ordering::Relaxed);
-                query.response(Rcode::ServFail)
+                let maximum = if protocol == Transport::Udp {
+                    usize::from(self.config.limits.max_message_bytes)
+                        .min(usize::from(query.message.max_payload()))
+                        .min(1232)
+                } else {
+                    usize::from(self.config.limits.max_message_bytes)
+                };
+                self.resolver
+                    .cached_answer(&query, maximum)
+                    .unwrap_or_else(|| query.response(Rcode::ServFail))
             }
         };
-        self.log_query(&query, peer, false, &response, started);
+        let cname_blocked = if let Some(blocked) =
+            Self::block_cname(&filter, &query, &response, peer, now, maximum)
+        {
+            response = blocked;
+            true
+        } else {
+            false
+        };
+        self.log_query(&query, peer, cname_blocked, &response, started);
         Some(self.record_response(response, protocol, started))
     }
 

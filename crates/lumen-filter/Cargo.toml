@@ -12,6 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 ipnet.workspace = true
+regex = "1"
 tokio.workspace = true
 rustls.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "gzip", "brotli", "deflate", "zstd"] }
