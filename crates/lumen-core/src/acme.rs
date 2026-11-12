@@ -9,7 +9,8 @@ use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount,
     NewOrder, OrderStatus, RetryPolicy,
 };
-use lumen_config::{Acme, Config};
+use lumen_config::{Acme, AcmeChallenge, Config};
+use lumen_resolver::Challenges;
 use std::{
     collections::HashMap,
     io,
@@ -60,11 +61,22 @@ fn due(config: &Config) -> bool {
 ///
 /// # Errors
 /// Issuance failed and no usable certificate exists yet.
-pub(crate) async fn ensure(config: &Config) -> io::Result<()> {
+pub(crate) async fn ensure(config: &Config, challenges: &Arc<Challenges>) -> io::Result<()> {
     if config.acme.domains.is_empty() || !due(config) {
         return Ok(());
     }
-    match obtain(config).await {
+    // Before the first certificate Lumen's own listeners cannot start, so DNS-01 needs a small
+    // stand-in that answers the challenge name and nothing else.
+    let stand_in = if config.acme.challenge == AcmeChallenge::Dns01 {
+        Some(StandIn::start(config, challenges).await?)
+    } else {
+        None
+    };
+    let result = obtain(config, challenges).await;
+    if let Some(stand_in) = stand_in {
+        stand_in.stop().await;
+    }
+    match result {
         Ok(()) => Ok(()),
         Err(error) => {
             let usable = match (&config.listen.certificate, &config.listen.private_key) {
@@ -83,11 +95,11 @@ pub(crate) async fn ensure(config: &Config) -> io::Result<()> {
 
 /// Check once a day and renew when the certificate is due. A failed attempt is retried in an
 /// hour, so a temporary outage at the CA does not wait a whole day.
-pub(crate) async fn keep_renewed(config: Arc<Config>) {
+pub(crate) async fn keep_renewed(config: Arc<Config>, challenges: Arc<Challenges>) {
     loop {
         let mut wait = Duration::from_secs(24 * 3600);
         if due(&config) {
-            if let Err(error) = obtain(&config).await {
+            if let Err(error) = obtain(&config, &challenges).await {
                 eprintln!("certificate renewal failed: {error}");
                 wait = Duration::from_secs(3600);
             } else {
@@ -156,6 +168,64 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     std::fs::rename(&temporary, path)
 }
 
+/// A temporary DNS responder on Lumen's configured UDP and TCP addresses, alive only while the
+/// first certificate is ordered. It answers published challenge names and drops everything else.
+struct StandIn(Vec<tokio::task::JoinHandle<()>>);
+
+impl StandIn {
+    async fn start(config: &Config, challenges: &Arc<Challenges>) -> io::Result<Self> {
+        let mut tasks = Vec::new();
+        for address in &config.listen.udp {
+            let socket = tokio::net::UdpSocket::bind(address).await?;
+            let challenges = Arc::clone(challenges);
+            tasks.push(tokio::spawn(async move {
+                let mut buffer = vec![0u8; 1232];
+                while let Ok((size, from)) = socket.recv_from(&mut buffer).await {
+                    if let Some(reply) = challenges.answer_packet(&buffer[..size]) {
+                        let _ = socket.send_to(&reply, from).await;
+                    }
+                }
+            }));
+        }
+        for address in &config.listen.tcp {
+            let listener = TcpListener::bind(address).await?;
+            let challenges = Arc::clone(challenges);
+            tasks.push(tokio::spawn(async move {
+                while let Ok((mut stream, _)) = listener.accept().await {
+                    let challenges = Arc::clone(&challenges);
+                    tokio::spawn(async move {
+                        let work = async {
+                            let mut length = [0u8; 2];
+                            stream.read_exact(&mut length).await?;
+                            let mut packet =
+                                vec![0u8; usize::from(u16::from_be_bytes(length)).min(1232)];
+                            stream.read_exact(&mut packet).await?;
+                            if let Some(reply) = challenges.answer_packet(&packet) {
+                                let size = u16::try_from(reply.len()).unwrap_or(0).to_be_bytes();
+                                stream.write_all(&size).await?;
+                                stream.write_all(&reply).await?;
+                            }
+                            io::Result::Ok(())
+                        };
+                        let _ = timeout(Duration::from_secs(5), work).await;
+                    });
+                }
+            }));
+        }
+        Ok(Self(tasks))
+    }
+
+    /// Stop answering and give the sockets back before the real listeners bind them.
+    async fn stop(self) {
+        for task in &self.0 {
+            task.abort();
+        }
+        for task in self.0 {
+            let _ = task.await;
+        }
+    }
+}
+
 /// Answer `GET /.well-known/acme-challenge/<token>` with the key authorization, and nothing else.
 async fn serve_challenges(listener: TcpListener, tokens: Tokens) {
     let limit = Arc::new(Semaphore::new(MAX_CHALLENGE_CONNECTIONS));
@@ -203,32 +273,47 @@ async fn serve_challenges(listener: TcpListener, tokens: Tokens) {
 }
 
 /// Run one order and write the new certificate and key.
-async fn obtain(config: &Config) -> io::Result<()> {
+async fn obtain(config: &Config, challenges: &Arc<Challenges>) -> io::Result<()> {
     let acme = &config.acme;
     let (Some(cert_path), Some(key_path)) =
         (&config.listen.certificate, &config.listen.private_key)
     else {
         return Err(other("certificate and key paths are required"));
     };
-    let listener = TcpListener::bind(acme.challenge_listen)
-        .await
-        .map_err(|error| {
-            other(format!(
-                "cannot listen for challenges on {}: {error}",
-                acme.challenge_listen
-            ))
-        })?;
     let tokens: Tokens = Arc::default();
-    let server = tokio::spawn(serve_challenges(listener, Arc::clone(&tokens)));
-    let result = timeout(ORDER_TIMEOUT, run_order(acme, &tokens)).await;
-    server.abort();
+    // Only HTTP-01 needs a listener of its own. DNS-01 is answered by the resolver.
+    let server = if acme.challenge == AcmeChallenge::Http01 {
+        let listener = TcpListener::bind(acme.challenge_listen)
+            .await
+            .map_err(|error| {
+                other(format!(
+                    "cannot listen for challenges on {}: {error}",
+                    acme.challenge_listen
+                ))
+            })?;
+        Some(tokio::spawn(serve_challenges(
+            listener,
+            Arc::clone(&tokens),
+        )))
+    } else {
+        None
+    };
+    let result = timeout(ORDER_TIMEOUT, run_order(acme, &tokens, challenges)).await;
+    if let Some(server) = server {
+        server.abort();
+    }
+    challenges.clear();
     let (chain, key) = result.map_err(|_| other("the order timed out"))??;
     // Key first: a certificate without its key would make the pair mismatched while it waits.
     write_private(key_path, key.as_bytes())?;
     write_private(cert_path, chain.as_bytes())
 }
 
-async fn run_order(acme: &Acme, tokens: &Tokens) -> io::Result<(String, String)> {
+async fn run_order(
+    acme: &Acme,
+    tokens: &Tokens,
+    challenges: &Challenges,
+) -> io::Result<(String, String)> {
     let account = account(acme).await?;
     let identifiers: Vec<Identifier> = acme
         .domains
@@ -246,6 +331,18 @@ async fn run_order(acme: &Acme, tokens: &Tokens) -> io::Result<(String, String)>
             AuthorizationStatus::Valid => continue,
             AuthorizationStatus::Pending => {}
             _ => return Err(other("the CA refused an authorization")),
+        }
+        if acme.challenge == AcmeChallenge::Dns01 {
+            let mut challenge = authorization
+                .challenge(ChallengeType::Dns01)
+                .ok_or_else(|| other("the CA offers no DNS-01 challenge"))?;
+            // The identifier is the name without any wildcard label.
+            challenges.publish(
+                &challenge.identifier().to_string(),
+                &challenge.key_authorization().dns_value(),
+            );
+            challenge.set_ready().await.map_err(other)?;
+            continue;
         }
         let mut challenge = authorization
             .challenge(ChallengeType::Http01)

@@ -138,7 +138,7 @@ Principles that shape every decision:
 - [x] RFC 8767 **serve-stale** with bounded stale age and one background refresh per name; unsigned data only (0.7.0). Existing prefetch is separate
 - [x] Optional **persistent DNS cache**: separate SQLite file, off by default, entry, byte and TTL caps, corrupt-file recovery, no client data (0.7.0)
 - [x] Certificate renewal without restart: renewed PEM pairs are verified and swapped in, with an expiry metric (0.7.0 line). Lumen still does not fetch certificates itself
-- [x] Built-in certificate automation: ACME issuance and daily renewal with the HTTP-01 challenge, tested against Pebble. Not built: DNS-01, TLS-ALPN-01, External Account Binding, and managing the web console's certificate. Not yet run against Let's Encrypt
+- [x] Built-in certificate automation: ACME issuance and daily renewal with the HTTP-01 and DNS-01 challenges (wildcards with DNS-01, answered by Lumen's own resolver), tested against Pebble. Not built: TLS-ALPN-01, External Account Binding, DNS-provider APIs, and managing the web console's certificate. Not yet run against Let's Encrypt
 - [x] Automatic trust-anchor rollover (RFC 5011): persistent state, 30-day hold-down, revocation, daily signed check. Opt-in with `trust_anchor_state`. Changes apply at the next restart; not yet run across a real root KSK rollover
 - [x] Authoritative DNS zones and operator-managed records from zone files or inline text, separate from Lumen's built-in empty local zones. Unsigned; see the DNSSEC signing item
 - [x] **Split-horizon views** by client network, **conditional forwarding**, and DNS-SD as ordinary records. mDNS bridging is not built

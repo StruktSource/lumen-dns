@@ -149,13 +149,29 @@ pub struct Forwarder {
 ///
 /// The long-term Ed25519 provider key is stored in `key_file` (created with mode `0600` on first
 /// start if missing). Short-lived resolver keys and certificates rotate automatically in memory.
+/// How the certificate authority checks that you control the names.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AcmeChallenge {
+    /// A token fetched over plain HTTP on port 80.
+    #[default]
+    #[serde(rename = "http-01")]
+    Http01,
+    /// A TXT record at `_acme-challenge.<name>`, answered by Lumen itself. Allows wildcards.
+    #[serde(rename = "dns-01")]
+    Dns01,
+}
+
 /// Obtain and renew the certificate that `listen.certificate` and `listen.private_key` name,
 /// from an ACME certificate authority such as Let's Encrypt, using the HTTP-01 challenge.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Acme {
-    /// DNS names for the certificate, 1 to 8, no wildcards. Empty turns ACME off.
+    /// DNS names for the certificate, 1 to 8. Wildcards (`*.example.com`) need `dns-01`.
+    /// Empty turns ACME off.
     pub domains: Vec<String>,
+    /// `http-01` (default) or `dns-01`.
+    pub challenge: AcmeChallenge,
     /// The CA's ACME directory URL (`https://`). No default: choose staging or production.
     pub directory: Option<String>,
     /// Must be true: you accept the CA's terms of service.
@@ -176,6 +192,7 @@ impl Default for Acme {
     fn default() -> Self {
         Self {
             domains: Vec::new(),
+            challenge: AcmeChallenge::Http01,
             directory: None,
             terms_agreed: false,
             email: None,
@@ -1169,8 +1186,17 @@ impl Config {
                             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
                 })
         };
-        if acme.domains.len() > 8 || !acme.domains.iter().all(|name| valid_domain(name)) {
-            return Err("acme.domains needs 1..=8 plain DNS names (no wildcards)".into());
+        let wildcards_allowed = acme.challenge == AcmeChallenge::Dns01;
+        if acme.domains.len() > 8
+            || !acme.domains.iter().all(|name| {
+                valid_domain(name)
+                    || (wildcards_allowed && name.strip_prefix("*.").is_some_and(valid_domain))
+            })
+        {
+            return Err(
+                "acme.domains needs 1..=8 DNS names (wildcards only with challenge = \"dns-01\")"
+                    .into(),
+            );
         }
         if !acme.terms_agreed {
             return Err("acme.terms_agreed must be true".into());
@@ -1716,16 +1742,24 @@ mod tests {
             config
         };
         assert!(valid().validate_acme().is_ok());
+        let mut wildcard = valid();
+        wildcard.acme.challenge = AcmeChallenge::Dns01;
+        wildcard.acme.domains = vec!["*.example.com".into(), "example.com".into()];
+        assert!(wildcard.validate_acme().is_ok());
         let mut off = valid();
         off.acme.domains.clear();
         off.acme.terms_agreed = false;
         assert!(off.validate_acme().is_ok(), "empty domains means off");
-        let mutations: [fn(&mut Config); 9] = [
+        let mutations: [fn(&mut Config); 10] = [
             |c| c.acme.terms_agreed = false,
             |c| c.acme.directory = None,
             |c| c.acme.directory = Some("http://acme.example/dir".into()),
             |c| c.acme.account_file = None,
             |c| c.acme.domains = vec!["*.example.com".into()],
+            |c| {
+                c.acme.challenge = AcmeChallenge::Dns01;
+                c.acme.domains = vec!["*.*.example.com".into()];
+            },
             |c| c.acme.domains = vec!["localhost".into()],
             |c| c.acme.renew_before_days = 0,
             |c| c.listen.dot.clear(),

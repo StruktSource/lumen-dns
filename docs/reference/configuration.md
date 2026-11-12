@@ -69,12 +69,13 @@ Off unless `domains` is set. See [Automatic certificates](../guides/certificates
 
 | Field | Default | Bounds | Meaning |
 | :--- | :--- | :--- | :--- |
-| `domains` | `[]` | 1 to 8 plain DNS names | Names on the certificate. No wildcards. Empty turns ACME off |
+| `domains` | `[]` | 1 to 8 DNS names | Names on the certificate. Wildcards (`*.example.com`) need `challenge = "dns-01"`. Empty turns ACME off |
+| `challenge` | `http-01` | `http-01` or `dns-01` | How the CA checks control. `dns-01` is answered by Lumen's own resolver |
 | `directory` | unset | `https://` URL | The CA's ACME directory. Required, no default |
 | `terms_agreed` | `false` | Must be `true` | You accept the CA's terms of service |
 | `email` | unset | One address | Contact for expiry notices |
 | `account_file` | unset | Required | ACME account key, created with mode `0600` |
-| `challenge_listen` | `0.0.0.0:80` | Address | Where the HTTP-01 challenge is answered while an order runs |
+| `challenge_listen` | `0.0.0.0:80` | Address | Where the HTTP-01 challenge is answered while an order runs. Unused with `dns-01` |
 | `renew_before_days` | `30` | 1 to 60 | Renew when fewer days remain |
 | `directory_ca` | unset | PEM file | Extra root to trust for the directory, for a private CA |
 

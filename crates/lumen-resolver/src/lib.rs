@@ -50,10 +50,12 @@ use tokio::time::timeout;
 
 mod accel;
 mod cache;
+mod challenge;
 mod forward;
 mod notify;
 mod rollover;
 mod signing;
+pub use challenge::Challenges;
 pub use signing::zone_key;
 mod zones;
 
@@ -108,6 +110,7 @@ pub struct Resolver {
     rollover: Option<rollover::Tracker>,
     signed: Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
     notifications: Vec<(Name, Vec<SocketAddr>)>,
+    challenges: Arc<Challenges>,
     resigners: Resigners,
     metrics: Arc<Metrics>,
     background: Option<Background>,
@@ -629,6 +632,7 @@ impl Resolver {
             rollover,
             signed,
             notifications,
+            challenges: Arc::default(),
             resigners: Resigners::default(),
             metrics,
             background,
@@ -655,6 +659,12 @@ impl Resolver {
         }
     }
 
+    /// Where an ACME client publishes DNS-01 challenge values for this resolver to answer.
+    #[must_use]
+    pub fn challenges(&self) -> Arc<Challenges> {
+        Arc::clone(&self.challenges)
+    }
+
     /// Resolver-owned aggregate metrics.
     #[must_use]
     pub fn metrics(&self) -> &Metrics {
@@ -672,6 +682,11 @@ impl Resolver {
         protocol: Transport,
         maximum: usize,
     ) -> Result<Vec<u8>, String> {
+        if let Some(response) = self.challenges.answer(query) {
+            return response
+                .to_vec()
+                .map_err(|_| "cannot encode challenge response".into());
+        }
         let custom = self.is_custom(query);
         if self.local_zones
             && !custom

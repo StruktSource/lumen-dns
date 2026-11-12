@@ -80,7 +80,7 @@ impl RunningServer {
             (None, None)
         } else {
             // With ACME, a certificate is obtained first when none exists yet.
-            crate::acme::ensure(&config).await?;
+            crate::acme::ensure(&config, &resolver.challenges()).await?;
             let (credentials, not_after) = credentials(&config)?;
             (Some(credentials), Some(not_after))
         };
@@ -296,8 +296,9 @@ impl RunningServer {
         service.resolver.start_background();
         if !config.acme.domains.is_empty() && tls.is_some() {
             let acme_config = Arc::clone(config);
+            let acme_challenges = service.resolver.challenges();
             tasks.spawn(async move {
-                crate::acme::keep_renewed(acme_config).await;
+                crate::acme::keep_renewed(acme_config, acme_challenges).await;
                 Ok(())
             });
         }

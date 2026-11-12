@@ -86,3 +86,69 @@ async fn pebble_issues_a_certificate_and_the_server_serves_it() {
     assert_eq!(std::fs::read(path("cert.pem")).unwrap(), before);
     server.shutdown().await;
 }
+
+/// DNS-01 with a wildcard, answered by Lumen itself. Needs a Pebble started with
+/// `-dnsserver 127.0.0.1:$LUMEN_PEBBLE_DNS_PORT`, so that it asks Lumen for the TXT records.
+#[tokio::test]
+async fn pebble_issues_a_wildcard_certificate_with_dns_01() {
+    let (Ok(directory), Ok(root), Ok(port)) = (
+        std::env::var("LUMEN_PEBBLE_URL"),
+        std::env::var("LUMEN_PEBBLE_CA"),
+        std::env::var("LUMEN_PEBBLE_DNS_PORT"),
+    ) else {
+        eprintln!("skipped: set LUMEN_PEBBLE_URL, LUMEN_PEBBLE_CA and LUMEN_PEBBLE_DNS_PORT");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| -> PathBuf { dir.path().join(name) };
+    let mut config = Config {
+        schema_version: 1,
+        ..Config::default()
+    };
+    let dns: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    config.listen.udp = vec![dns];
+    config.listen.tcp = vec![dns];
+    config.listen.dot = vec![free_address()];
+    config.listen.certificate = Some(path("cert.pem"));
+    config.listen.private_key = Some(path("key.pem"));
+    config.resolver.mode = Mode::Forward;
+    config.resolver.dnssec = false;
+    config.resolver.upstreams = vec![Upstream {
+        address: "127.0.0.1:9".parse().unwrap(),
+        protocol: UpstreamProtocol::Udp,
+        server_name: None,
+        doh_path: None,
+    }];
+    config.acme.challenge = lumen_config::AcmeChallenge::Dns01;
+    config.acme.domains = vec!["*.wild.test".into(), "wild.test".into()];
+    config.acme.directory = Some(directory);
+    config.acme.directory_ca = Some(root.into());
+    config.acme.terms_agreed = true;
+    config.acme.account_file = Some(path("account.json"));
+
+    // The first certificate is ordered before Lumen's own listeners exist, so a stand-in
+    // answers the challenge. Afterwards the real listeners own the same port.
+    let mut server = RunningServer::start(config).await.unwrap();
+    let cert = std::fs::read(path("cert.pem")).unwrap();
+    let (_, pem) = x509_parser::pem::parse_x509_pem(&cert).unwrap();
+    let parsed = pem.parse_x509().unwrap();
+    let names: Vec<String> = parsed
+        .subject_alternative_name()
+        .unwrap()
+        .unwrap()
+        .value
+        .general_names
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(
+        names.iter().any(|name| name.contains("*.wild.test")),
+        "{names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name.contains("wild.test") && !name.contains('*'))
+    );
+    server.shutdown().await;
+}
