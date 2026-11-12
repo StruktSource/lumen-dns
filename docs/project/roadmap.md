@@ -27,11 +27,10 @@ _Last updated 2026-11-11 for version 0.6.0._
 **Still ahead**
 
 - Certificate automation and automatic trust-anchor rollover
-- RFC 8767 serve-stale and an optional persistent DNS cache
 - Authoritative zones, operator-managed DNS records, split-horizon DNS, and conditional forwarding
 - Dynamic DNS updates, zone transfers, and DNSSEC zone signing
 - More encrypted DNS options: native DoH over HTTP/3, DNSCrypt, and ECH support
-- More filtering controls: regular expressions, CNAME-based tracker blocking, and SafeSearch/child-safety policy
+- Wider child-safety filtering categories
 - An optional DHCP server module
 - High availability and cluster configuration replication
 - Extended DNS and DNSSEC conformance tests and long-running soak tests
@@ -138,8 +137,8 @@ Principles that shape every decision:
 ### Phase 5: Advanced DNS and availability
 
 - [x] Base DoH over HTTP/2, DoT, and DoQ listeners (delivered in Phase 1)
-- [ ] RFC 8767 **serve-stale** with bounded stale age and background revalidation. Existing prefetch refreshes tracked names only after their authoritative TTL; it does not save or serve an expired answer
-- [ ] Optional **persistent DNS cache**, with explicit size, TTL, privacy, corruption-recovery, migration, and opt-out rules
+- [x] RFC 8767 **serve-stale** with bounded stale age and one background refresh per name; unsigned data only (0.7.0). Existing prefetch is separate
+- [x] Optional **persistent DNS cache**: separate SQLite file, off by default, entry, byte and TTL caps, corrupt-file recovery, no client data (0.7.0)
 - [ ] Certificate automation and automatic trust-anchor rollover
 - [ ] Authoritative DNS zones and operator-managed DNS entries, separate from Lumen's built-in empty local zones
 - [ ] A **split-horizon DNS module** with per-client or per-network views, plus conditional forwarding and safe local service discovery
@@ -150,9 +149,9 @@ Principles that shape every decision:
 - [ ] DNSCrypt support, without weakening the existing encrypted-only provider policy
 - [ ] HTTPS and SVCB record interoperability, including preserving ECH configuration from authoritative answer to browser ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36))
 - [ ] Optional native ECH for Lumen's own TLS connections and encrypted DNS listeners where the TLS stack supports it ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36))
-- [ ] Regular-expression blocking with explicit syntax, compile limits, runtime limits, and explainable matches
-- [ ] CNAME-based tracker blocking that inspects upstream answer chains without bypassing DNSSEC or response bounds
-- [ ] SafeSearch and child-safety policy with explicit opt-in, per-profile scope, documented providers, and no hidden logging
+- [x] Regular-expression blocking with explicit syntax, compile limits, linear-time matching, and explainable matches (0.7.0)
+- [x] CNAME-based tracker blocking that inspects upstream answer chains without bypassing DNSSEC or response bounds (0.7.0)
+- [x] SafeSearch with explicit opt-in, per-profile scope, documented providers (Google, Bing, YouTube), and no hidden logging (0.7.0). Wider child-safety categories remain open
 - [ ] Optional DHCP server module with bounded leases, reservations, DNS integration, and no default network authority
 - [ ] High availability, multi-service use, cluster configuration replication, and a cache strategy
 - [ ] Optional DNS threat feeds and enterprise policy features that leave privacy defaults unchanged
@@ -204,10 +203,10 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 8. **Faster, lighter list downloads (partly done in 0.6.0).** Done: conditional requests (`ETag` / `Last-Modified`), compressed transfer, and a bounded disk cache in managed mode so a restart does not fetch fresh lists again. Still open: downloading several lists at once with a bound, and delta updates for very large lists.
 9. **Weighted random load balancing** across providers (spreading by recent speed rather than evenly), as some filter apps offer. Round-robin and fastest-first cover most of it today.
-10. **Serve-stale and persistent cache.** Add bounded RFC 8767 stale answers and a separate opt-in persistent DNS cache. Existing prefetch is neither feature.
+10. **Serve-stale and persistent cache (done in 0.7.0).** Bounded RFC 8767 stale answers and a separate opt-in persistent DNS cache. Cache behavior under real restarts and long soaks is still unmeasured.
 11. **Authoritative and local DNS.** Add authoritative zones, operator-managed records, a split-horizon module, conditional forwarding, RFC 2136 updates, AXFR/IXFR, and DNSSEC zone signing.
 12. **Encrypted DNS and ECH.** Keep current DoH over HTTP/2; add native DoH over HTTP/3, DNSCrypt, HTTPS/SVCB and ECH-config delivery to browsers, and optional native ECH in Lumen's own TLS paths.
-13. **Filtering and family policy.** Add bounded regex rules, CNAME-based tracker blocking, and opt-in SafeSearch/child-safety profiles.
+13. **Filtering and family policy (mostly done in 0.7.0).** Regex rules, CNAME-based blocking, and opt-in SafeSearch profiles shipped. Wider child-safety categories remain.
 14. **Optional DHCP server module.** Integrate leases and reservations with device and local-DNS policy without making Lumen authoritative for the network by default.
 15. **Trust-anchor rollover automation and certificate lifecycle tooling.**
 

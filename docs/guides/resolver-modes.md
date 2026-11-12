@@ -113,6 +113,8 @@ Several bounded mechanisms make uncached lookups faster without weakening DNSSEC
 | **Shared recursion** | Always on | Identical in-flight queries (same name, type, and DNSSEC flag) wait for one recursion instead of each walking the tree. At most 4096 groups at once. |
 | **Startup priming** (`[resolver.warm]`) | Off in code, **on** in the shipped configs | After listeners are bound, fetches delegations and keys for the root and a list of common zones once, two at a time. It queries only the zone names you list, never client data. |
 | **Expiry refresh** (`[resolver.prefetch]`) | Off | Re-resolves names that were requested repeatedly, just after their answer expires, within concurrency and per-minute limits. |
+| **Serve stale** (`[resolver.serve_stale]`) | Off | Returns an eligible expired unsigned answer at once and starts one background refresh. |
+| **Persistent response cache** (`[resolver.persistent_cache]`) | Off | Saves bounded response data across restarts in a separate local SQLite file. Works in both resolver modes. |
 | **Hedged recursion** (`hedge_ms`) | Off | Starts one extra recursion for a lookup that is still unanswered after the delay. The first usable answer wins. |
 
 The numbers behind these are in [Performance](../project/performance.md): shared recursion clearly helped bursts of identical queries, while the single cold-query gain and hedging were **not** statistically significant, so hedging is not recommended.
@@ -123,7 +125,7 @@ How expiry refresh stays safe:
 - Nothing is refreshed before its authoritative TTL has elapsed, so answers are never served longer than allowed. Answers with a TTL under 10 seconds are not refreshed.
 - Filtering runs before refresh, and every filter refresh or rollback clears all pending refresh candidates, so a newly blocked name is never refreshed under the old policy.
 
-**Evaluated and not built:** serve-stale answers (RFC 8767) and saving delegations across restarts. Hickory drops expired entries and keeps its caches private, so both would need a second Lumen-owned cache with its own expiry, revalidation, and memory bounds. Priming recovers most of the restart cost without that.
+Serve-stale and persistence use a second Lumen-owned response cache because Hickory keeps its caches private. Both are off by default. Stale replies keep their own age bound and small response TTL, never include expired DNSSEC-authenticated data, and trigger one background refresh without making the client wait. Persistence stores names and answers, so enable it only when local disk disclosure is acceptable. It never stores the client that asked. See the [cache configuration](../reference/configuration.md#caches).
 
 ## Related
 

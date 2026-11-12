@@ -72,7 +72,7 @@ impl RunningServer {
     ) -> io::Result<Self> {
         tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         config.validate().map_err(io::Error::other)?;
-        let resolver = lumen_resolver::Resolver::new(&config).map_err(io::Error::other)?;
+        let resolver = Arc::new(lumen_resolver::Resolver::new(&config).map_err(io::Error::other)?);
         let tls = if config.listen.dot.is_empty()
             && config.listen.doh.is_empty()
             && config.listen.doq.is_empty()

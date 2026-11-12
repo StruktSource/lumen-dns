@@ -3,6 +3,7 @@
 
 use accel::Accel;
 use async_trait::async_trait;
+use cache::ResponseCache;
 use hickory_server::{
     dnssec::NxProofKind,
     net::{
@@ -47,6 +48,7 @@ use std::{
 use tokio::time::timeout;
 
 mod accel;
+mod cache;
 mod forward;
 
 pub use hickory_server::net::xfer::Protocol as Transport;
@@ -54,6 +56,7 @@ pub use hickory_server::net::xfer::Protocol as Transport;
 /// One shared resolver and cache set for all enabled client transports.
 pub struct Resolver {
     catalog: Catalog,
+    cache: Option<Arc<ResponseCache>>,
     metrics: Arc<Metrics>,
     background: Option<Background>,
     local_zones: bool,
@@ -479,8 +482,10 @@ impl Resolver {
         };
         let mut catalog = Catalog::new();
         catalog.upsert(Name::root().into(), vec![handler]);
+        let cache = ResponseCache::new(settings)?.map(Arc::new);
         Ok(Self {
             catalog,
+            cache,
             metrics,
             background,
             local_zones: settings.local_zones,
@@ -513,7 +518,7 @@ impl Resolver {
     /// # Errors
     /// Returns a non-sensitive error if response serialization fails.
     pub async fn answer(
-        &self,
+        self: &Arc<Self>,
         query: &Query,
         peer: SocketAddr,
         protocol: Transport,
@@ -526,6 +531,49 @@ impl Resolver {
                 .to_vec()
                 .map_err(|_| "cannot encode local response".into());
         }
+        if let Some(cache) = &self.cache
+            && let Some(hit) = cache.lookup(query, maximum)
+        {
+            if hit.stale && cache.begin_refresh(&hit.key) {
+                let (resolver, query, key) = (Arc::clone(self), query.clone(), hit.key.clone());
+                tokio::spawn(async move {
+                    if let Ok(response) = resolver
+                        .answer_uncached(&query, peer, Protocol::Tcp, usize::from(u16::MAX))
+                        .await
+                        && let Some(cache) = &resolver.cache
+                    {
+                        cache.store(&query, &response);
+                    }
+                    if let Some(cache) = &resolver.cache {
+                        cache.end_refresh(&key);
+                    }
+                });
+            }
+            return Ok(hit.bytes);
+        }
+        let response = self.answer_uncached(query, peer, protocol, maximum).await?;
+        if let Some(cache) = &self.cache {
+            cache.store(query, &response);
+        }
+        Ok(response)
+    }
+
+    /// Return a cached response after the outer query deadline cancelled live resolution.
+    #[must_use]
+    pub fn cached_answer(&self, query: &Query, maximum: usize) -> Option<Vec<u8>> {
+        self.cache
+            .as_ref()
+            .and_then(|cache| cache.lookup(query, maximum))
+            .map(|hit| hit.bytes)
+    }
+
+    async fn answer_uncached(
+        &self,
+        query: &Query,
+        peer: SocketAddr,
+        protocol: Transport,
+        maximum: usize,
+    ) -> Result<Vec<u8>, String> {
         let raw = query.message.to_vec().map_err(|_| "cannot encode query")?;
         let request =
             Request::from_bytes(raw, peer, protocol).map_err(|_| "cannot decode request")?;
@@ -1242,8 +1290,11 @@ async fn recover_bogus<P: hickory_server::net::runtime::RuntimeProvider>(
 fn lowercase_names(message: &mut Message) {
     for record in &mut message.answers {
         record.name = record.name.to_lowercase();
-        if let RData::CNAME(target) = &mut record.data {
-            target.0 = target.0.to_lowercase();
+        match &mut record.data {
+            RData::CNAME(target) => target.0 = target.0.to_lowercase(),
+            RData::HTTPS(https) => https.0.target_name = https.0.target_name.to_lowercase(),
+            RData::SVCB(svcb) => svcb.target_name = svcb.target_name.to_lowercase(),
+            _ => {}
         }
     }
 }

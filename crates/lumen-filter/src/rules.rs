@@ -9,6 +9,30 @@ use std::{collections::HashSet, hash::BuildHasher, sync::OnceLock};
 pub const MAX_LIST_BYTES: usize = 64 * 1024 * 1024;
 /// Rules across all lists and manual tiers. Each list rule costs 8 bytes in memory (4M rules is about 32 MB).
 pub const MAX_RULES: usize = 4_000_000;
+/// Most regular expressions in one global or profile rule set.
+pub const MAX_REGEX_RULES: usize = 128;
+/// Total regular-expression source bytes in one global or profile rule set.
+pub const MAX_REGEX_BYTES: usize = 32 * 1024;
+const MAX_REGEX_PATTERN_BYTES: usize = 1024;
+const REGEX_COMPILED_SIZE_LIMIT: usize = 256 * 1024;
+const REGEX_DFA_SIZE_LIMIT: usize = 512 * 1024;
+
+/// Compile one ASCII full-name expression with bounded program and DFA sizes.
+///
+/// # Errors
+/// Rejects empty, oversized, malformed, or excessively complex expressions.
+pub fn compile_regex(pattern: &str) -> Result<regex::Regex, String> {
+    if pattern.is_empty() || pattern.len() > MAX_REGEX_PATTERN_BYTES || pattern.contains('\n') {
+        return Err(format!(
+            "regular-expression rules must be 1..={MAX_REGEX_PATTERN_BYTES} bytes on one line"
+        ));
+    }
+    regex::RegexBuilder::new(&format!("^(?:{pattern})$"))
+        .size_limit(REGEX_COMPILED_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+        .build()
+        .map_err(|error| format!("invalid or too complex regular expression: {error}"))
+}
 
 /// Keyed 62-bit hash of a canonical domain. The key is random per process, so lists
 /// cannot be crafted to collide, and the hash is never stored or shown.

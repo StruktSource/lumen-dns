@@ -317,12 +317,13 @@ async fn iterative_delegations_cache_and_depth_limit() {
             },
         })],
     );
-    let resolver = Resolver {
+    let resolver = Arc::new(Resolver {
         catalog,
+        cache: None,
         metrics: Arc::new(Metrics::default()),
         background: None,
         local_zones: true,
-    };
+    });
     let mut request = Message::query();
     request.metadata.recursion_desired = true;
     request.add_query(DnsQuery::query(
@@ -596,12 +597,13 @@ async fn recursion_timeout_invokes_fallback_once() {
             },
         })],
     );
-    let resolver = Resolver {
+    let resolver = Arc::new(Resolver {
         catalog,
+        cache: None,
         metrics: Arc::clone(&metrics),
         background: None,
         local_zones: true,
-    };
+    });
     let mut request = Message::query();
     request.metadata.recursion_desired = true;
     request.add_query(DnsQuery::query(
@@ -1083,7 +1085,10 @@ async fn slow_lookup_starts_one_hedge_and_fast_lookup_does_not() {
 fn answers_never_show_the_random_case_used_upstream() {
     use hickory_server::proto::rr::{
         RData, Record,
-        rdata::{A, CNAME},
+        rdata::{
+            A, CNAME, HTTPS, SVCB,
+            svcb::{EchConfigList, SvcParamKey, SvcParamValue},
+        },
     };
     use std::{net::Ipv4Addr, str::FromStr};
     let mut message = hickory_server::proto::op::Message::query();
@@ -1097,12 +1102,48 @@ fn answers_never_show_the_random_case_used_upstream() {
         60,
         RData::A(A(Ipv4Addr::new(192, 0, 2, 1))),
     ));
+    let ech = vec![0, 7, 0xfe, 0x0d, 1, 2, 3];
+    let service = SVCB::new(
+        1,
+        Name::from_str("SvC.ExAmPlE.NeT.").unwrap(),
+        vec![(
+            SvcParamKey::EchConfigList,
+            SvcParamValue::EchConfigList(EchConfigList(ech.clone())),
+        )],
+    );
+    message.answers.push(Record::from_rdata(
+        Name::from_str("HtTpS.ExAmPlE.cOm.").unwrap(),
+        60,
+        RData::HTTPS(HTTPS(service.clone())),
+    ));
+    message.answers.push(Record::from_rdata(
+        Name::from_str("SvCb.ExAmPlE.cOm.").unwrap(),
+        60,
+        RData::SVCB(service),
+    ));
     crate::lowercase_names(&mut message);
+    let message = hickory_server::proto::op::Message::from_vec(&message.to_vec().unwrap()).unwrap();
     assert_eq!(message.answers[0].name.to_ascii(), "www.example.com.");
     assert!(
         matches!(&message.answers[0].data, RData::CNAME(t) if t.0.to_ascii() == "target.example.net.")
     );
     assert_eq!(message.answers[1].name.to_ascii(), "target.example.net.");
+    for answer in &message.answers[2..] {
+        let svcb = match &answer.data {
+            RData::HTTPS(value) => &value.0,
+            RData::SVCB(value) => value,
+            other => panic!("unexpected service binding record: {other:?}"),
+        };
+        assert_eq!(
+            answer.name.to_ascii(),
+            answer.name.to_ascii().to_lowercase()
+        );
+        assert_eq!(svcb.target_name.to_ascii(), "svc.example.net.");
+        assert!(matches!(
+            &svcb.svc_params[0],
+            (SvcParamKey::EchConfigList, SvcParamValue::EchConfigList(value)) if value.0 == ech
+        ));
+    }
 }
 
 #[test]

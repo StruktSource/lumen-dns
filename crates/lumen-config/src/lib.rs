@@ -307,6 +307,10 @@ pub struct Resolver {
     pub fallback: Fallback,
     pub warm: Warm,
     pub prefetch: Prefetch,
+    /// Bounded RFC 8767 stale answers. Off by default.
+    pub serve_stale: ServeStale,
+    /// Optional on-disk DNS response cache. Off by default because names are sensitive.
+    pub persistent_cache: PersistentCache,
     /// Start a second recursion for a lookup still unanswered after this many ms; 0 is off.
     pub hedge_ms: u32,
 }
@@ -338,7 +342,56 @@ impl Default for Resolver {
             fallback: Fallback::default(),
             warm: Warm::default(),
             prefetch: Prefetch::default(),
+            serve_stale: ServeStale::default(),
+            persistent_cache: PersistentCache::default(),
             hedge_ms: 0,
+        }
+    }
+}
+
+/// RFC 8767 stale-answer policy. Stale data is returned with a small TTL while one bounded
+/// background refresh runs. DNSSEC-authenticated data is never served after expiry.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServeStale {
+    pub enabled: bool,
+    /// Maximum time an expired answer may remain eligible.
+    pub max_age_secs: u32,
+    /// TTL placed on a stale response.
+    pub answer_ttl_secs: u32,
+}
+
+impl Default for ServeStale {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_age_secs: 86_400,
+            answer_ttl_secs: 30,
+        }
+    }
+}
+
+/// Opt-in persistent DNS response cache. It stores names and answers, but never client data.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PersistentCache {
+    pub enabled: bool,
+    /// Separate `SQLite` file. Required when enabled.
+    pub path: Option<PathBuf>,
+    pub max_entries: u32,
+    pub max_bytes: u64,
+    /// Additional cap on the authoritative TTL written to disk.
+    pub max_ttl_secs: u32,
+}
+
+impl Default for PersistentCache {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: None,
+            max_entries: 16_384,
+            max_bytes: 64 * 1024 * 1024,
+            max_ttl_secs: 604_800,
         }
     }
 }
@@ -565,6 +618,7 @@ impl Config {
             &mut config.resolver.root_hints,
             &mut config.resolver.trust_anchor,
             &mut config.resolver.upstream_ca,
+            &mut config.resolver.persistent_cache.path,
             &mut config.web.certificate,
             &mut config.web.private_key,
             &mut config.web.oidc.client_secret_file,
@@ -1002,6 +1056,26 @@ impl Config {
             if value < minimum || value > maximum {
                 return Err(format!("{name} must be in {minimum}..={maximum}"));
             }
+        }
+        let stale = &self.resolver.serve_stale;
+        if !(60..=604_800).contains(&stale.max_age_secs) {
+            return Err("serve_stale.max_age_secs must be in 60..=604800".into());
+        }
+        if !(1..=300).contains(&stale.answer_ttl_secs) {
+            return Err("serve_stale.answer_ttl_secs must be in 1..=300".into());
+        }
+        let persistent = &self.resolver.persistent_cache;
+        if persistent.enabled && persistent.path.is_none() {
+            return Err("persistent_cache.path is required when enabled".into());
+        }
+        if !(128..=65_536).contains(&persistent.max_entries) {
+            return Err("persistent_cache.max_entries must be in 128..=65536".into());
+        }
+        if !(1_048_576..=1_073_741_824).contains(&persistent.max_bytes) {
+            return Err("persistent_cache.max_bytes must be in 1048576..=1073741824".into());
+        }
+        if !(60..=604_800).contains(&persistent.max_ttl_secs) {
+            return Err("persistent_cache.max_ttl_secs must be in 60..=604800".into());
         }
         Ok(())
     }
@@ -1685,5 +1759,32 @@ mod tests {
         config.validate().unwrap();
         config.web.http.clear();
         assert!(config.validate().is_err(), "needs a web listener");
+    }
+
+    #[test]
+    fn stale_and_persistent_caches_are_opt_in_bounded_and_path_safe() {
+        let default = Config::default();
+        assert!(!default.resolver.serve_stale.enabled);
+        assert!(!default.resolver.persistent_cache.enabled);
+
+        let config = Config::parse(
+            "schema_version = 1\n[resolver.serve_stale]\nenabled = true\nmax_age_secs = 3600\nanswer_ttl_secs = 20\n[resolver.persistent_cache]\nenabled = true\npath = 'dns-cache.sqlite'\nmax_entries = 1024\nmax_bytes = 1048576\nmax_ttl_secs = 3600\n",
+            Path::new("/var/lib/lumen"),
+        )
+        .unwrap();
+        assert_eq!(
+            config.resolver.persistent_cache.path.as_deref(),
+            Some(Path::new("/var/lib/lumen/dns-cache.sqlite"))
+        );
+
+        let mut bad = config.clone();
+        bad.resolver.persistent_cache.path = None;
+        assert!(bad.validate().is_err());
+        bad = config.clone();
+        bad.resolver.serve_stale.answer_ttl_secs = 0;
+        assert!(bad.validate().is_err());
+        bad = config;
+        bad.resolver.persistent_cache.max_bytes = 1024;
+        assert!(bad.validate().is_err());
     }
 }

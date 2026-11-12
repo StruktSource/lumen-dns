@@ -97,6 +97,28 @@ lumen --config FILE --check
 
 Capacities count **entries, not bytes of memory**. Record sizes, separate caches, in-flight work, library maintenance, and TLS or QUIC buffers also use memory. For a hard memory ceiling, use container or OS limits. A TTL of zero is never extended into a positive cache lifetime.
 
+### `[resolver.serve_stale]`
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Serve an eligible expired answer at once and refresh it in the background |
+| `max_age_secs` | `86400` | 60 to 604800 | Maximum time after the authoritative TTL that an answer stays eligible |
+| `answer_ttl_secs` | `30` | 1 to 300 | TTL placed on a stale response |
+
+This is a separate, Lumen-owned RFC 8767 cache because Hickory does not expose expired entries. It is bounded by `cache_entries` and 64 MiB when persistence is off. A zero-TTL, malformed, truncated, TSIG, REFUSED, FORMERR, or SERVFAIL response is never cached. Filtering still runs first. DNSSEC-authenticated data is not served after expiry because its signatures may also have expired. One refresh per name, type, class, and DNSSEC flag may run at once; a stale response does not wait for it.
+
+### `[resolver.persistent_cache]`
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Save eligible DNS responses in a separate SQLite file |
+| `path` | unset | Required when enabled | Cache database; relative paths resolve beside the config file |
+| `max_entries` | `16384` | 128 to 65536 | Maximum saved responses |
+| `max_bytes` | `67108864` | 1 MiB to 1 GiB | Maximum encoded response bytes, excluding SQLite overhead |
+| `max_ttl_secs` | `604800` | 60 to 604800 | Extra ceiling on data written to disk |
+
+Persistence is an explicit privacy choice: the file contains queried names and DNS answers, but never client addresses, device IDs, or query-history rows. On Unix the file is mode `0600`. Database reads happen before listeners open and writes use a bounded blocking worker, not a Tokio DNS worker. Expired rows are removed on startup. A corrupt database is renamed with a `.corrupt-TIMESTAMP` suffix and replaced with an empty cache. The cache is disposable: exclude it from backups or delete it while Lumen is stopped to start empty.
+
 ### Speed features (recursive mode only)
 
 | Field | Default | Meaning |
@@ -193,6 +215,8 @@ The optional `[filtering]` table holds rules, lists, profiles, groups, devices, 
 | Item | Detail |
 | :--- | :--- |
 | `filtering.action` | `nxdomain` (default), `nodata`, `refused`, `address`, or `cname`; profiles may override |
+| `rules.regex_allow` / `rules.regex_block` | Full-name regular expressions, global or per profile. 128 per rule set, 1024 bytes each, 32 KiB total |
+| `profiles.safe_search` | Default `false`. Rewrites Google, Bing, and YouTube names to restricted endpoints for that profile |
 | `filtering.default_profile` | Profile used for clients no device, group, or subnet matches |
 | `filtering.decision_log` | Default `false`. When `true`, logs names, client IPs, and decisions to stderr |
 | `[[filtering.lists]]` | Unique `id`, a `format` (`domains`, `hosts`, `adblock`), exactly one of `path`, `url`, `text`, optional `category`, and `refresh_secs` (60 to 604800, default 86400, `0` disables) |

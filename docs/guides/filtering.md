@@ -12,7 +12,8 @@ Filtering runs after a client is admitted and **before** any cache or resolver w
 What it checks and what it cannot do:
 
 - Rules apply to the **name being asked**, including unusual DNS labels.
-- They do **not** look at CNAME targets returned by upstreams, URLs, HTTP paths, or app content.
+- Rules also check every **CNAME target** in an upstream answer. A blocked target replaces the whole answer with your block action, so a tracker hidden behind an innocent-looking alias is caught. The CNAME check applies to the final response; it never edits or re-signs DNSSEC data.
+- They do **not** look at URLs, HTTP paths, or app content.
 - A device that uses a different DNS service can bypass this policy. Use your firewall or router for that.
 
 ## Try it safely
@@ -156,6 +157,33 @@ end_minute = 420                # 07:00 UTC the next day
 - Several windows are combined (OR). No windows means always active. Equal start and end is rejected.
 - **Outside a profile's windows, only global manual rules apply.** The profile's rules and all imported lists for that client switch off.
 - For always-on blocks, use global manual rules or an always-active profile.
+
+## Regular-expression rules
+
+For patterns that plain domain rules cannot express, add `regex_allow` and `regex_block` next to `allow` and `block`, globally or in a profile:
+
+```toml
+[filtering.rules]
+regex_block = ['ads[0-9]+\.example\.com']
+regex_allow = ['ads7\.example\.com']
+```
+
+- A pattern must match the **whole** lowercase name (it is anchored for you), without the trailing dot.
+- Precedence is unchanged: profile rules, then global rules, then lists, and **allow wins within each tier**. Within a tier, exact and suffix rules are checked before regular expressions.
+- Limits keep matching fast and bounded: 128 expressions and 32 KiB of pattern text per rule set, 1024 bytes per pattern, one line each, and strict compiled-size limits. The engine has no backtracking, so matching time grows only with the name length. Oversized or invalid patterns are rejected when the config loads, and they count toward the manual-rule total.
+- `filter-explain` shows the winning pattern as `/pattern/`.
+
+## SafeSearch
+
+Set `safe_search = true` on a profile to send supported search services to their documented restricted endpoints. It is off by default and applies only to clients that use that profile.
+
+| Name asked | Answered as an alias to |
+| :--- | :--- |
+| `www.google.com` | `forcesafesearch.google.com` |
+| `www.bing.com` | `strict.bing.com` |
+| YouTube names (`www.youtube.com`, `m.youtube.com`, `youtubei.googleapis.com`, `youtube.googleapis.com`, `www.youtube-nocookie.com`) | `restrictmoderate.youtube.com` |
+
+Only these names are rewritten. Other Google or Bing country sites, other search engines, and apps that use their own DNS are not covered, so this is a household convenience and not a security boundary. A block or allow rule for the same name wins over SafeSearch. Decisions use the same category and logging rules as other filters (`category = "safe_search"`), and nothing extra is logged.
 
 ## What blocked clients see
 

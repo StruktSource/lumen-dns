@@ -71,6 +71,20 @@ diagnostics = false
 # root_hints = "root.hints"
 # trust_anchor = "root.key"
 
+# Optional RFC 8767 stale answers. Off by default. Expired DNSSEC-authenticated data is not served.
+# [resolver.serve_stale]
+# enabled = true
+# max_age_secs = 86400
+# answer_ttl_secs = 30
+
+# Optional persistent response cache. This file contains queried names and answers, not clients.
+# [resolver.persistent_cache]
+# enabled = true
+# path = "dns-cache.sqlite"
+# max_entries = 16384
+# max_bytes = 67108864
+# max_ttl_secs = 604800
+
 # Prime the root and common top-level zones once at startup so the first lookups skip the
 # slowest delegation and DNSSEC-key fetches. Queries name only these zones, never clients.
 [resolver.warm]
