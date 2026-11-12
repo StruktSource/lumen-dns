@@ -2,6 +2,25 @@
 
 All notable user-facing changes are listed here. Lumen is still pre-release.
 
+## [0.7.0] - 2026-11-12
+
+### Added
+
+- **Serve-stale (RFC 8767), opt-in.** `[resolver.serve_stale]` answers from an expired entry for up to `max_age_secs` while one background refresh runs. Replies carry a short TTL, and expired DNSSEC-authenticated data is never served. Stale data is also used when live resolution times out.
+- **Persistent DNS cache, opt-in.** `[resolver.persistent_cache]` saves bounded responses in a separate mode `0600` SQLite file so restarts start warm. It stores names and answers, never clients. A corrupt file is moved aside and rebuilt.
+- **Regular-expression filter rules.** `regex_allow` and `regex_block`, global or per profile, whole-name, linear-time, and size-limited. `filter-explain` shows the matching pattern.
+- **CNAME-based blocking.** Filter rules now also check CNAME targets in upstream answers and replace the answer with the block action.
+- **SafeSearch, per profile, opt-in.** `safe_search = true` rewrites Google, Bing, and YouTube names to their restricted endpoints.
+
+### Changed
+
+- HTTPS and SVCB target names are lowercased like CNAME targets, keeping the other record data intact.
+- Runtime pins (Helm, Compose, Podman guide) point at 0.7.0.
+
+### Not included
+
+Authoritative zones, split-horizon views, RFC 2136, AXFR/IXFR, zone signing, DoH over HTTP/3, DNSCrypt, and native ECH are **not** available in this release.
+
 ## [0.6.0] - 2026-11-09
 
 ### Added
