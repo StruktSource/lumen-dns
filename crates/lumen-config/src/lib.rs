@@ -25,6 +25,8 @@ pub struct Config {
     pub web: Web,
     /// Optional `DNSCrypt` v2 server (UDP and TCP). Off by default.
     pub dnscrypt: DnsCrypt,
+    /// Optional automatic certificates (ACME, HTTP-01). Off by default.
+    pub acme: Acme,
     /// Authoritative zones served from operator-managed records.
     pub zones: Vec<Zone>,
     /// Conditional forwarding: names under `domain` go to these resolvers.
@@ -147,6 +149,44 @@ pub struct Forwarder {
 ///
 /// The long-term Ed25519 provider key is stored in `key_file` (created with mode `0600` on first
 /// start if missing). Short-lived resolver keys and certificates rotate automatically in memory.
+/// Obtain and renew the certificate that `listen.certificate` and `listen.private_key` name,
+/// from an ACME certificate authority such as Let's Encrypt, using the HTTP-01 challenge.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Acme {
+    /// DNS names for the certificate, 1 to 8, no wildcards. Empty turns ACME off.
+    pub domains: Vec<String>,
+    /// The CA's ACME directory URL (`https://`). No default: choose staging or production.
+    pub directory: Option<String>,
+    /// Must be true: you accept the CA's terms of service.
+    pub terms_agreed: bool,
+    pub email: Option<String>,
+    /// Where the ACME account key is kept (mode 0600). Created on first use.
+    pub account_file: Option<PathBuf>,
+    /// Address that answers HTTP-01 challenges while an order runs. The CA connects to port 80
+    /// of each name, so this is `0.0.0.0:80` unless a port forward leads here.
+    pub challenge_listen: SocketAddr,
+    /// Renew when the certificate has fewer than this many days left (1 to 60).
+    pub renew_before_days: u16,
+    /// PEM root certificate to trust for the ACME directory, for a private CA.
+    pub directory_ca: Option<PathBuf>,
+}
+
+impl Default for Acme {
+    fn default() -> Self {
+        Self {
+            domains: Vec::new(),
+            directory: None,
+            terms_agreed: false,
+            email: None,
+            account_file: None,
+            challenge_listen: SocketAddr::from(([0, 0, 0, 0], 80)),
+            renew_before_days: 30,
+            directory_ca: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DnsCrypt {
@@ -776,6 +816,8 @@ impl Config {
             &mut config.resolver.upstream_ca,
             &mut config.resolver.persistent_cache.path,
             &mut config.dnscrypt.key_file,
+            &mut config.acme.account_file,
+            &mut config.acme.directory_ca,
             &mut config.web.certificate,
             &mut config.web.private_key,
             &mut config.web.oidc.client_secret_file,
@@ -940,6 +982,7 @@ impl Config {
             }
         }
         self.validate_dnscrypt()?;
+        self.validate_acme()?;
         self.validate_zones()?;
         if self.listen.allow_clients.is_empty() || self.listen.allow_clients.len() > 128 {
             return Err("allow_clients must contain 1..128 CIDRs".into());
@@ -1103,6 +1146,64 @@ impl Config {
                     ));
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn validate_acme(&self) -> Result<(), String> {
+        let acme = &self.acme;
+        if acme.domains.is_empty() {
+            return Ok(());
+        }
+        let valid_domain = |name: &str| {
+            (1..=253).contains(&name.len())
+                && name.is_ascii()
+                && name.contains('.')
+                && !name.ends_with('.')
+                && name.split('.').all(|label| {
+                    (1..=63).contains(&label.len())
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                })
+        };
+        if acme.domains.len() > 8 || !acme.domains.iter().all(|name| valid_domain(name)) {
+            return Err("acme.domains needs 1..=8 plain DNS names (no wildcards)".into());
+        }
+        if !acme.terms_agreed {
+            return Err("acme.terms_agreed must be true".into());
+        }
+        if !acme
+            .directory
+            .as_deref()
+            .is_some_and(|url| url.starts_with("https://") && url.len() <= 512)
+        {
+            return Err("acme.directory must be an https:// URL".into());
+        }
+        if acme.account_file.is_none() {
+            return Err("acme.account_file is required".into());
+        }
+        if !(1..=60).contains(&acme.renew_before_days) {
+            return Err("acme.renew_before_days must be 1..=60".into());
+        }
+        if acme.email.as_deref().is_some_and(|email| {
+            email.len() > 254 || !email.contains('@') || email.bytes().any(|b| b.is_ascii_control())
+        }) {
+            return Err("acme.email is not a valid address".into());
+        }
+        if self.listen.certificate.is_none() || self.listen.private_key.is_none() {
+            return Err("acme needs listen.certificate and listen.private_key paths".into());
+        }
+        if self.listen.dot.is_empty()
+            && self.listen.doh.is_empty()
+            && self.listen.doq.is_empty()
+            && self.listen.doh3.is_empty()
+        {
+            return Err(
+                "acme needs at least one encrypted listener (dot, doh, doq, or doh3)".into(),
+            );
         }
         Ok(())
     }
@@ -1600,6 +1701,42 @@ pub fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acme_needs_a_complete_and_safe_setup() {
+        let valid = || {
+            let mut config = Config::default();
+            config.listen.dot = vec!["127.0.0.1:853".parse().unwrap()];
+            config.listen.certificate = Some("cert.pem".into());
+            config.listen.private_key = Some("key.pem".into());
+            config.acme.domains = vec!["dns.example.com".into()];
+            config.acme.directory = Some("https://acme.example/dir".into());
+            config.acme.terms_agreed = true;
+            config.acme.account_file = Some("account.json".into());
+            config
+        };
+        assert!(valid().validate_acme().is_ok());
+        let mut off = valid();
+        off.acme.domains.clear();
+        off.acme.terms_agreed = false;
+        assert!(off.validate_acme().is_ok(), "empty domains means off");
+        let mutations: [fn(&mut Config); 9] = [
+            |c| c.acme.terms_agreed = false,
+            |c| c.acme.directory = None,
+            |c| c.acme.directory = Some("http://acme.example/dir".into()),
+            |c| c.acme.account_file = None,
+            |c| c.acme.domains = vec!["*.example.com".into()],
+            |c| c.acme.domains = vec!["localhost".into()],
+            |c| c.acme.renew_before_days = 0,
+            |c| c.listen.dot.clear(),
+            |c| c.listen.private_key = None,
+        ];
+        for mutate in mutations {
+            let mut config = valid();
+            mutate(&mut config);
+            assert!(config.validate_acme().is_err());
+        }
+    }
 
     #[test]
     fn signed_zones_are_plain_and_bounded() {

@@ -79,6 +79,8 @@ impl RunningServer {
         {
             (None, None)
         } else {
+            // With ACME, a certificate is obtained first when none exists yet.
+            crate::acme::ensure(&config).await?;
             let (credentials, not_after) = credentials(&config)?;
             (Some(credentials), Some(not_after))
         };
@@ -292,6 +294,13 @@ impl RunningServer {
         });
         // Every bind succeeded; only now may priming and refresh touch the network.
         service.resolver.start_background();
+        if !config.acme.domains.is_empty() && tls.is_some() {
+            let acme_config = Arc::clone(config);
+            tasks.spawn(async move {
+                crate::acme::keep_renewed(acme_config).await;
+                Ok(())
+            });
+        }
         if config.resolver.trust_anchor_state.is_some() {
             let resolver = Arc::clone(&service.resolver);
             tasks.spawn(async move {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Service lifecycle, resource admission, and aggregate metrics.
 
+mod acme;
 mod certs;
 mod dnscrypt;
 mod transport;

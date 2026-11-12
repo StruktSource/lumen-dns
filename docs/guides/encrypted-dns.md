@@ -17,7 +17,7 @@ DoT, DoH, DoH3, and DoQ use TLS 1.3 with no early data. [DNSCrypt](#dnscrypt) us
 
 ## What you need
 
-1. **A TLS certificate and private key in PEM format**, issued for the name your clients will use (for example `dns.home.example`). Clients must trust it. Lumen does **not** create, download, or renew certificates.
+1. **A TLS certificate and private key in PEM format**, issued for the name your clients will use (for example `dns.home.example`). Clients must trust it. Bring your own files, or let Lumen get them from an ACME CA with [automatic certificates](certificates.md).
 2. **A name that clients can resolve** and that matches the certificate.
 3. **File permissions** that let the Lumen service account read the key.
 

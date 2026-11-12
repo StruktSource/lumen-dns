@@ -147,3 +147,12 @@ io_timeout_ms = 5000
 max_message_bytes = 4096
 
 # Filtering is empty by default. See filtering.example.toml to opt in.
+
+# Automatic certificates (ACME, HTTP-01). Needs port 80 reachable from the internet and the
+# [listen] certificate and private_key paths. Off unless domains is set. See
+# docs/guides/certificates.md.
+# [acme]
+# domains = ["dns.example.com"]
+# directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+# terms_agreed = true
+# account_file = "acme-account.json"

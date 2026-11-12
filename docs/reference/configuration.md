@@ -63,6 +63,23 @@ lumen --config FILE --check
 
 See [Encrypted DNS](../guides/encrypted-dns.md#dnscrypt). No TLS certificate is needed.
 
+## `[acme]`
+
+Off unless `domains` is set. See [Automatic certificates](../guides/certificates.md).
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `domains` | `[]` | 1 to 8 plain DNS names | Names on the certificate. No wildcards. Empty turns ACME off |
+| `directory` | unset | `https://` URL | The CA's ACME directory. Required, no default |
+| `terms_agreed` | `false` | Must be `true` | You accept the CA's terms of service |
+| `email` | unset | One address | Contact for expiry notices |
+| `account_file` | unset | Required | ACME account key, created with mode `0600` |
+| `challenge_listen` | `0.0.0.0:80` | Address | Where the HTTP-01 challenge is answered while an order runs |
+| `renew_before_days` | `30` | 1 to 60 | Renew when fewer days remain |
+| `directory_ca` | unset | PEM file | Extra root to trust for the directory, for a private CA |
+
+Needs `listen.certificate`, `listen.private_key`, and at least one encrypted listener.
+
 ## Authoritative zones, forwarders, and TSIG keys
 
 Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these are off until you add a table.

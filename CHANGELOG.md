@@ -8,6 +8,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Added
 
+- **Automatic certificates (ACME), opt-in.** `[acme]` obtains and renews the certificate for the encrypted listeners from an ACME CA such as Let's Encrypt, using the HTTP-01 challenge on a port that is open only while an order runs. Renewed files load through certificate reload, so nothing restarts. Tested against Pebble. See [Automatic certificates](docs/guides/certificates.md).
 - **DoH3 upstreams.** An explicit upstream can use `protocol = "h3"` (DNS over HTTP/3, QUIC with ALPN `h3`, optional `doh_path`). Certificates and names are verified like the other encrypted transports. The automatic provider list does not use it yet.
 - **DNSSEC signing for your own zones, opt-in.** `[zones.dnssec]` signs a plain zone with one Ed25519 or ECDSA P-256 key and NSEC, renews signatures daily, and serves them to clients that ask for DNSSEC data. `lumen --zone-key FILE --zone NAME` creates the key (mode `0600`) and prints the `DNSKEY` and `DS` records. Not built: key rollover, NSEC3, signing for dynamic or split-horizon zones. See [Your own DNS zones](docs/guides/authoritative-dns.md#dnssec-signing).
 - **Automatic trust-anchor rollover (RFC 5011), opt-in.** `resolver.trust_anchor_state` keeps trust-anchor state in a `0600` file. Lumen checks the signed root DNSKEY set daily, trusts a new key after 30 days, drops revoked keys, and exports `lumen_dns_trust_anchor_*` metrics. Changes load at the next restart. See [DNSSEC and trust](docs/reference/dnssec-and-trust.md#automatic-rollover-rfc-5011).
@@ -29,7 +30,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Not included
 
-Zone key rollover and NSEC3, built-in ACME issuance, native ECH, DHCP, DNSCrypt or DoH3 upstreams, and Anonymized DNSCrypt are **not** available in this release.
+Zone key rollover and NSEC3, DNS-01 ACME challenges, native ECH, DHCP, DNSCrypt or DoH3 upstreams, and Anonymized DNSCrypt are **not** available in this release.
 
 ## [0.6.0] - 2026-11-09
 
