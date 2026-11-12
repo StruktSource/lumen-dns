@@ -52,10 +52,12 @@ mod accel;
 mod cache;
 mod challenge;
 mod forward;
+mod hosts;
 mod notify;
 mod rollover;
 mod signing;
 pub use challenge::Challenges;
+pub use hosts::Hosts;
 pub use signing::zone_key;
 mod zones;
 
@@ -111,6 +113,7 @@ pub struct Resolver {
     signed: Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
     notifications: Vec<(Name, Vec<SocketAddr>)>,
     challenges: Arc<Challenges>,
+    hosts: Arc<Hosts>,
     resigners: Resigners,
     metrics: Arc<Metrics>,
     background: Option<Background>,
@@ -633,6 +636,7 @@ impl Resolver {
             signed,
             notifications,
             challenges: Arc::default(),
+            hosts: Arc::new(Hosts::new(config.dhcp.domain.as_deref())),
             resigners: Resigners::default(),
             metrics,
             background,
@@ -659,6 +663,12 @@ impl Resolver {
         }
     }
 
+    /// The names DHCP leases publish, answered by this resolver.
+    #[must_use]
+    pub fn hosts(&self) -> Arc<Hosts> {
+        Arc::clone(&self.hosts)
+    }
+
     /// Where an ACME client publishes DNS-01 challenge values for this resolver to answer.
     #[must_use]
     pub fn challenges(&self) -> Arc<Challenges> {
@@ -682,6 +692,11 @@ impl Resolver {
         protocol: Transport,
         maximum: usize,
     ) -> Result<Vec<u8>, String> {
+        if let Some(response) = self.hosts.answer(query) {
+            return response
+                .to_vec()
+                .map_err(|_| "cannot encode host response".into());
+        }
         if let Some(response) = self.challenges.answer(query) {
             return response
                 .to_vec()

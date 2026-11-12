@@ -27,6 +27,8 @@ pub struct Config {
     pub dnscrypt: DnsCrypt,
     /// Optional automatic certificates (ACME, HTTP-01). Off by default.
     pub acme: Acme,
+    /// Optional DHCP server (IPv4 and IPv6) that also feeds Lumen's DNS. Off by default.
+    pub dhcp: Dhcp,
     /// Authoritative zones served from operator-managed records.
     pub zones: Vec<Zone>,
     /// Conditional forwarding: names under `domain` go to these resolvers.
@@ -149,6 +151,150 @@ pub struct Forwarder {
 ///
 /// The long-term Ed25519 provider key is stored in `key_file` (created with mode `0600` on first
 /// start if missing). Short-lived resolver keys and certificates rotate automatically in memory.
+/// Optional DHCP server. It never starts on its own: nothing is served until `enabled` is true,
+/// and every scope names the network and addresses it may hand out.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Dhcp {
+    pub enabled: bool,
+    /// DNS domain for leased host names, such as `home.example` (no trailing dot). Devices that
+    /// send a host name become `name.<domain>`, with matching reverse names.
+    pub domain: Option<String>,
+    /// `SQLite` file that keeps leases across restarts (mode 0600).
+    pub lease_file: Option<PathBuf>,
+    /// `DHCPv4` server socket. `0.0.0.0:67` unless you are testing.
+    pub listen4: SocketAddr,
+    /// `DHCPv6` server socket. `[::]:547` unless you are testing.
+    pub listen6: SocketAddr,
+    /// Port `DHCPv4` clients listen on (68) and `DHCPv6` clients listen on (546).
+    pub client_port4: u16,
+    pub client_port6: u16,
+    pub scopes: Vec<DhcpScope>,
+    pub scopes6: Vec<DhcpScope6>,
+}
+
+impl Default for Dhcp {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            domain: None,
+            lease_file: None,
+            listen4: SocketAddr::from(([0, 0, 0, 0], 67)),
+            listen6: SocketAddr::from(([0u16; 8], 547)),
+            client_port4: 68,
+            client_port6: 546,
+            scopes: Vec::new(),
+            scopes6: Vec::new(),
+        }
+    }
+}
+
+/// One IPv4 network Lumen hands addresses out on.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DhcpScope {
+    /// Network interface to serve (such as `eth0`). Needed on Linux when several networks are
+    /// attached, so a request on one cannot be answered from another.
+    pub interface: Option<String>,
+    pub subnet: ipnet::Ipv4Net,
+    /// Lumen's own address on this network. Clients use it as the DHCP server and, unless `dns`
+    /// is set, as their DNS server.
+    pub server_address: std::net::Ipv4Addr,
+    pub range_start: std::net::Ipv4Addr,
+    pub range_end: std::net::Ipv4Addr,
+    pub router: Option<std::net::Ipv4Addr>,
+    /// DNS servers to offer. Defaults to `server_address`.
+    #[serde(default)]
+    pub dns: Vec<std::net::Ipv4Addr>,
+    #[serde(default = "default_lease_secs")]
+    pub lease_secs: u32,
+    #[serde(default)]
+    pub reservations: Vec<Reservation4>,
+}
+
+fn default_lease_secs() -> u32 {
+    43_200
+}
+
+/// A device that always gets the same IPv4 address.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reservation4 {
+    /// Hardware address as `aa:bb:cc:dd:ee:ff`.
+    pub mac: String,
+    pub ip: std::net::Ipv4Addr,
+    pub hostname: Option<String>,
+}
+
+/// One IPv6 network Lumen hands addresses out on (stateful `DHCPv6`, `IA_NA`).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DhcpScope6 {
+    /// Interface to serve. Required: `DHCPv6` clients find the server by multicast.
+    pub interface: String,
+    pub prefix: ipnet::Ipv6Net,
+    pub range_start: std::net::Ipv6Addr,
+    pub range_end: std::net::Ipv6Addr,
+    /// DNS servers to offer. Required, since an IPv6 server address is not implied.
+    pub dns: Vec<std::net::Ipv6Addr>,
+    #[serde(default = "default_preferred_secs")]
+    pub preferred_secs: u32,
+    #[serde(default = "default_valid_secs")]
+    pub valid_secs: u32,
+    #[serde(default)]
+    pub reservations: Vec<Reservation6>,
+}
+
+fn default_preferred_secs() -> u32 {
+    21_600
+}
+
+fn default_valid_secs() -> u32 {
+    43_200
+}
+
+/// A device that always gets the same IPv6 address.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reservation6 {
+    /// The client's `DUID` in hex, for example `00010001...`.
+    pub duid: String,
+    pub ip: std::net::Ipv6Addr,
+    pub hostname: Option<String>,
+}
+
+/// Most scopes of each family, addresses in one range, and reservations in one scope.
+pub const MAX_DHCP_SCOPES: usize = 16;
+pub const MAX_DHCP_RANGE: u32 = 65_536;
+pub const MAX_DHCP_RESERVATIONS: usize = 512;
+
+/// A `aa:bb:cc:dd:ee:ff` hardware address as bytes.
+#[must_use]
+pub fn parse_mac(text: &str) -> Option<[u8; 6]> {
+    let mut out = [0u8; 6];
+    let mut parts = text.split(':');
+    for byte in &mut out {
+        let part = parts.next()?;
+        if part.len() != 2 {
+            return None;
+        }
+        *byte = u8::from_str_radix(part, 16).ok()?;
+    }
+    parts.next().is_none().then_some(out)
+}
+
+/// Hex text as bytes (an even number of digits, 1 to 130 bytes).
+#[must_use]
+pub fn parse_hex(text: &str) -> Option<Vec<u8>> {
+    if text.is_empty() || !text.len().is_multiple_of(2) || text.len() > 260 || !text.is_ascii() {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+        .collect()
+}
+
 /// How the certificate authority checks that you control the names.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -834,6 +980,7 @@ impl Config {
             &mut config.resolver.persistent_cache.path,
             &mut config.dnscrypt.key_file,
             &mut config.acme.account_file,
+            &mut config.dhcp.lease_file,
             &mut config.acme.directory_ca,
             &mut config.web.certificate,
             &mut config.web.private_key,
@@ -1000,6 +1147,7 @@ impl Config {
         }
         self.validate_dnscrypt()?;
         self.validate_acme()?;
+        self.validate_dhcp()?;
         self.validate_zones()?;
         if self.listen.allow_clients.is_empty() || self.listen.allow_clients.len() > 128 {
             return Err("allow_clients must contain 1..128 CIDRs".into());
@@ -1161,6 +1309,140 @@ impl Config {
                         "update_rules in zone {} need a configured key, names inside the zone, and types from {:?}",
                         zone.name, UPDATABLE_TYPES
                     ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)] // One flat list of independent scope checks.
+    fn validate_dhcp(&self) -> Result<(), String> {
+        let dhcp = &self.dhcp;
+        if !dhcp.enabled {
+            return Ok(());
+        }
+        let label_ok = |label: &str| {
+            (1..=63).contains(&label.len())
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        };
+        let domain = dhcp
+            .domain
+            .as_deref()
+            .filter(|domain| {
+                domain.len() <= 200 && !domain.ends_with('.') && domain.split('.').all(label_ok)
+            })
+            .ok_or("dhcp.domain must be a DNS name without a trailing dot")?;
+        if dhcp.lease_file.is_none() {
+            return Err("dhcp.lease_file is required".into());
+        }
+        if dhcp.scopes.is_empty() && dhcp.scopes6.is_empty() {
+            return Err("dhcp needs at least one scope or scopes6 entry".into());
+        }
+        if dhcp.scopes.len() > MAX_DHCP_SCOPES || dhcp.scopes6.len() > MAX_DHCP_SCOPES {
+            return Err("too many dhcp scopes".into());
+        }
+        if dhcp.client_port4 == 0 || dhcp.client_port6 == 0 {
+            return Err("dhcp client ports must be nonzero".into());
+        }
+        // A zone of your own and the DHCP domain would both claim the same names.
+        let lower = domain.to_ascii_lowercase();
+        if self.zones.iter().any(|zone| {
+            let zone = zone.name.to_ascii_lowercase();
+            zone == lower
+                || zone.ends_with(&format!(".{lower}"))
+                || lower.ends_with(&format!(".{zone}"))
+        }) {
+            return Err("dhcp.domain overlaps a configured zone".into());
+        }
+        let host_ok = |host: &Option<String>| host.as_deref().is_none_or(label_ok);
+        for (index, scope) in dhcp.scopes.iter().enumerate() {
+            let net = scope.subnet;
+            let in_net = |ip: std::net::Ipv4Addr| net.contains(&ip);
+            let (start, end) = (u32::from(scope.range_start), u32::from(scope.range_end));
+            if !in_net(scope.range_start)
+                || !in_net(scope.range_end)
+                || start > end
+                || end - start >= MAX_DHCP_RANGE
+                || !in_net(scope.server_address)
+                || (start..=end).contains(&u32::from(scope.server_address))
+                || scope.router.is_some_and(|router| !in_net(router))
+                || scope.dns.len() > 4
+                || !(60..=2_592_000).contains(&scope.lease_secs)
+                || scope.reservations.len() > MAX_DHCP_RESERVATIONS
+                || scope
+                    .interface
+                    .as_deref()
+                    .is_some_and(|name| name.is_empty() || name.len() > 15)
+            {
+                return Err(format!("dhcp scope {index} is not valid"));
+            }
+            let mut seen_ip = std::collections::HashSet::new();
+            let mut seen_mac = std::collections::HashSet::new();
+            for reservation in &scope.reservations {
+                let Some(mac) = parse_mac(&reservation.mac) else {
+                    return Err(format!("dhcp scope {index} has an invalid mac"));
+                };
+                if !in_net(reservation.ip)
+                    || net.network() == reservation.ip
+                    || net.broadcast() == reservation.ip
+                    || reservation.ip == scope.server_address
+                    || !host_ok(&reservation.hostname)
+                    || !seen_ip.insert(reservation.ip)
+                    || !seen_mac.insert(mac)
+                {
+                    return Err(format!(
+                        "dhcp scope {index} has an invalid or duplicate reservation"
+                    ));
+                }
+            }
+            for other in &dhcp.scopes[..index] {
+                if other.subnet.contains(&net.network()) || net.contains(&other.subnet.network()) {
+                    return Err("dhcp scopes must not overlap".into());
+                }
+            }
+        }
+        for (index, scope) in dhcp.scopes6.iter().enumerate() {
+            let net = scope.prefix;
+            let in_net = |ip: std::net::Ipv6Addr| net.contains(&ip);
+            let (start, end) = (u128::from(scope.range_start), u128::from(scope.range_end));
+            if !in_net(scope.range_start)
+                || !in_net(scope.range_end)
+                || start > end
+                || end - start >= u128::from(MAX_DHCP_RANGE)
+                || scope.dns.is_empty()
+                || scope.dns.len() > 4
+                || scope.interface.is_empty()
+                || scope.interface.len() > 15
+                || scope.preferred_secs < 60
+                || scope.valid_secs < scope.preferred_secs
+                || scope.valid_secs > 2_592_000
+                || scope.reservations.len() > MAX_DHCP_RESERVATIONS
+            {
+                return Err(format!("dhcp scopes6 entry {index} is not valid"));
+            }
+            let mut seen_ip = std::collections::HashSet::new();
+            let mut seen_duid = std::collections::HashSet::new();
+            for reservation in &scope.reservations {
+                let Some(duid) = parse_hex(&reservation.duid) else {
+                    return Err(format!("dhcp scopes6 entry {index} has an invalid duid"));
+                };
+                if !in_net(reservation.ip)
+                    || !host_ok(&reservation.hostname)
+                    || !seen_ip.insert(reservation.ip)
+                    || !seen_duid.insert(duid)
+                {
+                    return Err(format!(
+                        "dhcp scopes6 entry {index} has an invalid or duplicate reservation"
+                    ));
+                }
+            }
+            for other in &dhcp.scopes6[..index] {
+                if other.prefix.contains(&net.network()) || net.contains(&other.prefix.network()) {
+                    return Err("dhcp scopes6 must not overlap".into());
                 }
             }
         }
@@ -1727,6 +2009,109 @@ pub fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dhcp_config() -> Config {
+        let mut config = Config::default();
+        config.dhcp.enabled = true;
+        config.dhcp.domain = Some("home.example".into());
+        config.dhcp.lease_file = Some("leases.db".into());
+        config.dhcp.scopes = vec![DhcpScope {
+            interface: Some("eth0".into()),
+            subnet: "192.168.1.0/24".parse().unwrap(),
+            server_address: "192.168.1.2".parse().unwrap(),
+            range_start: "192.168.1.100".parse().unwrap(),
+            range_end: "192.168.1.199".parse().unwrap(),
+            router: Some("192.168.1.1".parse().unwrap()),
+            dns: Vec::new(),
+            lease_secs: 43_200,
+            reservations: vec![Reservation4 {
+                mac: "aa:bb:cc:dd:ee:01".into(),
+                ip: "192.168.1.10".parse().unwrap(),
+                hostname: Some("printer".into()),
+            }],
+        }];
+        config.dhcp.scopes6 = vec![DhcpScope6 {
+            interface: "eth0".into(),
+            prefix: "fd00:1::/64".parse().unwrap(),
+            range_start: "fd00:1::100".parse().unwrap(),
+            range_end: "fd00:1::1ff".parse().unwrap(),
+            dns: vec!["fd00:1::2".parse().unwrap()],
+            preferred_secs: 3600,
+            valid_secs: 7200,
+            reservations: vec![Reservation6 {
+                duid: "00010001aabbccdd".into(),
+                ip: "fd00:1::10".parse().unwrap(),
+                hostname: None,
+            }],
+        }];
+        config
+    }
+
+    #[test]
+    fn dhcp_is_off_until_enabled_and_validates_every_scope() {
+        assert!(Config::default().validate_dhcp().is_ok());
+        assert!(dhcp_config().validate_dhcp().is_ok());
+        let mutations: Vec<fn(&mut Config)> = vec![
+            |c| c.dhcp.domain = None,
+            |c| c.dhcp.domain = Some("bad domain".into()),
+            |c| c.dhcp.lease_file = None,
+            |c| {
+                c.dhcp.scopes.clear();
+                c.dhcp.scopes6.clear();
+            },
+            |c| c.dhcp.scopes[0].range_end = "192.168.2.5".parse().unwrap(),
+            |c| c.dhcp.scopes[0].range_start = "192.168.1.200".parse().unwrap(),
+            |c| c.dhcp.scopes[0].server_address = "192.168.1.150".parse().unwrap(),
+            |c| c.dhcp.scopes[0].lease_secs = 5,
+            |c| c.dhcp.scopes[0].reservations[0].mac = "nope".into(),
+            |c| c.dhcp.scopes[0].reservations[0].ip = "10.0.0.1".parse().unwrap(),
+            |c| c.dhcp.scopes[0].reservations[0].ip = "192.168.1.255".parse().unwrap(),
+            |c| {
+                let copy = c.dhcp.scopes[0].reservations[0].clone();
+                c.dhcp.scopes[0].reservations.push(copy);
+            },
+            |c| {
+                let copy = c.dhcp.scopes[0].clone();
+                c.dhcp.scopes.push(copy);
+            },
+            |c| c.dhcp.scopes6[0].dns.clear(),
+            |c| c.dhcp.scopes6[0].valid_secs = 100,
+            |c| c.dhcp.scopes6[0].reservations[0].duid = "xyz".into(),
+            |c| c.dhcp.scopes6[0].reservations[0].ip = "fd00:2::1".parse().unwrap(),
+            |c| {
+                c.zones = vec![Zone {
+                    name: "home.example".into(),
+                    text: Some("x".into()),
+                    ..Default::default()
+                }];
+            },
+        ];
+        for (index, mutate) in mutations.into_iter().enumerate() {
+            let mut config = dhcp_config();
+            mutate(&mut config);
+            assert!(config.validate_dhcp().is_err(), "mutation {index}");
+        }
+    }
+
+    #[test]
+    fn mac_and_hex_parsers_are_strict() {
+        assert_eq!(
+            parse_mac("aa:bb:cc:dd:ee:ff"),
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        );
+        for bad in [
+            "",
+            "aa:bb",
+            "aa:bb:cc:dd:ee:ff:00",
+            "aa-bb-cc-dd-ee-ff",
+            "a:b:c:d:e:f",
+            "gg:bb:cc:dd:ee:ff",
+        ] {
+            assert!(parse_mac(bad).is_none(), "{bad}");
+        }
+        assert_eq!(parse_hex("00ff"), Some(vec![0, 255]));
+        assert!(parse_hex("").is_none() && parse_hex("abc").is_none() && parse_hex("zz").is_none());
+    }
 
     #[test]
     fn acme_needs_a_complete_and_safe_setup() {
