@@ -50,6 +50,7 @@ use tokio::time::timeout;
 mod accel;
 mod cache;
 mod forward;
+mod rollover;
 mod zones;
 
 pub use hickory_server::net::xfer::Protocol as Transport;
