@@ -895,20 +895,22 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
     // Free ports are probed by binding and dropping, so another test can win the race.
     // Retry with fresh ports instead of failing on that collision.
     let mut attempt = 0;
-    let (mut upstream, tls, https, quic) = loop {
+    let (mut upstream, tls, https, quic, h3) = loop {
         let mut upstream_cfg = config(fixture.address, address("127.0.0.1"));
         upstream_cfg.listen.udp.clear();
         upstream_cfg.listen.tcp.clear();
         let tls = address("127.0.0.1");
         let https = address("127.0.0.1");
         let quic = address("127.0.0.1");
+        let h3 = address("127.0.0.1");
+        upstream_cfg.listen.doh3 = vec![h3];
         upstream_cfg.listen.dot = vec![tls];
         upstream_cfg.listen.doh = vec![https];
         upstream_cfg.listen.doq = vec![quic];
         upstream_cfg.listen.certificate = Some(directory.path().join("cert.pem"));
         upstream_cfg.listen.private_key = Some(directory.path().join("key.pem"));
         match RunningServer::start(upstream_cfg).await {
-            Ok(server) => break (server, tls, https, quic),
+            Ok(server) => break (server, tls, https, quic, h3),
             Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && attempt < 5 => {
                 attempt += 1;
             }
@@ -918,6 +920,7 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
     for (protocol, address) in [
         (UpstreamProtocol::Tls, tls),
         (UpstreamProtocol::Https, https),
+        (UpstreamProtocol::H3, h3),
         (UpstreamProtocol::Quic, quic),
     ] {
         let bind = self::address("127.0.0.1");

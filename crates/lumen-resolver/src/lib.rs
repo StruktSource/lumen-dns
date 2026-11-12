@@ -970,6 +970,11 @@ fn name_server_config(
             name,
             upstream.doh_path.as_deref().map(Arc::from),
         ),
+        UpstreamProtocol::H3 => NameServerConfig::h3(
+            upstream.address.ip(),
+            name,
+            upstream.doh_path.as_deref().map(Arc::from),
+        ),
         UpstreamProtocol::Quic => NameServerConfig::quic(upstream.address.ip(), name),
     };
     server.trust_negative_responses = trust_negative_responses;

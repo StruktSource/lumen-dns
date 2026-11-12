@@ -291,7 +291,10 @@ fn validate_transport(transport: &Transport) -> Result<(), String> {
     }
     let encrypted = matches!(
         transport.protocol,
-        UpstreamProtocol::Tls | UpstreamProtocol::Https | UpstreamProtocol::Quic
+        UpstreamProtocol::Tls
+            | UpstreamProtocol::Https
+            | UpstreamProtocol::H3
+            | UpstreamProtocol::Quic
     );
     if encrypted
         && transport
@@ -447,7 +450,10 @@ mod tests {
         );
         assert!(upstreams.iter().all(|upstream| matches!(
             upstream.protocol,
-            UpstreamProtocol::Tls | UpstreamProtocol::Https | UpstreamProtocol::Quic
+            UpstreamProtocol::Tls
+                | UpstreamProtocol::Https
+                | UpstreamProtocol::H3
+                | UpstreamProtocol::Quic
         )));
         assert!(
             catalog

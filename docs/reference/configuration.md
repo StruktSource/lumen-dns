@@ -214,7 +214,7 @@ Tracked names live in memory only, are never logged, exported, or saved, and are
 | Field | Meaning |
 | :--- | :--- |
 | `address` | **Required.** Explicit IPv4 or IPv6 address and port. No bootstrap DNS lookup |
-| `protocol` | `udp`, `tcp`, `tls`, `https`, or `quic` |
+| `protocol` | `udp`, `tcp`, `tls`, `https`, `h3`, or `quic`. `h3` is DNS over HTTP/3 and takes `doh_path` like `https` |
 | `server_name` | Required for encrypted protocols. Used as the certificate name and SNI |
 | `doh_path` | Optional, HTTPS only. An absolute path, default `/dns-query` |
 
@@ -225,7 +225,7 @@ Tracked names live in memory only, are never logged, exported, or saved, and are
 | Field | Meaning |
 | :--- | :--- |
 | `id` | **Required.** Stable ID from the bundled [provider catalog](../guides/upstream-providers.md) |
-| `protocol` | An explicit `udp`, `tcp`, `tls`, `https`, or `quic`; or encrypted-only `auto` |
+| `protocol` | An explicit `udp`, `tcp`, `tls`, `https`, `h3`, or `quic`; or encrypted-only `auto` |
 | `address_family` | `any` (default), `ipv4`, or `ipv6` |
 | `encryption` | Auto mode only. Defaults to, and only accepts, `required` |
 | `transport_priority` | Auto mode only. A unique ordered subset of `quic`, `https`, `tls` |

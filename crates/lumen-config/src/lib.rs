@@ -693,6 +693,8 @@ pub enum UpstreamProtocol {
     Tcp,
     Tls,
     Https,
+    /// DNS over HTTP/3 (`DoH3`) to the upstream, over QUIC with ALPN `h3`.
+    H3,
     Quic,
 }
 
@@ -1315,7 +1317,10 @@ impl Config {
                 .any(|u| {
                     matches!(
                         u.protocol,
-                        UpstreamProtocol::Tls | UpstreamProtocol::Https | UpstreamProtocol::Quic
+                        UpstreamProtocol::Tls
+                            | UpstreamProtocol::Https
+                            | UpstreamProtocol::H3
+                            | UpstreamProtocol::Quic
                     )
                 })
         {
@@ -1487,7 +1492,10 @@ impl Config {
             }
             let encrypted = matches!(
                 upstream.protocol,
-                UpstreamProtocol::Tls | UpstreamProtocol::Https | UpstreamProtocol::Quic
+                UpstreamProtocol::Tls
+                    | UpstreamProtocol::Https
+                    | UpstreamProtocol::H3
+                    | UpstreamProtocol::Quic
             );
             if encrypted
                 && upstream
@@ -1498,8 +1506,13 @@ impl Config {
                 return Err("encrypted upstream needs server_name".into());
             }
             match &upstream.doh_path {
-                Some(_) if upstream.protocol != UpstreamProtocol::Https => {
-                    return Err("doh_path is only valid for https upstreams".into());
+                Some(_)
+                    if !matches!(
+                        upstream.protocol,
+                        UpstreamProtocol::Https | UpstreamProtocol::H3
+                    ) =>
+                {
+                    return Err("doh_path is only valid for https and h3 upstreams".into());
                 }
                 Some(path)
                     if path.len() <= 1024

@@ -27,7 +27,7 @@ transport_priority = ["quic", "https", "tls"]
 | Field | Meaning |
 | :--- | :--- |
 | `id` | The stable ID from the table below. |
-| `protocol` | A specific transport (`udp`, `tcp`, `tls`, `https`, `quic`), or `auto` for an encrypted-only list. |
+| `protocol` | A specific transport (`udp`, `tcp`, `tls`, `https`, `h3`, `quic`), or `auto` for an encrypted-only list. |
 | `address_family` | `any` (default), `ipv4`, or `ipv6`. |
 | `encryption` | Auto mode only. Defaults to, and only accepts, `required`. There is no plaintext policy. |
 | `transport_priority` | Auto mode only. An ordered, unique subset of `quic`, `https`, `tls`. Default order: QUIC, HTTPS, TLS. |
