@@ -22,4 +22,5 @@ base64 = "0.23"
 workspace = true
 
 [dev-dependencies]
+time = { version = "0.3", default-features = false }
 tempfile = "3"

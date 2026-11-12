@@ -8,6 +8,13 @@
 
 #![allow(dead_code)] // Wired in by the updater step; remove then.
 
+use hickory_server::proto::{
+    dnssec::{
+        PublicKey, Verifier,
+        rdata::{DNSKEY, DNSSECRData, RRSIG},
+    },
+    rr::{DNSClass, Name, RData, Record, RecordType},
+};
 use std::fmt::Write as _;
 
 /// Seconds a new key must stay visible before it is trusted (30 days, RFC 5011 section 2.3).
@@ -210,6 +217,92 @@ impl Anchors {
     }
 }
 
+/// Read an apex DNSKEY answer the way RFC 5011 asks, at the unix time `now`.
+///
+/// Returns the key-signing keys that are present, and whether a key from `trusted` signed the
+/// set with a signature that is valid now. A revoked key counts as revoked only if it signed
+/// the set itself; otherwise it is left out, so a forged REVOKE bit cannot remove anything.
+pub fn evaluate(
+    trusted: &[(u8, Vec<u8>)],
+    owner: &Name,
+    records: &[Record],
+    now: u32,
+) -> (Vec<Seen>, bool) {
+    let keys: Vec<(&DNSKEY, &Record)> = records
+        .iter()
+        .filter(|record| record.name == *owner)
+        .filter_map(|record| match &record.data {
+            RData::DNSSEC(DNSSECRData::DNSKEY(key))
+                if key.secure_entry_point() && key.zone_key() =>
+            {
+                Some((key, record))
+            }
+            _ => None,
+        })
+        .collect();
+    let set: Vec<&Record> = records
+        .iter()
+        .filter(|record| record.name == *owner && record.record_type() == RecordType::DNSKEY)
+        .collect();
+    let signatures: Vec<&RRSIG> = records
+        .iter()
+        .filter(|record| record.name == *owner)
+        .filter_map(|record| match &record.data {
+            RData::DNSSEC(DNSSECRData::RRSIG(sig))
+                if sig.input().type_covered == RecordType::DNSKEY =>
+            {
+                Some(sig)
+            }
+            _ => None,
+        })
+        .collect();
+    let signed_by = |key: &DNSKEY| {
+        let Ok(tag) = key.calculate_key_tag() else {
+            return false;
+        };
+        signatures.iter().any(|sig| {
+            let input = sig.input();
+            let fresh = now.wrapping_sub(input.sig_inception.get()).cast_signed() >= 0
+                && input.sig_expiration.get().wrapping_sub(now).cast_signed() >= 0;
+            fresh
+                && input.key_tag == tag
+                && input.signer_name == *owner
+                && key
+                    .verify_rrsig(owner, DNSClass::IN, sig, set.iter().copied())
+                    .is_ok()
+        })
+    };
+    let identity = |key: &DNSKEY| {
+        (
+            u8::from(key.algorithm()),
+            key.public_key().public_bytes().to_vec(),
+        )
+    };
+    let validated = keys
+        .iter()
+        .any(|(key, _)| !key.revoke() && trusted.contains(&identity(key)) && signed_by(key));
+    let mut seen = Vec::new();
+    for (key, _) in &keys {
+        let (algorithm, public_key) = identity(key);
+        if key.revoke() {
+            if signed_by(key) {
+                seen.push(Seen {
+                    algorithm,
+                    public_key,
+                    revoked: true,
+                });
+            }
+        } else {
+            seen.push(Seen {
+                algorithm,
+                public_key,
+                revoked: false,
+            });
+        }
+    }
+    (seen, validated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +414,170 @@ mod tests {
         }
         let many = "valid 8 0 aa\n".repeat(MAX_KEYS + 1);
         assert!(Anchors::from_text(&many).is_err());
+    }
+
+    mod signed {
+        use super::super::*;
+        use hickory_server::proto::dnssec::{
+            Algorithm, DnssecSigner, SigningKey, crypto::EcdsaSigningKey,
+        };
+        use hickory_server::proto::rr::RecordSet;
+        use rustls::pki_types::PrivatePkcs8KeyDer;
+        use std::time::Duration;
+        use time::OffsetDateTime;
+
+        const NOW: u32 = 1_800_000_000;
+
+        struct Key(Vec<u8>);
+
+        impl Key {
+            fn new() -> Self {
+                let der = EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP256SHA256).unwrap();
+                Self(der.secret_pkcs8_der().to_vec())
+            }
+
+            fn pair(&self) -> EcdsaSigningKey {
+                EcdsaSigningKey::from_pkcs8(
+                    &PrivatePkcs8KeyDer::from(self.0.clone()),
+                    Algorithm::ECDSAP256SHA256,
+                )
+                .unwrap()
+            }
+
+            fn dnskey(&self, revoke: bool) -> DNSKEY {
+                DNSKEY::new(true, true, revoke, self.pair().to_public_key().unwrap())
+            }
+
+            fn identity(&self) -> (u8, Vec<u8>) {
+                let public = self.pair().to_public_key().unwrap();
+                (u8::from(public.algorithm()), public.public_bytes().to_vec())
+            }
+        }
+
+        /// A root DNSKEY answer. `keys` are (key, revoked). `signers` are (key, revoked, start
+        /// of a one hour validity, in unix seconds).
+        fn answer(keys: &[(&Key, bool)], signers: &[(&Key, bool, u32)]) -> Vec<Record> {
+            let owner = Name::root();
+            let mut set = RecordSet::new(owner.clone(), RecordType::DNSKEY, 1);
+            for (key, revoke) in keys {
+                set.insert(
+                    Record::from_rdata(
+                        owner.clone(),
+                        3600,
+                        RData::DNSSEC(DNSSECRData::DNSKEY(key.dnskey(*revoke))),
+                    ),
+                    1,
+                );
+            }
+            let mut out: Vec<Record> = set.records_without_rrsigs().cloned().collect();
+            for (key, revoke, from) in signers {
+                let signer = DnssecSigner::new(
+                    key.dnskey(*revoke),
+                    Box::new(key.pair()),
+                    owner.clone(),
+                    Duration::from_secs(3600),
+                );
+                let start = OffsetDateTime::from_unix_timestamp(i64::from(*from)).unwrap();
+                let sig = RRSIG::from_rrset(&set, DNSClass::IN, start, &signer).unwrap();
+                out.push(Record::from_rdata(
+                    owner.clone(),
+                    3600,
+                    RData::DNSSEC(DNSSECRData::RRSIG(sig)),
+                ));
+            }
+            out
+        }
+
+        fn run(trusted: &[&Key], records: &[Record]) -> (Vec<Seen>, bool) {
+            let trusted: Vec<_> = trusted.iter().map(|key| key.identity()).collect();
+            evaluate(&trusted, &Name::root(), records, NOW)
+        }
+
+        #[test]
+        fn a_set_signed_by_a_trusted_key_is_validated_and_lists_every_key() {
+            let (old, new) = (Key::new(), Key::new());
+            let records = answer(&[(&old, false), (&new, false)], &[(&old, false, NOW - 60)]);
+            let (seen, validated) = run(&[&old], &records);
+            assert!(validated);
+            assert_eq!(seen.len(), 2);
+            assert!(seen.iter().all(|key| !key.revoked));
+        }
+
+        #[test]
+        fn a_set_signed_only_by_an_unknown_key_is_not_validated() {
+            let (trusted, stranger) = (Key::new(), Key::new());
+            let records = answer(
+                &[(&trusted, false), (&stranger, false)],
+                &[(&stranger, false, NOW - 60)],
+            );
+            assert!(!run(&[&trusted], &records).1);
+        }
+
+        #[test]
+        fn expired_and_not_yet_valid_signatures_are_refused() {
+            let key = Key::new();
+            for start in [NOW - 7200, NOW + 600] {
+                let records = answer(&[(&key, false)], &[(&key, false, start)]);
+                assert!(!run(&[&key], &records).1, "start {start}");
+            }
+        }
+
+        #[test]
+        fn a_tampered_key_set_fails_the_signature() {
+            let (key, other) = (Key::new(), Key::new());
+            let mut records = answer(&[(&key, false)], &[(&key, false, NOW - 60)]);
+            let extra = answer(&[(&other, false)], &[]);
+            records.extend(extra);
+            assert!(!run(&[&key], &records).1);
+        }
+
+        #[test]
+        fn a_revoke_bit_counts_only_when_the_key_signed_itself() {
+            let (old, new) = (Key::new(), Key::new());
+            // Revoked and self-signed, with the new key vouching for the set too.
+            let records = answer(
+                &[(&old, true), (&new, false)],
+                &[(&old, true, NOW - 60), (&new, false, NOW - 60)],
+            );
+            let (seen, validated) = run(&[&old, &new], &records);
+            assert!(validated);
+            assert!(
+                seen.iter()
+                    .any(|key| key.revoked && key.public_key == old.identity().1)
+            );
+            // The same set without the revoked key's own signature: the key is left out.
+            let records = answer(&[(&old, true), (&new, false)], &[(&new, false, NOW - 60)]);
+            let (seen, validated) = run(&[&new], &records);
+            assert!(validated);
+            assert_eq!(seen.len(), 1);
+            assert!(!seen[0].revoked);
+        }
+
+        #[test]
+        fn a_rollover_runs_through_the_signed_path() {
+            let (old, new) = (Key::new(), Key::new());
+            let mut anchors = Anchors::seeded([old.identity()]);
+            let day = 24 * 3600;
+            let step = |anchors: &mut Anchors,
+                        at: u64,
+                        keys: &[(&Key, bool)],
+                        signers: &[(&Key, bool, u32)]| {
+                let records = answer(keys, signers);
+                let (seen, validated) = evaluate(&anchors.trusted(), &Name::root(), &records, NOW);
+                anchors.observe(at, &seen, validated)
+            };
+            let both = [(&old, false), (&new, false)];
+            assert!(!step(&mut anchors, 0, &both, &[(&old, false, NOW - 60)]));
+            assert!(step(
+                &mut anchors,
+                30 * day,
+                &both,
+                &[(&old, false, NOW - 60)]
+            ));
+            let revoked = [(&old, true), (&new, false)];
+            let signers = [(&old, true, NOW - 60), (&new, false, NOW - 60)];
+            assert!(step(&mut anchors, 31 * day, &revoked, &signers));
+            assert_eq!(anchors.trusted(), vec![new.identity()]);
+        }
     }
 }
