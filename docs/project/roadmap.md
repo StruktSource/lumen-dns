@@ -29,7 +29,7 @@ _Last updated 2026-11-11 for version 0.6.0._
 - Certificate automation and automatic trust-anchor rollover
 - Authoritative zones, operator-managed DNS records, split-horizon DNS, and conditional forwarding
 - Dynamic DNS updates, zone transfers, and DNSSEC zone signing
-- More encrypted DNS options: native DoH over HTTP/3, DNSCrypt, and ECH support
+- More encrypted DNS options: DNSCrypt upstreams, Anonymized DNSCrypt, and ECH support
 - Wider child-safety filtering categories
 - An optional DHCP server module
 - High availability and cluster configuration replication
@@ -145,8 +145,8 @@ Principles that shape every decision:
 - [ ] Dynamic DNS updates using RFC 2136, with authenticated and tightly scoped update policy
 - [ ] Authoritative zone transfers over AXFR and IXFR, with authenticated transfer policy and bounded transfer size
 - [ ] DNSSEC zone signing and safe key lifecycle for Lumen-hosted authoritative zones
-- [ ] Native DoH over HTTP/3. DoH over HTTP/2 GET and POST is already implemented; the web-console HTTP/3 reverse-proxy path is not DoH over HTTP/3
-- [ ] DNSCrypt support, without weakening the existing encrypted-only provider policy
+- [x] Native DoH over HTTP/3 listener (`listen.doh3`), same `/dns-query` contract as HTTP/2 DoH. Client-side DoH3 to upstream providers is not built, and Lumen does not advertise HTTP/3 itself
+- [x] DNSCrypt v2 **server** (UDP and TCP, both cipher suites, signed rotating certificates). Still open: DNSCrypt as an upstream transport, Anonymized DNSCrypt relays, and interop testing against `dnscrypt-proxy` releases
 - [ ] HTTPS and SVCB record interoperability, including preserving ECH configuration from authoritative answer to browser ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36))
 - [ ] Optional native ECH for Lumen's own TLS connections and encrypted DNS listeners where the TLS stack supports it ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36))
 - [x] Regular-expression blocking with explicit syntax, compile limits, linear-time matching, and explainable matches (0.7.0)

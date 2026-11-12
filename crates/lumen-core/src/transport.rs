@@ -76,6 +76,7 @@ impl RunningServer {
         let tls = if config.listen.dot.is_empty()
             && config.listen.doh.is_empty()
             && config.listen.doq.is_empty()
+            && config.listen.doh3.is_empty()
         {
             None
         } else {
@@ -149,9 +150,46 @@ impl RunningServer {
                 tls.as_ref()
                     .ok_or_else(|| io::Error::other("missing TLS credentials"))?,
                 &config.limits,
+                b"doq",
             )?;
             endpoints.push((Transport::Quic, endpoint.local_addr()?));
             quic.push(endpoint);
+        }
+        let mut h3 = Vec::new();
+        for address in &config.listen.doh3 {
+            let endpoint = quic_endpoint(
+                *address,
+                tls.as_ref()
+                    .ok_or_else(|| io::Error::other("missing TLS credentials"))?,
+                &config.limits,
+                b"h3",
+            )?;
+            endpoints.push((Transport::H3, endpoint.local_addr()?));
+            h3.push(endpoint);
+        }
+        let dnscrypt = if config.dnscrypt.enabled {
+            let key_file = config
+                .dnscrypt
+                .key_file
+                .as_deref()
+                .ok_or_else(|| io::Error::other("dnscrypt key_file is required"))?;
+            Some(Arc::new(crate::dnscrypt::DnsCrypt::load(
+                &config.dnscrypt.provider_name,
+                key_file,
+                config.dnscrypt.cert_hours,
+            )?))
+        } else {
+            None
+        };
+        let mut dnscrypt_sockets = Vec::new();
+        if dnscrypt.is_some() {
+            for address in &config.dnscrypt.listen {
+                let socket = udp_socket(*address)?;
+                let listener = tcp_listener(*address)?;
+                endpoints.push((Transport::Udp, socket.local_addr()?));
+                endpoints.push((Transport::Tcp, listener.local_addr()?));
+                dnscrypt_sockets.push((socket, listener));
+            }
         }
         let metrics_listener = config.metrics.map(tcp_listener).transpose()?;
         let console = console.state.map(|state| {
@@ -178,6 +216,37 @@ impl RunningServer {
         }
         for endpoint in quic {
             tasks.spawn(serve_quic(endpoint, Arc::clone(&service)));
+        }
+        for endpoint in h3 {
+            tasks.spawn(serve_h3(endpoint, Arc::clone(&service)));
+        }
+        if let Some(dnscrypt) = dnscrypt {
+            let public = crate::dnscrypt::to_hex(&dnscrypt.provider_public_key());
+            eprintln!(
+                "dnscrypt provider={} public_key={public}",
+                dnscrypt.provider_name()
+            );
+            for (socket, listener) in dnscrypt_sockets {
+                if let Ok(address) = listener.local_addr() {
+                    eprintln!("dnscrypt stamp={}", dnscrypt.stamp(address));
+                }
+                tasks.spawn(serve_dnscrypt_udp(
+                    socket,
+                    Arc::clone(&dnscrypt),
+                    Arc::clone(&service),
+                ));
+                tasks.spawn(serve_dnscrypt_tcp(
+                    listener,
+                    Arc::clone(&dnscrypt),
+                    Arc::clone(&service),
+                ));
+            }
+            tasks.spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    dnscrypt.rotate_if_due();
+                }
+            });
         }
         #[cfg(unix)]
         {
@@ -247,6 +316,7 @@ impl RunningServer {
         if !config.listen.dot.is_empty()
             || !config.listen.doh.is_empty()
             || !config.listen.doq.is_empty()
+            || !config.listen.doh3.is_empty()
         {
             let _ = credentials(config)?;
         }
@@ -385,14 +455,15 @@ fn quic_endpoint(
     address: SocketAddr,
     keys: &Credentials,
     limits: &lumen_config::Limits,
+    alpn: &[u8],
 ) -> io::Result<Endpoint> {
     let mut server = quinn::ServerConfig::with_crypto(Arc::new(
-        QuicServerConfig::try_from(tls_config(keys, b"doq")?).map_err(io::Error::other)?,
+        QuicServerConfig::try_from(tls_config(keys, alpn)?).map_err(io::Error::other)?,
     ));
     let mut transport = quinn::TransportConfig::default();
     transport
         .max_concurrent_bidi_streams(8_u32.into())
-        .max_concurrent_uni_streams(0_u32.into())
+        .max_concurrent_uni_streams(if alpn == b"h3" { 8_u32 } else { 0_u32 }.into())
         .stream_receive_window((u32::from(limits.max_message_bytes) + 2).into())
         .receive_window((8 * (u32::from(limits.max_message_bytes) + 2)).into())
         .send_window(8 * (u64::from(limits.max_message_bytes) + 2))
@@ -608,20 +679,10 @@ async fn doh_request(
             if !request.body().is_end_stream() {
                 return (StatusCode::BAD_REQUEST, vec![]);
             }
-            let Some(encoded) = request
-                .uri()
-                .query()
-                .and_then(|query| query.strip_prefix("dns="))
-            else {
-                return (StatusCode::BAD_REQUEST, vec![]);
-            };
-            if encoded.len() > maximum * 2 {
-                return (StatusCode::PAYLOAD_TOO_LARGE, vec![]);
+            match doh_get_packet(request.uri().query(), maximum) {
+                Ok(packet) => packet,
+                Err(status) => return (status, vec![]),
             }
-            let Ok(packet) = URL_SAFE_NO_PAD.decode(encoded) else {
-                return (StatusCode::BAD_REQUEST, vec![]);
-            };
-            packet
         }
         http::Method::POST => {
             if request
@@ -656,14 +717,37 @@ async fn doh_request(
         }
         _ => return (StatusCode::METHOD_NOT_ALLOWED, vec![]),
     };
-    if packet.len() > maximum {
+    doh_finish(service, peer, &packet, Transport::Https).await
+}
+
+/// Decode the `dns` parameter of a `DoH` GET request.
+fn doh_get_packet(query: Option<&str>, maximum: usize) -> Result<Vec<u8>, StatusCode> {
+    let encoded = query
+        .and_then(|query| query.strip_prefix("dns="))
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    if encoded.len() > maximum * 2 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+/// Shared `DoH` tail: bounds-check the DNS message and answer it.
+async fn doh_finish(
+    service: &Service,
+    peer: SocketAddr,
+    packet: &[u8],
+    transport: Transport,
+) -> (StatusCode, Vec<u8>) {
+    if packet.len() > usize::from(service.config.limits.max_message_bytes) {
         return (StatusCode::PAYLOAD_TOO_LARGE, vec![]);
     }
     if packet.len() < 12 {
         return (StatusCode::BAD_REQUEST, vec![]);
     }
     service
-        .answer(&packet, peer, Transport::Https)
+        .answer(packet, peer, transport)
         .await
         .map_or((StatusCode::FORBIDDEN, vec![]), |answer| {
             (StatusCode::OK, answer)
@@ -727,6 +811,250 @@ async fn serve_quic(endpoint: Endpoint, service: Arc<Service>) -> io::Result<()>
         });
     }
     Err(io::Error::other("QUIC listener stopped unexpectedly"))
+}
+
+async fn serve_h3(endpoint: Endpoint, service: Arc<Service>) -> io::Result<()> {
+    let mut tasks = JoinSet::new();
+    while let Some(incoming) = endpoint.accept().await {
+        while tasks.try_join_next().is_some() {}
+        if !service.allowed(incoming.remote_address()) {
+            incoming.refuse();
+            continue;
+        }
+        let Ok(permit) = Arc::clone(&service.connections).try_acquire_owned() else {
+            incoming.refuse();
+            continue;
+        };
+        let service = Arc::clone(&service);
+        tasks.spawn(async move {
+            let _permit = permit;
+            let Ok(Ok(connection)) = timeout(io_timeout(&service), incoming).await else {
+                return;
+            };
+            let peer = connection.remote_address();
+            let _ = serve_h3_connection(connection, peer, service).await;
+        });
+    }
+    Err(io::Error::other("HTTP/3 listener stopped unexpectedly"))
+}
+
+async fn serve_h3_connection(
+    connection: quinn::Connection,
+    peer: SocketAddr,
+    service: Arc<Service>,
+) -> io::Result<()> {
+    let mut builder = h3::server::builder();
+    builder.max_field_section_size(2 * u64::from(service.config.limits.max_message_bytes) + 4096);
+    let mut h3 = timeout(
+        io_timeout(&service),
+        builder.build(h3_quinn::Connection::new(connection)),
+    )
+    .await?
+    .map_err(io::Error::other)?;
+    let streams = Arc::new(Semaphore::new(8));
+    let mut tasks = JoinSet::new();
+    loop {
+        let accepted = timeout(
+            io_timeout(&service)
+                + Duration::from_millis(u64::from(service.config.limits.query_timeout_ms)),
+            h3.accept(),
+        )
+        .await?
+        .map_err(io::Error::other)?;
+        let Some(resolver) = accepted else {
+            return Ok(());
+        };
+        while tasks.try_join_next().is_some() {}
+        let Ok(permit) = Arc::clone(&streams).try_acquire_owned() else {
+            continue;
+        };
+        let service = Arc::clone(&service);
+        tasks.spawn(async move {
+            let _permit = permit;
+            let deadline = io_timeout(&service)
+                + Duration::from_millis(u64::from(service.config.limits.query_timeout_ms));
+            let _ = timeout(deadline, async {
+                let (request, mut stream) =
+                    resolver.resolve_request().await.map_err(io::Error::other)?;
+                let (status, body) = h3_request(&request, &mut stream, peer, &service).await;
+                let response = Response::builder()
+                    .status(status)
+                    .header("content-type", "application/dns-message")
+                    .header("cache-control", "no-store")
+                    .header("content-length", body.len())
+                    .body(())
+                    .map_err(io::Error::other)?;
+                stream
+                    .send_response(response)
+                    .await
+                    .map_err(io::Error::other)?;
+                if !body.is_empty() {
+                    stream
+                        .send_data(Bytes::from(body))
+                        .await
+                        .map_err(io::Error::other)?;
+                }
+                stream.finish().await.map_err(io::Error::other)
+            })
+            .await;
+        });
+    }
+}
+
+async fn h3_request<S: h3::quic::BidiStream<Bytes>>(
+    request: &Request<()>,
+    stream: &mut h3::server::RequestStream<S, Bytes>,
+    peer: SocketAddr,
+    service: &Service,
+) -> (StatusCode, Vec<u8>) {
+    use bytes::Buf;
+    let maximum = usize::from(service.config.limits.max_message_bytes);
+    if request.uri().path() != "/dns-query" {
+        return (StatusCode::NOT_FOUND, vec![]);
+    }
+    let packet = match *request.method() {
+        http::Method::GET => match doh_get_packet(request.uri().query(), maximum) {
+            Ok(packet) => packet,
+            Err(status) => return (status, vec![]),
+        },
+        http::Method::POST => {
+            if request
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_none_or(|value| !value.eq_ignore_ascii_case("application/dns-message"))
+            {
+                return (StatusCode::UNSUPPORTED_MEDIA_TYPE, vec![]);
+            }
+            let mut packet = Vec::new();
+            let read = timeout(io_timeout(service), async {
+                while let Some(mut chunk) = stream
+                    .recv_data()
+                    .await
+                    .map_err(|_| StatusCode::BAD_REQUEST)?
+                {
+                    if packet.len() + chunk.remaining() > maximum {
+                        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+                    }
+                    packet.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+                }
+                Ok(())
+            })
+            .await;
+            match read {
+                Ok(Ok(())) => packet,
+                Ok(Err(status)) => return (status, vec![]),
+                Err(_) => return (StatusCode::REQUEST_TIMEOUT, vec![]),
+            }
+        }
+        _ => return (StatusCode::METHOD_NOT_ALLOWED, vec![]),
+    };
+    doh_finish(service, peer, &packet, Transport::H3).await
+}
+
+/// Answer one `DNSCrypt` packet: a plain certificate query, or an encrypted DNS query.
+async fn dnscrypt_answer(
+    dnscrypt: &crate::dnscrypt::DnsCrypt,
+    service: &Service,
+    packet: &[u8],
+    peer: SocketAddr,
+    udp: bool,
+) -> Option<Vec<u8>> {
+    match dnscrypt.open(packet, udp)? {
+        crate::dnscrypt::Packet::Certificate(response) => Some(response),
+        crate::dnscrypt::Packet::Query(query) => {
+            let protocol = if udp { Transport::Udp } else { Transport::Tcp };
+            let response = service.answer(&query.dns, peer, protocol).await?;
+            crate::dnscrypt::DnsCrypt::seal(&query, &response, udp)
+        }
+    }
+}
+
+async fn serve_dnscrypt_udp(
+    socket: UdpSocket,
+    dnscrypt: Arc<crate::dnscrypt::DnsCrypt>,
+    service: Arc<Service>,
+) -> io::Result<()> {
+    let socket = Arc::new(socket);
+    let mut tasks = JoinSet::new();
+    let size = usize::from(service.config.limits.max_message_bytes) + 512;
+    let mut buffer = vec![0; size + 1];
+    loop {
+        let (length, peer) = socket.recv_from(&mut buffer).await?;
+        while tasks.try_join_next().is_some() {}
+        if length > size
+            || tasks.len() >= service.config.limits.max_in_flight as usize
+            || !service.allowed(peer)
+        {
+            continue;
+        }
+        let bytes = buffer[..length].to_vec();
+        let (socket, dnscrypt, service) = (
+            Arc::clone(&socket),
+            Arc::clone(&dnscrypt),
+            Arc::clone(&service),
+        );
+        tasks.spawn(async move {
+            if let Some(response) = dnscrypt_answer(&dnscrypt, &service, &bytes, peer, true).await {
+                let _ = socket.send_to(&response, peer).await;
+            }
+        });
+    }
+}
+
+async fn serve_dnscrypt_tcp(
+    listener: TcpListener,
+    dnscrypt: Arc<crate::dnscrypt::DnsCrypt>,
+    service: Arc<Service>,
+) -> io::Result<()> {
+    let mut tasks = JoinSet::new();
+    loop {
+        let (mut stream, peer) = listener.accept().await?;
+        while tasks.try_join_next().is_some() {}
+        if !service.allowed(peer) {
+            continue;
+        }
+        let Ok(permit) = Arc::clone(&service.connections).try_acquire_owned() else {
+            continue;
+        };
+        let (dnscrypt, service) = (Arc::clone(&dnscrypt), Arc::clone(&service));
+        tasks.spawn(async move {
+            let _permit = permit;
+            let maximum = usize::from(service.config.limits.max_message_bytes) + 512;
+            loop {
+                let Ok(Ok(packet)) = timeout(io_timeout(&service), async {
+                    let length = usize::from(stream.read_u16().await?);
+                    if !(12..=maximum).contains(&length) {
+                        return Err(io::Error::other("invalid DNSCrypt frame length"));
+                    }
+                    let mut packet = vec![0; length];
+                    stream.read_exact(&mut packet).await?;
+                    Ok(packet)
+                })
+                .await
+                else {
+                    return;
+                };
+                let Some(response) =
+                    dnscrypt_answer(&dnscrypt, &service, &packet, peer, false).await
+                else {
+                    return;
+                };
+                let Ok(length) = u16::try_from(response.len()) else {
+                    return;
+                };
+                let sent = timeout(io_timeout(&service), async {
+                    stream.write_u16(length).await?;
+                    stream.write_all(&response).await?;
+                    stream.flush().await
+                })
+                .await;
+                if !matches!(sent, Ok(Ok(()))) {
+                    return;
+                }
+            }
+        });
+    }
 }
 
 async fn serve_metrics(listener: TcpListener, service: Arc<Service>) -> io::Result<()> {

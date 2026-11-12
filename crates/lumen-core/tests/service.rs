@@ -1615,3 +1615,361 @@ async fn a_new_filter_goes_live_without_restarting_listeners() {
     assert_eq!(server.filter().metrics.blocked.load(Ordering::Relaxed), 1);
     server.shutdown().await;
 }
+
+type H3Sender = h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>;
+
+async fn doh3(
+    sender: &mut H3Sender,
+    packet: &[u8],
+    method: &str,
+    path: &str,
+    media: &str,
+) -> (http::StatusCode, Vec<u8>) {
+    use bytes::Buf;
+    let request = http::Request::builder()
+        .method(method)
+        .uri(format!("https://localhost{path}"))
+        .header("content-type", media)
+        .body(())
+        .unwrap();
+    let mut stream = sender.send_request(request).await.unwrap();
+    if !packet.is_empty() {
+        stream
+            .send_data(bytes::Bytes::copy_from_slice(packet))
+            .await
+            .unwrap();
+    }
+    stream.finish().await.unwrap();
+    let response = timeout(Duration::from_secs(3), stream.recv_response())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut body = vec![];
+    while let Some(mut chunk) = timeout(Duration::from_secs(3), stream.recv_data())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+    }
+    (response.status(), body)
+}
+
+#[tokio::test]
+async fn doh3_listener_answers_get_post_and_rejects_bad_requests() {
+    let fixture = fixture().await;
+    let (directory, cert) = certificates();
+    for ip in ["127.0.0.1", "[::1]"] {
+        let mut cfg = config(fixture.address, address(ip));
+        cfg.listen.udp.clear();
+        cfg.listen.tcp.clear();
+        let bind = address(ip);
+        cfg.listen.doh3 = vec![bind];
+        cfg.listen.certificate = Some(directory.path().join("cert.pem"));
+        cfg.listen.private_key = Some(directory.path().join("key.pem"));
+        cfg.filtering.rules.block = vec!["blocked.example".into()];
+        let mut server = RunningServer::start(cfg).await.unwrap();
+        let socket = std::net::UdpSocket::bind(if bind.is_ipv4() {
+            "127.0.0.1:0"
+        } else {
+            "[::1]:0"
+        })
+        .unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            None,
+            socket,
+            Arc::new(quinn::TokioRuntime),
+        )
+        .unwrap();
+        endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_tls(cert.clone(), b"h3"))
+                .unwrap(),
+        )));
+        let connection = endpoint.connect(bind, "localhost").unwrap().await.unwrap();
+        let (mut driver, mut sender) =
+            h3::client::new(h3_quinn::Connection::new(connection.clone()))
+                .await
+                .unwrap();
+        let driver = tokio::spawn(async move {
+            let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+        });
+        let packet = query("ok.example.", RecordType::A);
+        let (status, body) = doh3(
+            &mut sender,
+            &packet,
+            "POST",
+            "/dns-query",
+            "application/dns-message",
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert!(!Message::from_vec(&body).unwrap().answers.is_empty());
+        let path = format!("/dns-query?dns={}", URL_SAFE_NO_PAD.encode(&packet));
+        let (status, body) = doh3(&mut sender, &[], "GET", &path, "application/dns-message").await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert!(!Message::from_vec(&body).unwrap().answers.is_empty());
+        let (_, body) = doh3(
+            &mut sender,
+            &query("blocked.example.", RecordType::A),
+            "POST",
+            "/dns-query",
+            "application/dns-message",
+        )
+        .await;
+        assert_eq!(
+            Message::from_vec(&body).unwrap().metadata.response_code,
+            ResponseCode::NXDomain
+        );
+        assert_eq!(
+            doh3(&mut sender, &packet, "POST", "/dns-query", "text/plain")
+                .await
+                .0,
+            http::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(
+            doh3(&mut sender, &[], "GET", "/other", "application/dns-message")
+                .await
+                .0,
+            http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            doh3(
+                &mut sender,
+                &[],
+                "PUT",
+                "/dns-query",
+                "application/dns-message"
+            )
+            .await
+            .0,
+            http::StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            doh3(
+                &mut sender,
+                &[],
+                "GET",
+                "/dns-query?dns=!!",
+                "application/dns-message"
+            )
+            .await
+            .0,
+            http::StatusCode::BAD_REQUEST
+        );
+        driver.abort();
+        connection.close(0_u32.into(), b"done");
+        endpoint.close(0_u32.into(), b"done");
+        server.shutdown().await;
+    }
+}
+
+/// Minimal independent `DNSCrypt` v2 client for the integration test.
+struct CryptClient {
+    resolver: crypto_box::PublicKey,
+    magic: [u8; 8],
+    secret: crypto_box::SecretKey,
+    chacha: bool,
+}
+
+impl CryptClient {
+    fn from_certificate(cert: &[u8], provider: &ed25519_dalek::VerifyingKey, chacha: bool) -> Self {
+        use ed25519_dalek::Verifier;
+        assert_eq!((cert.len(), &cert[..4]), (124, &b"DNSC"[..]));
+        assert_eq!(
+            u16::from_be_bytes([cert[4], cert[5]]),
+            if chacha { 2 } else { 1 }
+        );
+        let signature = ed25519_dalek::Signature::from_slice(&cert[8..72]).unwrap();
+        provider.verify(&cert[72..], &signature).unwrap();
+        let start = u32::from_be_bytes(cert[116..120].try_into().unwrap());
+        let end = u32::from_be_bytes(cert[120..124].try_into().unwrap());
+        let now = u32::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        assert!(start <= now && now < end);
+        Self {
+            resolver: crypto_box::PublicKey::from(<[u8; 32]>::try_from(&cert[72..104]).unwrap()),
+            magic: cert[104..112].try_into().unwrap(),
+            secret: crypto_box::SecretKey::generate(&mut rand_core::OsRng),
+            chacha,
+        }
+    }
+
+    fn encrypt(&self, dns: &[u8]) -> (Vec<u8>, [u8; 12]) {
+        use crypto_box::aead::{Aead, generic_array::GenericArray};
+        let mut plain = dns.to_vec();
+        plain.push(0x80);
+        plain.resize(plain.len().div_ceil(64).max(4) * 64, 0);
+        let mut nonce = [0_u8; 24];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce[..12]);
+        let nonce_ga = GenericArray::from_slice(&nonce);
+        let boxed = if self.chacha {
+            crypto_box::ChaChaBox::new(&self.resolver, &self.secret)
+                .encrypt(nonce_ga, &plain[..])
+                .unwrap()
+        } else {
+            crypto_box::SalsaBox::new(&self.resolver, &self.secret)
+                .encrypt(nonce_ga, &plain[..])
+                .unwrap()
+        };
+        let mut packet = self.magic.to_vec();
+        packet.extend_from_slice(crypto_box::PublicKey::from(&self.secret).as_bytes());
+        packet.extend_from_slice(&nonce[..12]);
+        packet.extend_from_slice(&boxed);
+        (packet, nonce[..12].try_into().unwrap())
+    }
+
+    fn decrypt(&self, packet: &[u8], client_nonce: [u8; 12]) -> Message {
+        use crypto_box::aead::{Aead, generic_array::GenericArray};
+        assert_eq!(
+            &packet[..8],
+            &[0x72, 0x36, 0x66, 0x6e, 0x76, 0x57, 0x6a, 0x38]
+        );
+        assert_eq!(packet[8..20], client_nonce);
+        let nonce = GenericArray::from_slice(&packet[8..32]);
+        let mut plain = if self.chacha {
+            crypto_box::ChaChaBox::new(&self.resolver, &self.secret)
+                .decrypt(nonce, &packet[32..])
+                .unwrap()
+        } else {
+            crypto_box::SalsaBox::new(&self.resolver, &self.secret)
+                .decrypt(nonce, &packet[32..])
+                .unwrap()
+        };
+        while plain.last() == Some(&0) {
+            plain.pop();
+        }
+        assert_eq!(plain.pop(), Some(0x80));
+        Message::from_vec(&plain).unwrap()
+    }
+}
+
+fn certificates_from(response: &[u8]) -> Vec<Vec<u8>> {
+    Message::from_vec(response)
+        .unwrap()
+        .answers
+        .iter()
+        .map(|record| match &record.data {
+            hickory_proto::rr::RData::TXT(txt) => {
+                txt.txt_data.iter().flat_map(|part| part.to_vec()).collect()
+            }
+            _ => panic!("certificate answer is not TXT"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn dnscrypt_serves_certificates_and_encrypted_queries_over_udp_and_tcp() {
+    let fixture = fixture().await;
+    let directory = tempfile::tempdir().unwrap();
+    let key_file = directory.path().join("provider.key");
+    let bind = address("127.0.0.1");
+    let mut cfg = config(fixture.address, address("127.0.0.1"));
+    cfg.dnscrypt.enabled = true;
+    cfg.dnscrypt.listen = vec![bind];
+    cfg.dnscrypt.provider_name = "2.dnscrypt-cert.lumen.test".into();
+    cfg.dnscrypt.key_file = Some(key_file.clone());
+    cfg.filtering.rules.block = vec!["blocked.example".into()];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    let seed: [u8; 32] = std::fs::read_to_string(&key_file)
+        .unwrap()
+        .trim()
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    let provider = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&key_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut buffer = vec![0_u8; 4096];
+    // The wrong provider name is dropped silently.
+    socket
+        .send_to(&query("wrong.lumen.test.", RecordType::TXT), bind)
+        .await
+        .unwrap();
+    assert!(
+        timeout(Duration::from_millis(300), socket.recv_from(&mut buffer))
+            .await
+            .is_err()
+    );
+    socket
+        .send_to(&query("2.dnscrypt-cert.lumen.test.", RecordType::TXT), bind)
+        .await
+        .unwrap();
+    let (size, _) = timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    let certs = certificates_from(&buffer[..size]);
+    assert_eq!(certs.len(), 2);
+
+    for cert in &certs {
+        let chacha = u16::from_be_bytes([cert[4], cert[5]]) == 2;
+        let client = CryptClient::from_certificate(cert, &provider, chacha);
+        // UDP: an answer and a blocked name.
+        for (name, code) in [
+            ("ok.example.", ResponseCode::NoError),
+            ("blocked.example.", ResponseCode::NXDomain),
+        ] {
+            let (packet, nonce) = client.encrypt(&query(name, RecordType::A));
+            socket.send_to(&packet, bind).await.unwrap();
+            let (size, _) = timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(size <= packet.len(), "UDP reply must not exceed the query");
+            let message = client.decrypt(&buffer[..size], nonce);
+            assert_eq!(message.metadata.response_code, code);
+            assert_eq!(!message.answers.is_empty(), code == ResponseCode::NoError);
+        }
+        // TCP, two queries on one connection, then a forged packet closes it.
+        let mut stream = TcpStream::connect(bind).await.unwrap();
+        for _ in 0..2 {
+            let (packet, nonce) = client.encrypt(&query("ok.example.", RecordType::A));
+            stream
+                .write_u16(u16::try_from(packet.len()).unwrap())
+                .await
+                .unwrap();
+            stream.write_all(&packet).await.unwrap();
+            let length = timeout(Duration::from_secs(3), stream.read_u16())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut reply = vec![0; usize::from(length)];
+            stream.read_exact(&mut reply).await.unwrap();
+            assert!(!client.decrypt(&reply, nonce).answers.is_empty());
+        }
+        let (mut forged, _) = client.encrypt(&query("ok.example.", RecordType::A));
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        stream
+            .write_u16(u16::try_from(forged.len()).unwrap())
+            .await
+            .unwrap();
+        stream.write_all(&forged).await.unwrap();
+        assert!(
+            timeout(Duration::from_secs(3), stream.read_u16())
+                .await
+                .unwrap()
+                .is_err(),
+            "a forged packet must close the stream without a reply"
+        );
+    }
+    server.shutdown().await;
+}

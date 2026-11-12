@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Service lifecycle, resource admission, and aggregate metrics.
 
+mod dnscrypt;
 mod transport;
 pub use lumen_filter::{Filter, activity, configure_download_cache};
 pub use lumen_resolver::Transport;
@@ -38,7 +39,7 @@ pub struct Metrics {
     pub timeouts: AtomicU64,
     pub failures: AtomicU64,
     pub active: AtomicU64,
-    transports: [AtomicU64; 6],
+    transports: [AtomicU64; 7],
     latency_buckets: [AtomicU64; 8],
     latency_micros: AtomicU64,
     rcodes: [AtomicU64; 5],
@@ -100,7 +101,8 @@ impl Metrics {
             ("tls", &self.transports[2]),
             ("https", &self.transports[3]),
             ("quic", &self.transports[4]),
-            ("other", &self.transports[5]),
+            ("http3", &self.transports[5]),
+            ("other", &self.transports[6]),
         ] {
             let _ = writeln!(
                 text,
@@ -137,7 +139,8 @@ impl Metrics {
             Transport::Tls => 2,
             Transport::Https => 3,
             Transport::Quic => 4,
-            _ => 5,
+            Transport::H3 => 5,
+            _ => 6,
         };
         self.transports[transport].fetch_add(1, Ordering::Relaxed);
         let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
