@@ -63,6 +63,36 @@ lumen --config FILE --check
 
 See [Encrypted DNS](../guides/encrypted-dns.md#dnscrypt). No TLS certificate is needed.
 
+## Authoritative zones, forwarders, and TSIG keys
+
+Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these are off until you add a table.
+
+`[[zones]]`
+
+| Field | Default | Meaning |
+| :--- | :--- | :--- |
+| `name` | required | Zone apex without a trailing dot. Unique per config. Up to 64 zones |
+| `file` / `text` | exactly one | RFC 1035 zone file path (relative to the config file) or inline text, at most 1 MiB. Needs a SOA at the apex |
+| `views` | `[]` | Up to 8 `[[zones.views]]` with `clients` (1 to 32 CIDRs) and their own `file` or `text`. First match wins |
+| `journal` | unset | SQLite file that makes the zone dynamic. Needs `file`, `update_rules`, and no `views` |
+| `update_rules` | `[]` | Up to 16 `[[zones.update_rules]]` with `key`, `names` (exact or `*.suffix`, inside the zone), and `types` |
+| `transfer_keys` | `[]` | Up to 8 TSIG key names allowed to run AXFR/IXFR over TCP. Empty refuses all transfers |
+
+`[[forwarders]]`
+
+| Field | Meaning |
+| :--- | :--- |
+| `domain` | Domain (and everything below) to forward. Unique, and not also a zone name. Up to 64 |
+| `upstreams` | 1 to 8 plain UDP/TCP resolver addresses with nonzero ports, not Lumen's own listeners. Answers are not DNSSEC-validated |
+
+`[[tsig_keys]]`
+
+| Field | Meaning |
+| :--- | :--- |
+| `name` | Unique DNS-style key name. Updaters and secondaries must use the same name |
+| `algorithm` | `hmac-sha256`, `hmac-sha384`, or `hmac-sha512` |
+| `secret_file` | File with one line of base64 (at least 16 bytes decoded). Up to 32 keys |
+
 ## Listeners
 
 | Field | Default |
@@ -75,7 +105,7 @@ See [Encrypted DNS](../guides/encrypted-dns.md#dnscrypt). No TLS certificate is 
 - An empty array disables that transport. Enable 1 to 16 DNS listeners in total.
 - Ports must be nonzero, and duplicates within one transport are invalid. The OS also rejects incompatible bindings across transports. UDP and TCP may share a port, DoT (TCP) and DoQ (UDP) may share a port, and DoH (TCP) and DoH3 (UDP) may share a port. IPv6 sockets are IPv6-only, so IPv4 and IPv6 wildcard listeners can coexist.
 - **Every client must match an allowed CIDR**, including on encrypted transports. An empty allowlist is invalid (maximum 128 CIDRs). A wildcard bind does not grant access. See [Serve your network](../guides/serve-your-network.md).
-- TLS listeners use TLS 1.3 with no early data and PEM files (certificate up to 1 MiB, key up to 64 KiB). Startup verifies the key matches the certificate. You manage validity, renewal, permissions, and restarts after rotation. See [Encrypted DNS](../guides/encrypted-dns.md).
+- TLS listeners use TLS 1.3 with no early data and PEM files (certificate up to 1 MiB, key up to 64 KiB). Startup verifies the key matches the certificate. You obtain and renew the files and manage permissions. Lumen picks up a renewed, valid pair within 30 seconds without a restart. See [Encrypted DNS](../guides/encrypted-dns.md).
 
 ## Resolver
 

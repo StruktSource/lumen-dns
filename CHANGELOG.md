@@ -8,6 +8,10 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 - **DNS over HTTP/3 (DoH3).** `listen.doh3` serves `/dns-query` over QUIC with ALPN `h3`, with the same methods, media type, status codes, limits, certificate, and `allow_clients` rules as DoH over HTTP/2. Metrics gain an `http3` transport label (the former `other` label moves to a new index but keeps its name).
 - **DNSCrypt v2 server (opt-in).** `[dnscrypt]` serves signed, automatically rotating certificates and encrypted queries over UDP and TCP, with `X25519-XChaCha20Poly1305` and `X25519-XSalsa20Poly1305`. The long-term provider key lives in a `0600` file, UDP replies are never larger than the query, and Lumen logs a `sdns://` stamp at startup. Not included: DNSCrypt upstreams and Anonymized DNSCrypt.
+- **Your own DNS zones (opt-in).** `[[zones]]` serves authoritative records from zone files or inline text, with split-horizon `views` by client network, DNS-SD as ordinary records, and `[[forwarders]]` for conditional forwarding of a domain to specific resolvers. These names bypass the response caches. See [Your own DNS zones](docs/guides/authoritative-dns.md).
+- **Dynamic updates (RFC 2136) and zone transfers.** A zone with a `journal` accepts TSIG-signed updates scoped per key to names and record types, saved to a SQLite journal. `transfer_keys` allow AXFR and IXFR over TCP, TSIG-signed, bounded to one DNS message. IXFR is answered as a full transfer, and NOTIFY is not sent. The vendored `hickory-server` now uses `rusqlite` 0.41 and treats IXFR like AXFR under the same policy (see `vendor/README.md`).
+- **Certificate renewal without restart.** Renewed PEM files for DoT, DoH, DoH3, and DoQ are checked every 30 seconds, verified, and swapped in; bad files keep the old pair serving. New metrics export expiry and reload counts. The web console's HTTPS certificate still needs a restart.
+
 
 ## [0.7.0] - 2026-11-12
 

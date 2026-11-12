@@ -45,7 +45,10 @@ All metrics use stable `lumen_dns_` names (and `lumen_filter_` for filtering) wi
 | `lumen_dns_timeouts_total` | counter | Queries that hit a deadline |
 | `lumen_dns_failures_total` | counter | Failed resolutions |
 | `lumen_dns_active_queries` | gauge | Queries in progress now |
-| `lumen_dns_transport_queries_total{transport}` | counter | Queries per transport |
+| `lumen_dns_transport_queries_total{transport}` | counter | Queries per transport (`udp`, `tcp`, `tls`, `https`, `quic`, `http3`, `other`) |
+| `lumen_dns_certificate_not_after_timestamp_seconds` | gauge | Expiry (Unix time) of the served DNS TLS certificate. Present only with an encrypted listener |
+| `lumen_dns_certificate_reloads_total` | counter | Renewed certificate pairs swapped in without restart |
+| `lumen_dns_certificate_reload_failures_total` | counter | Changed files rejected (unreadable, malformed, or key mismatch) |
 | `lumen_dns_query_duration_seconds` | histogram | End-to-end query latency (includes cache hits) |
 | `lumen_dns_fallback_attempts_total` | counter | Timeout fallbacks started |
 | `lumen_dns_fallback_successes_total` | counter | Fallbacks that answered |

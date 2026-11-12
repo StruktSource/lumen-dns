@@ -5,13 +5,11 @@ use super::{Metrics, Service, Transport};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
-use lumen_config::{Config, read_bounded};
+use lumen_config::Config;
 use quinn::{Endpoint, crypto::rustls::QuicServerConfig};
-use rustls::{
-    ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
-};
+use rustls::ServerConfig;
 use socket2::{Domain, Protocol, Socket, Type};
+use std::sync::atomic::Ordering;
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -31,6 +29,7 @@ pub struct RunningServer {
     pub web_endpoints: Vec<(bool, SocketAddr)>,
     /// One-time code needed to create the first console account from another machine.
     pub setup_code: Option<String>,
+    certificates: Option<Credentials>,
 }
 
 /// Optional managed-mode inputs for the web console.
@@ -73,14 +72,15 @@ impl RunningServer {
         tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         config.validate().map_err(io::Error::other)?;
         let resolver = Arc::new(lumen_resolver::Resolver::new(&config).map_err(io::Error::other)?);
-        let tls = if config.listen.dot.is_empty()
+        let (tls, cert_not_after) = if config.listen.dot.is_empty()
             && config.listen.doh.is_empty()
             && config.listen.doq.is_empty()
             && config.listen.doh3.is_empty()
         {
-            None
+            (None, None)
         } else {
-            Some(credentials(&config)?)
+            let (credentials, not_after) = credentials(&config)?;
+            (Some(credentials), Some(not_after))
         };
         let filter = match preloaded {
             Some(filter) => filter,
@@ -110,6 +110,13 @@ impl RunningServer {
             config: Arc::new(config),
             metrics: Arc::clone(&metrics),
         });
+        if let Some(not_after) = cert_not_after {
+            service
+                .metrics
+                .cert_not_after
+                .store(not_after, Ordering::Relaxed);
+        }
+        let tls_handle = tls.clone();
         let config = &service.config;
         let mut datagrams = Vec::new();
         let mut streams = Vec::new();
@@ -265,6 +272,15 @@ impl RunningServer {
                 }
             });
         }
+        if let Some(reloader) = tls_handle.clone() {
+            let watched = Arc::clone(&service);
+            tasks.spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    apply_reload(&reloader, &watched.metrics);
+                }
+            });
+        }
         let refreshing = Arc::clone(&service);
         tasks.spawn(async move {
             loop {
@@ -289,7 +305,19 @@ impl RunningServer {
             metrics,
             web_endpoints,
             setup_code,
+            certificates: tls_handle,
         })
+    }
+
+    /// Check the certificate files now instead of waiting for the periodic check. A valid, changed
+    /// pair replaces the served one at once. Returns what happened.
+    #[must_use]
+    pub fn reload_certificates(&self) -> crate::certs::Reload {
+        self.certificates
+            .as_ref()
+            .map_or(crate::certs::Reload::Unchanged, |reloader| {
+                apply_reload(reloader, &self.service.metrics)
+            })
     }
 
     /// Check startup credentials without creating any listeners.
@@ -307,7 +335,7 @@ impl RunningServer {
     /// Same configuration and credential failures as startup.
     pub async fn prepare(config: &Config) -> io::Result<Arc<lumen_filter::Filter>> {
         config.validate().map_err(io::Error::other)?;
-        let _ = lumen_resolver::Resolver::new(config).map_err(io::Error::other)?;
+        lumen_resolver::Resolver::check(config).map_err(io::Error::other)?;
         let filter = Arc::new(
             lumen_filter::Filter::load(config.filtering.clone())
                 .await
@@ -407,35 +435,21 @@ async fn refresh_filter_due(service: &Service) -> Result<bool, String> {
     Ok(changed)
 }
 
-type Credentials = (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>);
+type Credentials = Arc<crate::certs::CertReloader>;
 
-fn credentials(config: &Config) -> io::Result<Credentials> {
-    let cert = read_bounded(
-        config
-            .listen
-            .certificate
-            .as_ref()
-            .ok_or_else(|| io::Error::other("missing certificate"))?,
-        1_048_576,
-    )
-    .map_err(io::Error::other)?;
-    let key = read_bounded(
-        config
-            .listen
-            .private_key
-            .as_ref()
-            .ok_or_else(|| io::Error::other("missing private key"))?,
-        65536,
-    )
-    .map_err(io::Error::other)?;
-    let cert = CertificateDer::pem_slice_iter(&cert)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| io::Error::other("invalid PEM certificate"))?;
-    let key = PrivateKeyDer::from_pem_slice(&key)
-        .map_err(|_| io::Error::other("invalid PEM private key"))?;
-    let keys = (cert, key);
-    let _ = tls_config(&keys, b"dot")?;
-    Ok(keys)
+/// Load the certificate pair and its expiry. The reloader keeps serving it, and later pairs.
+fn credentials(config: &Config) -> io::Result<(Credentials, i64)> {
+    let cert = config
+        .listen
+        .certificate
+        .as_ref()
+        .ok_or_else(|| io::Error::other("missing certificate"))?;
+    let key = config
+        .listen
+        .private_key
+        .as_ref()
+        .ok_or_else(|| io::Error::other("missing private key"))?;
+    crate::certs::CertReloader::load(cert, key)
 }
 
 fn tls_config(keys: &Credentials, alpn: &[u8]) -> io::Result<ServerConfig> {
@@ -444,8 +458,7 @@ fn tls_config(keys: &Credentials, alpn: &[u8]) -> io::Result<ServerConfig> {
             .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(io::Error::other)?
             .with_no_client_auth()
-            .with_single_cert(keys.0.clone(), keys.1.clone_key())
-            .map_err(|_| io::Error::other("certificate and private key do not match"))?;
+            .with_cert_resolver(Arc::clone(keys) as Arc<dyn rustls::server::ResolvesServerCert>);
     config.alpn_protocols = vec![alpn.to_vec()];
     config.max_early_data_size = 0;
     Ok(config)
@@ -1083,4 +1096,22 @@ async fn serve_metrics(listener: TcpListener, service: Arc<Service>) -> io::Resu
             }).await;
         });
     }
+}
+
+/// Poll the certificate files, update the counters, and log without naming any path or key.
+fn apply_reload(reloader: &crate::certs::CertReloader, metrics: &Metrics) -> crate::certs::Reload {
+    let outcome = reloader.poll();
+    match outcome {
+        crate::certs::Reload::Replaced(not_after) => {
+            metrics.cert_not_after.store(not_after, Ordering::Relaxed);
+            metrics.cert_reloads.fetch_add(1, Ordering::Relaxed);
+            eprintln!("tls certificate reloaded");
+        }
+        crate::certs::Reload::Rejected => {
+            metrics.cert_reload_failures.fetch_add(1, Ordering::Relaxed);
+            eprintln!("tls certificate reload failed; keeping the previous certificate");
+        }
+        crate::certs::Reload::Unchanged => {}
+    }
+    outcome
 }

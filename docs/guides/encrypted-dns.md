@@ -21,7 +21,9 @@ DoT, DoH, DoH3, and DoQ use TLS 1.3 with no early data. [DNSCrypt](#dnscrypt) us
 2. **A name that clients can resolve** and that matches the certificate.
 3. **File permissions** that let the Lumen service account read the key.
 
-Size limits: certificate file 1 MiB, private key 64 KiB. Lumen checks that the key matches the certificate at startup. Rotating a certificate means replacing the files and restarting Lumen.
+Size limits: certificate file 1 MiB, private key 64 KiB. Lumen checks that the key matches the certificate at startup. **Renewing a certificate needs no restart.** Lumen checks the two files every 30 seconds. When either changes, it loads the new pair, verifies that the certificate and key match, and only then starts serving it, on every encrypted listener (DoT, DoH, DoH3, DoQ) for new connections. If the new files are half-written, unreadable, or do not match, the previous certificate keeps serving and the failure is counted (`lumen_dns_certificate_reload_failures_total`); fixing the files is picked up on the next check. Any tool that writes PEM files works, such as certbot, acme.sh, or lego. Lumen does not obtain certificates itself, and the web console's own HTTPS certificate (`[web]`) still needs a restart after renewal.
+
+Watch for expiry with the `lumen_dns_certificate_not_after_timestamp_seconds` metric, for example alerting when `lumen_dns_certificate_not_after_timestamp_seconds - time() < 14 * 86400`.
 
 ## Turn it on
 

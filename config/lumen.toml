@@ -58,6 +58,16 @@ allow_clients = ["127.0.0.0/8", "::1/128"]
 # provider_name = "2.dnscrypt-cert.dns.home.example"
 # key_file = "dnscrypt-provider.key"
 
+# Optional authoritative zones, split-horizon views, conditional forwarding, dynamic updates and
+# transfers. Off by default. See docs/guides/authoritative-dns.md.
+# [[zones]]
+# name = "home.example"
+# file = "zones/home.example.zone"
+#
+# [[forwarders]]
+# domain = "corp.example"
+# upstreams = ["10.0.0.53:53"]
+
 [resolver]
 mode = "recursive"
 dnssec = true

@@ -26,14 +26,13 @@ _Last updated 2026-11-11 for version 0.6.0._
 
 **Still ahead**
 
-- Certificate automation and automatic trust-anchor rollover
-- Authoritative zones, operator-managed DNS records, split-horizon DNS, and conditional forwarding
-- Dynamic DNS updates, zone transfers, and DNSSEC zone signing
+- Built-in certificate automation (ACME) and automatic trust-anchor rollover
+- DNSSEC zone signing for Lumen-hosted zones, zone transfer deltas and NOTIFY, and mDNS bridging
 - More encrypted DNS options: DNSCrypt upstreams, Anonymized DNSCrypt, and ECH support
 - Wider child-safety filtering categories
 - An optional DHCP server module
 - High availability and cluster configuration replication
-- Extended DNS and DNSSEC conformance tests and long-running soak tests
+- Phase 7: high availability, threat feeds and enterprise policy, extended conformance and soak tests, and an external security review
 - Real-hardware validation for Proxmox, Unraid, Raspberry Pi, and dual-stack Kubernetes
 - Image signing, reproducible builds, and backup, restore, and upgrade tests
 - A customizable console UI through CSS themes
@@ -134,16 +133,18 @@ Principles that shape every decision:
 - [ ] Real Proxmox, Unraid, Raspberry Pi, Podman ARM64, and dual-stack Kubernetes validation
 - [ ] Backup, restore, upgrade, and removal tests
 
-### Phase 5: Advanced DNS and availability
+### Phase 5: Advanced DNS
 
 - [x] Base DoH over HTTP/2, DoT, and DoQ listeners (delivered in Phase 1)
 - [x] RFC 8767 **serve-stale** with bounded stale age and one background refresh per name; unsigned data only (0.7.0). Existing prefetch is separate
 - [x] Optional **persistent DNS cache**: separate SQLite file, off by default, entry, byte and TTL caps, corrupt-file recovery, no client data (0.7.0)
-- [ ] Certificate automation and automatic trust-anchor rollover
-- [ ] Authoritative DNS zones and operator-managed DNS entries, separate from Lumen's built-in empty local zones
-- [ ] A **split-horizon DNS module** with per-client or per-network views, plus conditional forwarding and safe local service discovery
-- [ ] Dynamic DNS updates using RFC 2136, with authenticated and tightly scoped update policy
-- [ ] Authoritative zone transfers over AXFR and IXFR, with authenticated transfer policy and bounded transfer size
+- [x] Certificate renewal without restart: renewed PEM pairs are verified and swapped in, with an expiry metric (0.7.0 line). Lumen still does not fetch certificates itself
+- [ ] Built-in certificate automation (ACME issuance and renewal)
+- [ ] Automatic trust-anchor rollover (RFC 5011 with persistent state and hold-down timers)
+- [x] Authoritative DNS zones and operator-managed records from zone files or inline text, separate from Lumen's built-in empty local zones. Unsigned; see the DNSSEC signing item
+- [x] **Split-horizon views** by client network, **conditional forwarding**, and DNS-SD as ordinary records. mDNS bridging is not built
+- [x] Dynamic DNS updates (RFC 2136) with TSIG authentication, per-key name and type scope, a SQLite journal, and bounded size
+- [x] Zone transfers over TCP with TSIG-keyed policy and a one-message size bound. IXFR is answered as a full transfer (no change history), and NOTIFY is not sent
 - [ ] DNSSEC zone signing and safe key lifecycle for Lumen-hosted authoritative zones
 - [x] Native DoH over HTTP/3 listener (`listen.doh3`), same `/dns-query` contract as HTTP/2 DoH. Client-side DoH3 to upstream providers is not built, and Lumen does not advertise HTTP/3 itself
 - [x] DNSCrypt v2 **server** (UDP and TCP, both cipher suites, signed rotating certificates). Still open: DNSCrypt as an upstream transport, Anonymized DNSCrypt relays, and interop testing against `dnscrypt-proxy` releases
@@ -153,10 +154,6 @@ Principles that shape every decision:
 - [x] CNAME-based tracker blocking that inspects upstream answer chains without bypassing DNSSEC or response bounds (0.7.0)
 - [x] SafeSearch with explicit opt-in, per-profile scope, documented providers (Google, Bing, YouTube), and no hidden logging (0.7.0). Wider child-safety categories remain open
 - [ ] Optional DHCP server module with bounded leases, reservations, DNS integration, and no default network authority
-- [ ] High availability, multi-service use, cluster configuration replication, and a cache strategy
-- [ ] Optional DNS threat feeds and enterprise policy features that leave privacy defaults unchanged
-- [ ] Extended DNS and DNSSEC conformance and long-running soak tests
-- [ ] **External security review before stable release**
 
 ### Phase 6: Customization
 
@@ -176,6 +173,15 @@ Each item has to keep Lumen's defaults intact: private, bounded, and explicit op
 - [ ] Translate the remaining long help texts on the DNS settings and Filtering pages
 - [ ] More languages
 - [ ] Localize the documentation where practical. Technical terms such as DoH, DoT, and DNSSEC stay recognizable
+
+### Phase 7: Scale, assurance, and enterprise
+
+Moved out of Phase 5 on 2026-11-12 so Phase 5 stays focused on DNS features.
+
+- [ ] High availability, multi-service use, cluster configuration replication, and a cache strategy
+- [ ] Optional DNS threat feeds and enterprise policy features that leave privacy defaults unchanged
+- [ ] Extended DNS and DNSSEC conformance and long-running soak tests
+- [ ] **External security review before stable release**
 
 ## What is planned next
 

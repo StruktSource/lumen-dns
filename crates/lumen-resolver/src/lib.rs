@@ -50,13 +50,56 @@ use tokio::time::timeout;
 mod accel;
 mod cache;
 mod forward;
+mod zones;
 
 pub use hickory_server::net::xfer::Protocol as Transport;
+
+/// Messages that are not ordinary queries but are served by operator zones.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ZoneMessage {
+    /// RFC 2136 dynamic update (opcode 5).
+    Update,
+    /// AXFR or IXFR zone transfer request.
+    Transfer,
+}
+
+/// Classify a raw packet without fully parsing it. Ordinary queries return `None`.
+#[must_use]
+pub fn zone_message_kind(packet: &[u8]) -> Option<ZoneMessage> {
+    if packet.len() < 12 || packet[2] & 0x80 != 0 {
+        return None;
+    }
+    match (packet[2] >> 3) & 0x0f {
+        5 => return Some(ZoneMessage::Update),
+        0 => {}
+        _ => return None,
+    }
+    if u16::from_be_bytes([packet[4], packet[5]]) != 1 {
+        return None;
+    }
+    let mut offset = 12;
+    loop {
+        let length = usize::from(*packet.get(offset)?);
+        offset += 1;
+        if length == 0 {
+            break;
+        }
+        if length > 63 {
+            return None;
+        }
+        offset += length;
+    }
+    let kind = u16::from_be_bytes([*packet.get(offset)?, *packet.get(offset + 1)?]);
+    matches!(kind, 251 | 252).then_some(ZoneMessage::Transfer)
+}
 
 /// One shared resolver and cache set for all enabled client transports.
 pub struct Resolver {
     catalog: Catalog,
     cache: Option<Arc<ResponseCache>>,
+    /// Origins of operator zones and conditional forwarders. They bypass the response caches and
+    /// the built-in local-zone answers, because their answers depend on the client and change.
+    custom: Vec<LowerName>,
     metrics: Arc<Metrics>,
     background: Option<Background>,
     local_zones: bool,
@@ -439,6 +482,18 @@ impl Resolver {
     /// # Errors
     /// Invalid hints, anchors, TLS settings, or resolver configuration fail startup.
     pub fn new(config: &Config) -> Result<Self, String> {
+        Self::build(config, true)
+    }
+
+    /// Validate everything [`Self::new`] would load without creating or opening any journal.
+    ///
+    /// # Errors
+    /// The same errors as [`Self::new`].
+    pub fn check(config: &Config) -> Result<(), String> {
+        Self::build(config, false).map(|_| ())
+    }
+
+    fn build(config: &Config, persist: bool) -> Result<Self, String> {
         let settings = &config.resolver;
         let metrics = Arc::new(Metrics::default());
         metrics
@@ -482,10 +537,17 @@ impl Resolver {
         };
         let mut catalog = Catalog::new();
         catalog.upsert(Name::root().into(), vec![handler]);
+        let custom_handlers = zones::build(config, &options, persist)?.handlers;
+        let custom: Vec<LowerName> = custom_handlers
+            .iter()
+            .map(|handler| handler.origin().clone())
+            .collect();
+        zones::install(&mut catalog, custom_handlers);
         let cache = ResponseCache::new(settings)?.map(Arc::new);
         Ok(Self {
             catalog,
             cache,
+            custom,
             metrics,
             background,
             local_zones: settings.local_zones,
@@ -524,14 +586,17 @@ impl Resolver {
         protocol: Transport,
         maximum: usize,
     ) -> Result<Vec<u8>, String> {
+        let custom = self.is_custom(query);
         if self.local_zones
+            && !custom
             && let Some(response) = local_zone_response(query)
         {
             return response
                 .to_vec()
                 .map_err(|_| "cannot encode local response".into());
         }
-        if let Some(cache) = &self.cache
+        if !custom
+            && let Some(cache) = &self.cache
             && let Some(hit) = cache.lookup(query, maximum)
         {
             if hit.stale && cache.begin_refresh(&hit.key) {
@@ -552,15 +617,78 @@ impl Resolver {
             return Ok(hit.bytes);
         }
         let response = self.answer_uncached(query, peer, protocol, maximum).await?;
-        if let Some(cache) = &self.cache {
+        if !custom && let Some(cache) = &self.cache {
             cache.store(query, &response);
         }
         Ok(response)
     }
 
+    /// True when the question falls under an operator zone or conditional forwarder.
+    fn is_custom(&self, query: &Query) -> bool {
+        query.message.queries.first().is_some_and(|question| {
+            let name = LowerName::from(question.name());
+            self.custom.iter().any(|origin| origin.zone_of(&name))
+        })
+    }
+
+    /// Answer an RFC 2136 update or a zone transfer. Always returns a response: operator zones
+    /// decide, everything else is `REFUSED`. Transfers are accepted only over plain TCP, and a
+    /// transfer that does not fit one 64 KiB message is refused instead of being cut short.
+    pub async fn zone_message(
+        &self,
+        packet: &[u8],
+        peer: SocketAddr,
+        protocol: Transport,
+        kind: ZoneMessage,
+    ) -> Vec<u8> {
+        let refused = |packet: &[u8]| {
+            let mut bytes = lumen_proto::malformed_response(packet);
+            bytes[2] = 0x80 | (packet[2] & 0x79);
+            bytes[3] = 5;
+            bytes
+        };
+        if kind == ZoneMessage::Transfer && protocol != Protocol::Tcp {
+            return refused(packet);
+        }
+        let Ok(request) = Request::from_bytes(packet.to_vec(), peer, protocol) else {
+            return lumen_proto::malformed_response(packet);
+        };
+        let in_zone = request.request_info().is_ok_and(|info| {
+            let name = info.query.name();
+            self.custom.iter().any(|origin| origin.zone_of(name))
+        });
+        if !in_zone {
+            return refused(packet);
+        }
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        self.catalog
+            .handle_request::<_, TokioTime>(
+                &request,
+                Capture {
+                    bytes: Arc::clone(&bytes),
+                    maximum: usize::from(u16::MAX),
+                },
+            )
+            .await;
+        let result = bytes.lock().map(|mut guard| std::mem::take(&mut *guard));
+        match result {
+            // A set TC bit means the transfer did not fit: fail closed, never send a partial zone.
+            Ok(result) if result.len() >= 12 && result[2] & 0x02 == 0 => result,
+            _ => {
+                let mut bytes = lumen_proto::malformed_response(packet);
+                bytes[2] = 0x80 | (packet[2] & 0x79);
+                bytes[3] = 2;
+                bytes
+            }
+        }
+    }
+
     /// Return a cached response after the outer query deadline cancelled live resolution.
     #[must_use]
     pub fn cached_answer(&self, query: &Query, maximum: usize) -> Option<Vec<u8>> {
+        if self.is_custom(query) {
+            return None;
+        }
         self.cache
             .as_ref()
             .and_then(|cache| cache.lookup(query, maximum))

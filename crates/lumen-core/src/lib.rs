@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Service lifecycle, resource admission, and aggregate metrics.
 
+mod certs;
 mod dnscrypt;
 mod transport;
+pub use certs::Reload;
 pub use lumen_filter::{Filter, activity, configure_download_cache};
 pub use lumen_resolver::Transport;
 pub use transport::{ConsoleOptions, RunningServer};
@@ -43,9 +45,40 @@ pub struct Metrics {
     latency_buckets: [AtomicU64; 8],
     latency_micros: AtomicU64,
     rcodes: [AtomicU64; 5],
+    cert_not_after: std::sync::atomic::AtomicI64,
+    cert_reloads: AtomicU64,
+    cert_reload_failures: AtomicU64,
 }
 
 impl Metrics {
+    fn render_certificates(&self, text: &mut String) {
+        let not_after = self.cert_not_after.load(Ordering::Relaxed);
+        if not_after != 0 {
+            let _ = writeln!(
+                text,
+                "# HELP lumen_dns_certificate_not_after_timestamp_seconds Expiry of the served DNS TLS certificate (Unix time).\n# TYPE lumen_dns_certificate_not_after_timestamp_seconds gauge\nlumen_dns_certificate_not_after_timestamp_seconds {not_after}"
+            );
+        }
+        for (name, help, value) in [
+            (
+                "certificate_reloads_total",
+                "TLS certificate pairs replaced without restart.",
+                &self.cert_reloads,
+            ),
+            (
+                "certificate_reload_failures_total",
+                "Changed TLS files rejected because they were not a valid matching pair.",
+                &self.cert_reload_failures,
+            ),
+        ] {
+            let _ = writeln!(
+                text,
+                "# HELP lumen_dns_{name} {help}\n# TYPE lumen_dns_{name} counter\nlumen_dns_{name} {}",
+                value.load(Ordering::Relaxed)
+            );
+        }
+    }
+
     /// Stable Prometheus text exposition. All labels have bounded cardinality.
     #[must_use]
     pub fn render(&self) -> String {
@@ -94,6 +127,7 @@ impl Metrics {
                 value.load(Ordering::Relaxed)
             );
         }
+        self.render_certificates(&mut text);
         text.push_str("# HELP lumen_dns_transport_queries_total Admitted DNS queries by bounded transport.\n# TYPE lumen_dns_transport_queries_total counter\n");
         for (name, value) in [
             ("udp", &self.transports[0]),
@@ -272,6 +306,26 @@ impl Service {
         )
     }
 
+    /// RFC 2136 updates and zone transfers: counted and bounded like queries, never filtered.
+    async fn zone_message(
+        &self,
+        packet: &[u8],
+        peer: SocketAddr,
+        protocol: Transport,
+        kind: lumen_resolver::ZoneMessage,
+        started: Instant,
+    ) -> Option<Vec<u8>> {
+        let Ok(_permit) = self.queries.try_acquire() else {
+            self.metrics.refused.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        let response = self
+            .resolver
+            .zone_message(packet, peer, protocol, kind)
+            .await;
+        Some(self.record_response(response, protocol, started))
+    }
+
     async fn answer(
         &self,
         packet: &[u8],
@@ -290,6 +344,11 @@ impl Service {
         if packet.len() > usize::from(self.config.limits.max_message_bytes) {
             self.metrics.malformed.fetch_add(1, Ordering::Relaxed);
             return Some(self.record_response(malformed_response(packet), protocol, started));
+        }
+        if let Some(kind) = lumen_resolver::zone_message_kind(packet) {
+            return self
+                .zone_message(packet, peer, protocol, kind, started)
+                .await;
         }
         let Ok(query) = Query::parse(packet) else {
             self.metrics.malformed.fetch_add(1, Ordering::Relaxed);

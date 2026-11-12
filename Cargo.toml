@@ -24,7 +24,7 @@ authors = ["Strukt"]
 
 [workspace.dependencies]
 hickory-proto = { version = "=0.26.3", features = ["dnssec-ring"] }
-hickory-server = { version = "=0.26.3", features = ["recursor", "resolver", "dnssec-ring", "tls-ring", "https-ring", "quic-ring", "h3-ring", "webpki-roots"] }
+hickory-server = { version = "=0.26.3", features = ["recursor", "resolver", "dnssec-ring", "tls-ring", "https-ring", "quic-ring", "h3-ring", "sqlite", "webpki-roots"] }
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
@@ -45,6 +45,7 @@ pedantic = { level = "warn", priority = -1 }
 # Local fix for a DNSSEC validation loop on shared parent/child name servers (see vendor/README.md).
 [patch.crates-io]
 hickory-net = { path = "vendor/hickory-net" }
+hickory-server = { path = "vendor/hickory-server" }
 
 # Portable cross-crate optimization. Keep unwinding and the target's baseline CPU.
 [profile.release]

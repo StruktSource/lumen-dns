@@ -25,6 +25,87 @@ pub struct Config {
     pub web: Web,
     /// Optional `DNSCrypt` v2 server (UDP and TCP). Off by default.
     pub dnscrypt: DnsCrypt,
+    /// Authoritative zones served from operator-managed records.
+    pub zones: Vec<Zone>,
+    /// Conditional forwarding: names under `domain` go to these resolvers.
+    pub forwarders: Vec<Forwarder>,
+    /// TSIG keys that authenticate zone updates and transfers.
+    pub tsig_keys: Vec<TsigKey>,
+}
+
+/// Most authoritative zones, views per zone, and conditional forwarders.
+pub const MAX_ZONES: usize = 64;
+pub const MAX_ZONE_VIEWS: usize = 8;
+pub const MAX_FORWARDERS: usize = 64;
+/// Largest zone file or inline zone text.
+pub const MAX_ZONE_BYTES: usize = 1_048_576;
+
+/// One authoritative zone. Records come from an RFC 1035 zone file (`file`) or inline `text`.
+///
+/// `views` give matching clients a different copy of the zone (split-horizon DNS). Clients
+/// that match no view get the zone's own `file` or `text`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Zone {
+    pub name: String,
+    pub file: Option<PathBuf>,
+    pub text: Option<String>,
+    pub views: Vec<ZoneView>,
+    /// `SQLite` journal that makes the zone dynamic (RFC 2136 updates survive restarts). Needs
+    /// `file`, at least one `update_rules` entry, and cannot be combined with `views`.
+    pub journal: Option<PathBuf>,
+    /// Scoped RFC 2136 update permissions. Without a rule, updates are refused.
+    pub update_rules: Vec<UpdateRule>,
+    /// Names of `tsig_keys` that may transfer this zone (AXFR and IXFR, over TCP). Empty refuses
+    /// every transfer.
+    pub transfer_keys: Vec<String>,
+}
+
+/// What one TSIG key may change in a dynamic zone.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateRule {
+    pub key: String,
+    /// Names the key may change: an exact name, or `*.suffix` for any name below `suffix`. Names
+    /// are relative to nothing: write them fully, without a trailing dot.
+    pub names: Vec<String>,
+    /// Record types the key may add or delete, such as `A`, `AAAA`, `TXT`, `CNAME`, `PTR`, `SRV`.
+    pub types: Vec<String>,
+}
+
+/// A shared TSIG secret. The secret never appears in the config; it is read from `secret_file`
+/// (base64 text, at least 16 bytes decoded, a single line).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TsigKey {
+    pub name: String,
+    pub algorithm: String,
+    pub secret_file: Option<PathBuf>,
+}
+
+/// Record types a TSIG key may be allowed to change. Structural and DNSSEC types are excluded.
+pub const UPDATABLE_TYPES: [&str; 9] = [
+    "A", "AAAA", "CNAME", "TXT", "PTR", "SRV", "MX", "CAA", "TLSA",
+];
+/// Most records one update message may change.
+pub const MAX_UPDATE_RECORDS: usize = 64;
+
+/// An alternative copy of a zone for the listed client networks. First match wins.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ZoneView {
+    pub clients: Vec<IpNet>,
+    pub file: Option<PathBuf>,
+    pub text: Option<String>,
+}
+
+/// Send one domain (and everything below it) to specific resolvers, such as an internal
+/// directory server. Answers are not DNSSEC-validated by Lumen.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Forwarder {
+    pub domain: String,
+    pub upstreams: Vec<SocketAddr>,
 }
 
 /// `DNSCrypt` v2 listener. It answers over both UDP and TCP on each address.
@@ -666,6 +747,24 @@ impl Config {
                 *item = base.join(&*item);
             }
         }
+        for zone in &mut config.zones {
+            for path in std::iter::once(&mut zone.file)
+                .chain(std::iter::once(&mut zone.journal))
+                .chain(zone.views.iter_mut().map(|view| &mut view.file))
+                .flatten()
+            {
+                if path.is_relative() {
+                    *path = base.join(&*path);
+                }
+            }
+        }
+        for key in &mut config.tsig_keys {
+            if let Some(path) = &mut key.secret_file
+                && path.is_relative()
+            {
+                *path = base.join(&*path);
+            }
+        }
         for list in &mut config.filtering.lists {
             if let Some(path) = &mut list.path
                 && path.is_relative()
@@ -795,6 +894,7 @@ impl Config {
             }
         }
         self.validate_dnscrypt()?;
+        self.validate_zones()?;
         if self.listen.allow_clients.is_empty() || self.listen.allow_clients.len() > 128 {
             return Err("allow_clients must contain 1..128 CIDRs".into());
         }
@@ -815,6 +915,127 @@ impl Config {
         self.validate_web()?;
         self.filtering.validate()?;
         self.validate_resolver()
+    }
+
+    fn validate_zones(&self) -> Result<(), String> {
+        fn valid_name(name: &str) -> bool {
+            (1..=253).contains(&name.len())
+                && name.is_ascii()
+                && !name.ends_with('.')
+                && name.split('.').all(|label| {
+                    (1..=63).contains(&label.len())
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                })
+        }
+        fn one_source(file: Option<&PathBuf>, text: Option<&String>) -> Result<(), String> {
+            match (file, text) {
+                (Some(_), None) => Ok(()),
+                (None, Some(text)) if text.len() <= MAX_ZONE_BYTES => Ok(()),
+                (None, Some(_)) => Err(format!("zone text exceeds {MAX_ZONE_BYTES} bytes")),
+                _ => Err("each zone and view needs exactly one of file or text".into()),
+            }
+        }
+        if self.zones.len() > MAX_ZONES || self.forwarders.len() > MAX_FORWARDERS {
+            return Err("too many zones or forwarders".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for zone in &self.zones {
+            if !valid_name(&zone.name) || !seen.insert(zone.name.to_ascii_lowercase()) {
+                return Err("zone names must be unique DNS names without a trailing dot".into());
+            }
+            one_source(zone.file.as_ref(), zone.text.as_ref())?;
+            if zone.views.len() > MAX_ZONE_VIEWS {
+                return Err(format!("a zone may have at most {MAX_ZONE_VIEWS} views"));
+            }
+            for view in &zone.views {
+                if view.clients.is_empty() || view.clients.len() > 32 {
+                    return Err("each view needs 1..=32 client networks".into());
+                }
+                one_source(view.file.as_ref(), view.text.as_ref())?;
+            }
+        }
+        self.validate_tsig(&valid_name)?;
+        for forwarder in &self.forwarders {
+            if !valid_name(&forwarder.domain) || !seen.insert(forwarder.domain.to_ascii_lowercase())
+            {
+                return Err(
+                    "forwarder domains must be unique, and different from every zone name".into(),
+                );
+            }
+            if forwarder.upstreams.is_empty()
+                || forwarder.upstreams.len() > 8
+                || forwarder.upstreams.iter().any(|upstream| {
+                    upstream.port() == 0 || self.upstream_points_to_listener(*upstream)
+                })
+            {
+                return Err(
+                    "forwarders need 1..=8 upstreams that are not Lumen's own listeners".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_tsig(&self, valid_name: &dyn Fn(&str) -> bool) -> Result<(), String> {
+        if self.tsig_keys.len() > 32 {
+            return Err("at most 32 tsig_keys".into());
+        }
+        let mut names = std::collections::HashSet::new();
+        for key in &self.tsig_keys {
+            if !valid_name(&key.name)
+                || !names.insert(key.name.to_ascii_lowercase())
+                || !matches!(
+                    key.algorithm.as_str(),
+                    "hmac-sha256" | "hmac-sha384" | "hmac-sha512"
+                )
+                || key.secret_file.is_none()
+            {
+                return Err("tsig_keys need a unique DNS-style name, algorithm hmac-sha256, hmac-sha384, or hmac-sha512, and a secret_file".into());
+            }
+        }
+        for zone in &self.zones {
+            let known = |name: &str| names.contains(&name.to_ascii_lowercase());
+            if zone.transfer_keys.len() > 8 || !zone.transfer_keys.iter().all(|key| known(key)) {
+                return Err("transfer_keys must name at most 8 configured tsig_keys".into());
+            }
+            if zone.journal.is_some() {
+                if zone.file.is_none() || !zone.views.is_empty() || zone.update_rules.is_empty() {
+                    return Err("a dynamic zone needs file and update_rules, and no views".into());
+                }
+            } else if !zone.update_rules.is_empty() {
+                return Err("update_rules need a journal".into());
+            }
+            if zone.update_rules.len() > 16 {
+                return Err("a zone may have at most 16 update_rules".into());
+            }
+            for rule in &zone.update_rules {
+                let apex = zone.name.to_ascii_lowercase();
+                let in_zone = |name: &str| {
+                    let name = name.strip_prefix("*.").unwrap_or(name).to_ascii_lowercase();
+                    name == apex || name.ends_with(&format!(".{apex}"))
+                };
+                if !known(&rule.key)
+                    || rule.names.is_empty()
+                    || rule.names.len() > 32
+                    || !rule.names.iter().all(|name| {
+                        valid_name(name.strip_prefix("*.").unwrap_or(name)) && in_zone(name)
+                    })
+                    || rule.types.is_empty()
+                    || !rule
+                        .types
+                        .iter()
+                        .all(|kind| UPDATABLE_TYPES.contains(&kind.to_ascii_uppercase().as_str()))
+                {
+                    return Err(format!(
+                        "update_rules in zone {} need a configured key, names inside the zone, and types from {:?}",
+                        zone.name, UPDATABLE_TYPES
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn validate_dnscrypt(&self) -> Result<(), String> {
@@ -1837,6 +2058,87 @@ mod tests {
         config.validate().unwrap();
         config.web.http.clear();
         assert!(config.validate().is_err(), "needs a web listener");
+    }
+
+    #[test]
+    fn zones_forwarders_and_tsig_rules_are_validated() {
+        fn zone(name: &str) -> Zone {
+            Zone {
+                name: name.into(),
+                text: Some("x".into()),
+                ..Zone::default()
+            }
+        }
+        let mut config = Config {
+            schema_version: 1,
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        config.zones = vec![zone("home.example")];
+        config.forwarders = vec![Forwarder {
+            domain: "corp.example".into(),
+            upstreams: vec!["10.0.0.53:53".parse().unwrap()],
+        }];
+        config.tsig_keys = vec![TsigKey {
+            name: "ddns".into(),
+            algorithm: "hmac-sha256".into(),
+            secret_file: Some("ddns.key".into()),
+        }];
+        config.validate().unwrap();
+
+        let broken: [fn(&mut Config); 11] = [
+            |c| c.zones.push(zone("HOME.example")),
+            |c| c.zones.push(zone("bad name")),
+            |c| c.zones[0].text = None,
+            |c| c.zones[0].file = Some("a.zone".into()),
+            |c| c.zones[0].views = vec![ZoneView::default()],
+            |c| c.forwarders[0].domain = "home.example".into(),
+            |c| c.forwarders[0].upstreams.clear(),
+            |c| c.forwarders[0].upstreams = vec!["127.0.0.1:5353".parse().unwrap()],
+            |c| c.zones[0].transfer_keys = vec!["unknown".into()],
+            |c| c.tsig_keys[0].algorithm = "hmac-md5".into(),
+            |c| {
+                c.zones[0].update_rules = vec![UpdateRule {
+                    key: "ddns".into(),
+                    names: vec!["*.home.example".into()],
+                    types: vec!["A".into()],
+                }];
+            },
+        ];
+        for mutate in broken {
+            let mut bad = config.clone();
+            mutate(&mut bad);
+            assert!(bad.validate().is_err());
+        }
+
+        // A dynamic zone needs a journal, a file, no views, and rules that stay inside the zone.
+        config.zones[0] = Zone {
+            name: "home.example".into(),
+            file: Some("home.zone".into()),
+            journal: Some("home.journal".into()),
+            update_rules: vec![UpdateRule {
+                key: "ddns".into(),
+                names: vec!["*.home.example".into(), "printer.home.example".into()],
+                types: vec!["A".into(), "txt".into()],
+            }],
+            transfer_keys: vec!["ddns".into()],
+            ..Zone::default()
+        };
+        config.validate().unwrap();
+        for mutate in [
+            (|c: &mut Config| c.zones[0].update_rules[0].names = vec!["*.other.example".into()])
+                as fn(&mut Config),
+            |c| c.zones[0].update_rules[0].names = vec!["home.example.evil".into()],
+            |c| c.zones[0].update_rules[0].types = vec!["SOA".into()],
+            |c| c.zones[0].update_rules[0].types = vec!["NS".into()],
+            |c| c.zones[0].update_rules[0].key = "other".into(),
+            |c| c.zones[0].update_rules[0].names.clear(),
+            |c| c.zones[0].text = Some("x".into()),
+        ] {
+            let mut bad = config.clone();
+            mutate(&mut bad);
+            assert!(bad.validate().is_err());
+        }
     }
 
     #[test]

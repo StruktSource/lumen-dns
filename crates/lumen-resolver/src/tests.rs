@@ -320,6 +320,7 @@ async fn iterative_delegations_cache_and_depth_limit() {
     let resolver = Arc::new(Resolver {
         catalog,
         cache: None,
+        custom: Vec::new(),
         metrics: Arc::new(Metrics::default()),
         background: None,
         local_zones: true,
@@ -600,6 +601,7 @@ async fn recursion_timeout_invokes_fallback_once() {
     let resolver = Arc::new(Resolver {
         catalog,
         cache: None,
+        custom: Vec::new(),
         metrics: Arc::clone(&metrics),
         background: None,
         local_zones: true,

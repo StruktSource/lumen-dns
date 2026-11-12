@@ -26,6 +26,7 @@ h3-quinn = "0.0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 crypto_box = { version = "0.9", features = ["chacha20", "salsa20"] }
+x509-parser = "0.18"
 
 [dev-dependencies]
 lumen-store = { path = "../lumen-store" }

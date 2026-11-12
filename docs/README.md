@@ -27,6 +27,7 @@ Welcome! This is the map to everything written about Lumen, a self-hosted DNS re
 - [Resolver modes](guides/resolver-modes.md): recursive or forwarding, timeout fallback, and speed features.
 - [Upstream providers](guides/upstream-providers.md): the bundled catalog of encrypted public resolvers.
 - [Encrypted DNS](guides/encrypted-dns.md): serve DNS-over-TLS, DNS-over-HTTPS, and DNS-over-QUIC.
+- [Your own DNS zones](guides/authoritative-dns.md): authoritative zones, split-horizon views, conditional forwarding, dynamic updates, and zone transfers.
 - [Filtering](guides/filtering.md): block lists, rules, per-device profiles, and schedules.
 - [Web console](guides/web-console.md): accounts, setup, two-step verification, and HTTPS.
 - [External login](guides/external-login.md): optional console sign-in through Authentik, Authelia, Pocket ID, and other OpenID Connect providers.

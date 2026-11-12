@@ -911,8 +911,6 @@ dependencies = [
 [[package]]
 name = "hickory-server"
 version = "0.26.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "950c2ad9ba2ad35d6890b725baff91305f65b87d7719a6c6071514dc70f13eeb"
 dependencies = [
  "async-trait",
  "bytes",
@@ -928,6 +926,7 @@ dependencies = [
  "http",
  "ipnet",
  "prefix-trie",
+ "rusqlite",
  "rustls",
  "serde",
  "thiserror 2.0.21",
@@ -1430,6 +1429,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1465,7 +1465,10 @@ name = "lumen-resolver"
 version = "0.7.0"
 dependencies = [
  "async-trait",
+ "base64",
+ "futures-executor",
  "hickory-server",
+ "ipnet",
  "lumen-config",
  "lumen-proto",
  "rusqlite",
@@ -2002,6 +2005,7 @@ dependencies = [
  "libsqlite3-sys",
  "smallvec",
  "sqlite-wasm-rs",
+ "time",
 ]
 
 [[package]]
@@ -2490,6 +2494,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
+ "js-sys",
  "num-conv",
  "powerfmt",
  "serde_core",
