@@ -20,6 +20,7 @@ tcp = ["0.0.0.0:5353", "[::]:5353"]
 dot = []
 doh = []
 doq = []
+doh3 = []
 # This host and private networks may query Lumen. Never add the whole internet.
 allow_clients = [
     "127.0.0.0/8",
@@ -33,6 +34,7 @@ allow_clients = [
 # dot = ["127.0.0.1:8853", "[::1]:8853"]
 # doh = ["127.0.0.1:8443", "[::1]:8443"]
 # doq = ["127.0.0.1:8853", "[::1]:8853"]
+# doh3 = ["127.0.0.1:8443", "[::1]:8443"]
 # certificate = "tls/cert.pem"
 # private_key = "tls/key.pem"
 

@@ -51,17 +51,29 @@ lumen --config FILE --check
 | `limits` | Shared admission and I/O limits: [below](#limits) |
 | `filtering` | Optional rules, lists, profiles, devices, groups, subnets, schedules: [below](#filtering) |
 
+## `[dnscrypt]`
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Serve DNSCrypt v2 on every `listen` address, over UDP and TCP |
+| `listen` | `[]` | 1 to 8 addresses | Unique nonzero ports. Each address serves UDP and TCP, so the OS rejects a clash with another listener on the same port and transport |
+| `provider_name` | empty | Valid DNS name starting with `2.dnscrypt-cert.`, no trailing dot | Name clients query for the certificate |
+| `key_file` | unset | Required when enabled | Ed25519 provider seed as 64 hex characters. Created with mode `0600` if missing. Relative paths resolve beside the config file |
+| `cert_hours` | `24` | 2 to 168 | Certificate lifetime. Keys rotate at half this age |
+
+See [Encrypted DNS](../guides/encrypted-dns.md#dnscrypt). No TLS certificate is needed.
+
 ## Listeners
 
 | Field | Default |
 | :--- | :--- |
 | `udp`, `tcp` | Each `["127.0.0.1:5353"]` |
-| `dot`, `doh`, `doq` | Each `[]` (disabled) |
+| `dot`, `doh`, `doh3`, `doq` | Each `[]` (disabled) |
 | `allow_clients` | `["127.0.0.0/8", "::1/128"]` |
 | `certificate`, `private_key` | Unset. Both are required for any encrypted listener |
 
 - An empty array disables that transport. Enable 1 to 16 DNS listeners in total.
-- Ports must be nonzero, and duplicates within one transport are invalid. The OS also rejects incompatible bindings across transports. UDP and TCP may share a port, and DoT (TCP) and DoQ (UDP) may share a port. IPv6 sockets are IPv6-only, so IPv4 and IPv6 wildcard listeners can coexist.
+- Ports must be nonzero, and duplicates within one transport are invalid. The OS also rejects incompatible bindings across transports. UDP and TCP may share a port, DoT (TCP) and DoQ (UDP) may share a port, and DoH (TCP) and DoH3 (UDP) may share a port. IPv6 sockets are IPv6-only, so IPv4 and IPv6 wildcard listeners can coexist.
 - **Every client must match an allowed CIDR**, including on encrypted transports. An empty allowlist is invalid (maximum 128 CIDRs). A wildcard bind does not grant access. See [Serve your network](../guides/serve-your-network.md).
 - TLS listeners use TLS 1.3 with no early data and PEM files (certificate up to 1 MiB, key up to 64 KiB). Startup verifies the key matches the certificate. You manage validity, renewal, permissions, and restarts after rotation. See [Encrypted DNS](../guides/encrypted-dns.md).
 

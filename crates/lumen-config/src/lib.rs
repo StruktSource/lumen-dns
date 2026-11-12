@@ -23,6 +23,37 @@ pub struct Config {
     pub metrics: Option<SocketAddr>,
     pub management: Management,
     pub web: Web,
+    /// Optional `DNSCrypt` v2 server (UDP and TCP). Off by default.
+    pub dnscrypt: DnsCrypt,
+}
+
+/// `DNSCrypt` v2 listener. It answers over both UDP and TCP on each address.
+///
+/// The long-term Ed25519 provider key is stored in `key_file` (created with mode `0600` on first
+/// start if missing). Short-lived resolver keys and certificates rotate automatically in memory.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DnsCrypt {
+    pub enabled: bool,
+    pub listen: Vec<SocketAddr>,
+    /// Provider name clients query for the certificate, such as `2.dnscrypt-cert.example.net`.
+    pub provider_name: String,
+    /// 32-byte Ed25519 provider seed, hex encoded. Required when enabled.
+    pub key_file: Option<PathBuf>,
+    /// Certificate lifetime. Keys rotate at half this age.
+    pub cert_hours: u32,
+}
+
+impl Default for DnsCrypt {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: vec![],
+            provider_name: String::new(),
+            key_file: None,
+            cert_hours: 24,
+        }
+    }
 }
 
 /// Embedded static UI listeners. Empty address lists disable hosting.
@@ -209,6 +240,8 @@ pub struct Listeners {
     pub dot: Vec<SocketAddr>,
     pub doh: Vec<SocketAddr>,
     pub doq: Vec<SocketAddr>,
+    /// DNS over HTTP/3 (RFC 9250-style QUIC transport with the `h3` ALPN) at `/dns-query`.
+    pub doh3: Vec<SocketAddr>,
     pub certificate: Option<PathBuf>,
     pub private_key: Option<PathBuf>,
     pub allow_clients: Vec<IpNet>,
@@ -222,6 +255,7 @@ impl Default for Listeners {
             dot: vec![],
             doh: vec![],
             doq: vec![],
+            doh3: vec![],
             certificate: None,
             private_key: None,
             allow_clients: vec![
@@ -619,6 +653,7 @@ impl Config {
             &mut config.resolver.trust_anchor,
             &mut config.resolver.upstream_ca,
             &mut config.resolver.persistent_cache.path,
+            &mut config.dnscrypt.key_file,
             &mut config.web.certificate,
             &mut config.web.private_key,
             &mut config.web.oidc.client_secret_file,
@@ -746,6 +781,7 @@ impl Config {
             &self.listen.dot,
             &self.listen.doh,
             &self.listen.doq,
+            &self.listen.doh3,
         ];
         let count: usize = sets.iter().map(|set| set.len()).sum();
         if count == 0 || count > 16 {
@@ -758,12 +794,14 @@ impl Config {
                 }
             }
         }
+        self.validate_dnscrypt()?;
         if self.listen.allow_clients.is_empty() || self.listen.allow_clients.len() > 128 {
             return Err("allow_clients must contain 1..128 CIDRs".into());
         }
         let encrypted = !self.listen.dot.is_empty()
             || !self.listen.doh.is_empty()
-            || !self.listen.doq.is_empty();
+            || !self.listen.doq.is_empty()
+            || !self.listen.doh3.is_empty();
         if encrypted && (self.listen.certificate.is_none() || self.listen.private_key.is_none()) {
             return Err("encrypted listeners require certificate and private_key".into());
         }
@@ -777,6 +815,44 @@ impl Config {
         self.validate_web()?;
         self.filtering.validate()?;
         self.validate_resolver()
+    }
+
+    fn validate_dnscrypt(&self) -> Result<(), String> {
+        let dnscrypt = &self.dnscrypt;
+        if !dnscrypt.enabled {
+            return Ok(());
+        }
+        if dnscrypt.listen.is_empty() || dnscrypt.listen.len() > 8 {
+            return Err("dnscrypt.listen must contain 1..=8 addresses".into());
+        }
+        for (index, address) in dnscrypt.listen.iter().enumerate() {
+            if address.port() == 0 || dnscrypt.listen[..index].contains(address) {
+                return Err("dnscrypt listener ports must be nonzero and unique".into());
+            }
+        }
+        let name = &dnscrypt.provider_name;
+        let valid = (4..=253).contains(&name.len())
+            && name.is_ascii()
+            && !name.ends_with('.')
+            && name.split('.').all(|label| {
+                (1..=63).contains(&label.len())
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            });
+        if !valid || !name.to_ascii_lowercase().starts_with("2.dnscrypt-cert.") {
+            return Err(
+                "dnscrypt.provider_name must be a DNS name that starts with 2.dnscrypt-cert."
+                    .into(),
+            );
+        }
+        if dnscrypt.key_file.is_none() {
+            return Err("dnscrypt.key_file is required when enabled".into());
+        }
+        if !(2..=168).contains(&dnscrypt.cert_hours) {
+            return Err("dnscrypt.cert_hours must be in 2..=168".into());
+        }
+        Ok(())
     }
 
     fn validate_management(&self) -> Result<(), String> {
@@ -1172,6 +1248,8 @@ impl Config {
             &self.listen.dot,
             &self.listen.doh,
             &self.listen.doq,
+            &self.listen.doh3,
+            &self.dnscrypt.listen,
         ]
         .into_iter()
         .flatten()
@@ -1759,6 +1837,30 @@ mod tests {
         config.validate().unwrap();
         config.web.http.clear();
         assert!(config.validate().is_err(), "needs a web listener");
+    }
+
+    #[test]
+    fn dnscrypt_is_off_by_default_and_validated_when_enabled() {
+        assert!(!Config::default().dnscrypt.enabled);
+        let source = "schema_version = 1\n[dnscrypt]\nenabled = true\nlisten = ['127.0.0.1:5443']\nprovider_name = '2.dnscrypt-cert.dns.example'\nkey_file = 'provider.key'\n";
+        let config = Config::parse(source, Path::new("/var/lib/lumen")).unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config.dnscrypt.key_file.as_deref(),
+            Some(Path::new("/var/lib/lumen/provider.key"))
+        );
+        for mutate in [
+            (|c: &mut Config| c.dnscrypt.listen.clear()) as fn(&mut Config),
+            |c| c.dnscrypt.key_file = None,
+            |c| c.dnscrypt.provider_name = "dns.example".into(),
+            |c| c.dnscrypt.provider_name = "2.dnscrypt-cert.dns.example.".into(),
+            |c| c.dnscrypt.cert_hours = 1,
+            |c| c.dnscrypt.listen = vec!["127.0.0.1:0".parse().unwrap()],
+        ] {
+            let mut bad = config.clone();
+            mutate(&mut bad);
+            assert!(bad.validate().is_err(), "{:?}", bad.dnscrypt);
+        }
     }
 
     #[test]

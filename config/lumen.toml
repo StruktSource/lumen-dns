@@ -39,16 +39,25 @@ tcp = ["127.0.0.1:5353", "[::1]:5353"]
 dot = []
 doh = []
 doq = []
+doh3 = []
 # Only this host may query Lumen by default.
 allow_clients = ["127.0.0.0/8", "::1/128"]
 # Optional encrypted listener example. See ../docs/guides/encrypted-dns.md.
 # dot = ["127.0.0.1:8853", "[::1]:8853"]
 # doh = ["127.0.0.1:8443", "[::1]:8443"]
 # doq = ["127.0.0.1:8853", "[::1]:8853"]
+# doh3 = ["127.0.0.1:8443", "[::1]:8443"]
 # certificate = "tls/cert.pem"
 # private_key = "tls/key.pem"
 
 # Built-in iterative recursion with local DNSSEC validation. No provider is used.
+# Optional DNSCrypt v2 server (no TLS certificate). Off by default. See docs/guides/encrypted-dns.md.
+# [dnscrypt]
+# enabled = true
+# listen = ["127.0.0.1:5443"]
+# provider_name = "2.dnscrypt-cert.dns.home.example"
+# key_file = "dnscrypt-provider.key"
+
 [resolver]
 mode = "recursive"
 dnssec = true

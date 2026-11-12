@@ -2,6 +2,13 @@
 
 All notable user-facing changes are listed here. Lumen is still pre-release.
 
+## [Unreleased]
+
+### Added
+
+- **DNS over HTTP/3 (DoH3).** `listen.doh3` serves `/dns-query` over QUIC with ALPN `h3`, with the same methods, media type, status codes, limits, certificate, and `allow_clients` rules as DoH over HTTP/2. Metrics gain an `http3` transport label (the former `other` label moves to a new index but keeps its name).
+- **DNSCrypt v2 server (opt-in).** `[dnscrypt]` serves signed, automatically rotating certificates and encrypted queries over UDP and TCP, with `X25519-XChaCha20Poly1305` and `X25519-XSalsa20Poly1305`. The long-term provider key lives in a `0600` file, UDP replies are never larger than the query, and Lumen logs a `sdns://` stamp at startup. Not included: DNSCrypt upstreams and Anonymized DNSCrypt.
+
 ## [0.7.0] - 2026-11-12
 
 ### Added
