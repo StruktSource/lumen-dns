@@ -2151,6 +2151,22 @@ async fn dynamic_updates_and_zone_transfers_use_scoped_tsig_keys() {
     std::fs::write(path("ddns.key"), base64_secret(&ddns_secret)).unwrap();
     std::fs::write(path("xfr.key"), base64_secret(&xfr_secret)).unwrap();
     std::fs::write(path("dyn.zone"), zone_text("dyn.test", "192.0.2.1")).unwrap();
+    // A secondary that acknowledges every NOTIFY and reports the zone it was for.
+    let secondary = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let secondary_address = secondary.local_addr().unwrap();
+    let (notified, mut notifications) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        let mut buffer = vec![0; 512];
+        loop {
+            let (size, from) = secondary.recv_from(&mut buffer).await.unwrap();
+            let request = Message::from_vec(&buffer[..size]).unwrap();
+            assert_eq!(request.metadata.op_code, hickory_proto::op::OpCode::Notify);
+            let mut reply = buffer[..size].to_vec();
+            reply[2] |= 0x80;
+            secondary.send_to(&reply, from).await.unwrap();
+            let _ = notified.send(request.queries[0].name().to_ascii());
+        }
+    });
     let build = |bind: SocketAddr| {
         let mut cfg = config(upstream.address, bind);
         cfg.tsig_keys = vec![
@@ -2176,6 +2192,7 @@ async fn dynamic_updates_and_zone_transfers_use_scoped_tsig_keys() {
                     types: vec!["A".into(), "TXT".into()],
                 }],
                 transfer_keys: vec!["xfr".into()],
+                notify: vec![secondary_address],
                 ..Default::default()
             },
             lumen_config::Zone {
@@ -2272,6 +2289,20 @@ async fn dynamic_updates_and_zone_transfers_use_scoped_tsig_keys() {
     );
     let before = udp(bind, &query("new.dyn.test.", RecordType::A)).await;
     assert_eq!(before.metadata.response_code, ResponseCode::NXDomain);
+    // The secondary heard about the zone at startup, and the refused updates added nothing.
+    let waited = |wait: u64| Duration::from_millis(wait);
+    assert_eq!(
+        tokio::time::timeout(waited(5000), notifications.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "dyn.test."
+    );
+    assert!(
+        tokio::time::timeout(waited(300), notifications.recv())
+            .await
+            .is_err()
+    );
 
     // A scoped, signed update works over UDP and TCP.
     let ok = signed(
@@ -2282,6 +2313,14 @@ async fn dynamic_updates_and_zone_transfers_use_scoped_tsig_keys() {
     )
     .await;
     assert_eq!(ok.metadata.response_code, ResponseCode::NoError);
+    // An accepted update tells the secondary again.
+    assert_eq!(
+        tokio::time::timeout(waited(5000), notifications.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "dyn.test."
+    );
     let ok = signed(
         bind,
         update_message(

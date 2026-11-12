@@ -194,7 +194,15 @@ dig @192.168.1.2 home.example AXFR -k xfr.key
 - A key allowed to update is not automatically allowed to transfer, and the other way round. Use separate keys.
 - **Bounded size:** the whole zone must fit one DNS message (about 64 KiB on the wire). A larger zone gets `SERVFAIL` instead of a partial copy. Split big zones, or use delegation.
 - **IXFR is answered as a full transfer.** Lumen keeps no history of changes, and RFC 1995 allows a server to reply to an incremental request with the whole zone. Secondaries still work; they just copy everything each time.
-- Lumen does not send `NOTIFY`. Set the secondary's refresh interval to how quickly you need changes to appear.
+- **NOTIFY:** list secondaries in `notify` and Lumen tells them (RFC 1996) when the zone changes, so they transfer at once. It sends a NOTIFY at startup and after every accepted dynamic update, over UDP, up to three tries per secondary, never delaying the update itself:
+
+  ```toml
+  [[zones]]
+  name = "dyn.example"
+  notify = ["192.168.1.3:53"]
+  ```
+
+  Up to 8 secondaries, and none can be one of Lumen's own listeners. A secondary that does not answer is logged and skipped. Edits to a static zone file are announced at the next start. Keep a refresh interval on the secondary as a safety net, since NOTIFY is best effort.
 
 ## Limits and failure behavior
 

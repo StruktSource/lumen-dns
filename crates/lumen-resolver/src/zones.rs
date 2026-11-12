@@ -34,6 +34,8 @@ pub(crate) struct Built {
     pub handlers: Vec<Arc<dyn ZoneHandler>>,
     /// Signed zones, which need their signatures renewed on a schedule.
     pub resign: Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
+    /// Zones with secondaries to notify at startup.
+    pub notify: Vec<(Name, Vec<std::net::SocketAddr>)>,
 }
 
 /// Build every configured zone and conditional forwarder.
@@ -58,7 +60,17 @@ pub(crate) fn build(
     for forwarder in &config.forwarders {
         handlers.push(forwarder_handler(config, forwarder, options)?);
     }
-    Ok(Built { handlers, resign })
+    let mut notify = Vec::new();
+    for zone in config.zones.iter().filter(|zone| !zone.notify.is_empty()) {
+        let origin = Name::from_ascii(format!("{}.", zone.name))
+            .map_err(|_| format!("invalid zone name {}", zone.name))?;
+        notify.push((origin, zone.notify.clone()));
+    }
+    Ok(Built {
+        handlers,
+        resign,
+        notify,
+    })
 }
 
 /// Install handlers for the longest-match routing the catalog provides.
@@ -218,6 +230,7 @@ struct ManagedZone {
     inner: SqliteZoneHandler<TokioRuntimeProvider>,
     rules: Vec<Rule>,
     transfer_keys: Vec<LowerName>,
+    notify: Vec<std::net::SocketAddr>,
 }
 
 /// Most record sets a dynamic zone may hold, so updates cannot grow memory without bound.
@@ -311,6 +324,7 @@ fn managed_zone(
     Ok(Arc::new(ManagedZone {
         inner,
         rules,
+        notify: zone.notify.clone(),
         transfer_keys: zone
             .transfer_keys
             .iter()
@@ -401,7 +415,12 @@ impl ZoneHandler for ManagedZone {
         if self.inner.records().await.len() + updates.len() > MAX_RRSETS {
             return (Err(ResponseCode::Refused), None);
         }
-        self.inner.update(request, now).await
+        let result = self.inner.update(request, now).await;
+        if matches!(result.0, Ok(true)) && !self.notify.is_empty() {
+            let zone: Name = self.inner.origin().into();
+            tokio::spawn(crate::notify::send(zone, self.notify.clone()));
+        }
+        result
     }
     async fn zone_transfer(
         &self,

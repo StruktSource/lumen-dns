@@ -78,6 +78,7 @@ Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these a
 | `update_rules` | `[]` | Up to 16 `[[zones.update_rules]]` with `key`, `names` (exact or `*.suffix`, inside the zone), and `types` |
 | `dnssec` | off | `[zones.dnssec]` with `key_file` (PKCS#8 PEM, mode 0600), `algorithm` (`ed25519` or `ecdsap256sha256`) and `signature_days` (2 to 90, default 14). Not with `views`, `journal`, or `transfer_keys`. See [DNSSEC signing](../guides/authoritative-dns.md#dnssec-signing) |
 | `transfer_keys` | `[]` | Up to 8 TSIG key names allowed to run AXFR/IXFR over TCP. Empty refuses all transfers |
+| `notify` | `[]` | Up to 8 secondary `ip:port` addresses that get a NOTIFY at startup and after each accepted update. Not Lumen's own listeners |
 
 `[[forwarders]]`
 

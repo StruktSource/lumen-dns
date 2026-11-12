@@ -51,6 +51,7 @@ use tokio::time::timeout;
 mod accel;
 mod cache;
 mod forward;
+mod notify;
 mod rollover;
 mod signing;
 pub use signing::zone_key;
@@ -106,6 +107,7 @@ pub struct Resolver {
     custom: Vec<LowerName>,
     rollover: Option<rollover::Tracker>,
     signed: Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
+    notifications: Vec<(Name, Vec<SocketAddr>)>,
     resigners: Resigners,
     metrics: Arc<Metrics>,
     background: Option<Background>,
@@ -613,7 +615,7 @@ impl Resolver {
         let mut catalog = Catalog::new();
         catalog.upsert(Name::root().into(), vec![handler]);
         let built = zones::build(config, &options, persist)?;
-        let (custom_handlers, signed) = (built.handlers, built.resign);
+        let (custom_handlers, signed, notifications) = (built.handlers, built.resign, built.notify);
         let custom: Vec<LowerName> = custom_handlers
             .iter()
             .map(|handler| handler.origin().clone())
@@ -626,6 +628,7 @@ impl Resolver {
             custom,
             rollover,
             signed,
+            notifications,
             resigners: Resigners::default(),
             metrics,
             background,
@@ -637,6 +640,9 @@ impl Resolver {
     /// dropping the resolver stops them. Does nothing when both are disabled.
     pub fn start_background(&self) {
         self.resigners.start(&self.signed);
+        for (zone, targets) in &self.notifications {
+            tokio::spawn(notify::send(zone.clone(), targets.clone()));
+        }
         if let Some(background) = &self.background {
             (background.start)();
         }

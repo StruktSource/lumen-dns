@@ -59,6 +59,8 @@ pub struct Zone {
     /// Names of `tsig_keys` that may transfer this zone (AXFR and IXFR, over TCP). Empty refuses
     /// every transfer.
     pub transfer_keys: Vec<String>,
+    /// Secondary servers to tell (NOTIFY, RFC 1996) when this zone changes, and at startup.
+    pub notify: Vec<SocketAddr>,
     /// Sign this zone with DNSSEC. Only plain zones: no views, journal, or transfers.
     pub dnssec: Option<ZoneSigning>,
 }
@@ -990,6 +992,16 @@ impl Config {
                 return Err("zone names must be unique DNS names without a trailing dot".into());
             }
             one_source(zone.file.as_ref(), zone.text.as_ref())?;
+            if zone.notify.len() > 8
+                || zone
+                    .notify
+                    .iter()
+                    .any(|target| target.port() == 0 || self.upstream_points_to_listener(*target))
+            {
+                return Err(
+                    "notify needs at most 8 secondaries that are not Lumen's own listeners".into(),
+                );
+            }
             if zone.views.len() > MAX_ZONE_VIEWS {
                 return Err(format!("a zone may have at most {MAX_ZONE_VIEWS} views"));
             }
