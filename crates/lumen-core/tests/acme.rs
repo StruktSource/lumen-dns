@@ -79,11 +79,24 @@ async fn pebble_issues_a_certificate_and_the_server_serves_it() {
     }
     server.shutdown().await;
 
-    // The account is reused and a still-valid certificate is left alone.
+    // The account is reused. A certificate with plenty of life left is kept, and one that is
+    // close to expiry (Pebble sometimes picks its 6-day profile) is renewed at startup.
+    let remaining = parsed
+        .validity()
+        .time_to_expiration()
+        .map_or(0, |left| left.whole_days());
     let before = std::fs::read(path("cert.pem")).unwrap();
     let mut server = RunningServer::start(config).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(std::fs::read(path("cert.pem")).unwrap(), before);
+    let after = std::fs::read(path("cert.pem")).unwrap();
+    if remaining >= 30 {
+        assert_eq!(after, before, "a valid certificate is left alone");
+    } else {
+        assert_ne!(
+            after, before,
+            "a certificate with {remaining} days left is renewed"
+        );
+    }
     server.shutdown().await;
 }
 
