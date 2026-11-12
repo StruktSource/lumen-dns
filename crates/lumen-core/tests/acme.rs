@@ -5,6 +5,8 @@
 //! (`pebble-challtestsrv -defaultIPv4 127.0.0.1` with `pebble -dnsserver`). See
 //! `docs/guides/certificates.md`.
 
+#![allow(clippy::redundant_closure_for_method_calls)] // the duration type is private
+
 use lumen_config::{Config, Mode, Upstream, UpstreamProtocol};
 use lumen_core::RunningServer;
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
