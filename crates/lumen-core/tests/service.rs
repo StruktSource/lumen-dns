@@ -250,6 +250,11 @@ async fn fixture_with_servfail(servfail: bool) -> Fixture {
     }
 }
 
+use hickory_proto::rr::rdata::svcb::{Alpn, EchConfigList, SvcParamKey, SvcParamValue};
+
+/// A minimal ECHConfigList-shaped blob. Lumen must pass it through untouched.
+const ECH_CONFIG: [u8; 7] = [0, 7, 0xfe, 0x0d, 1, 2, 3];
+
 fn mock_response(request: Message, tcp: bool, servfail: bool) -> Message {
     let mut response = Message::response(request.metadata.id, request.metadata.op_code);
     response.metadata.authoritative = true;
@@ -291,6 +296,27 @@ fn mock_response(request: Message, tcp: bool, servfail: bool) -> Message {
             name,
             1,
             RData::CNAME(CNAME(Name::from_ascii("tracker.example.").unwrap())),
+        ));
+    } else if q.query_type() == RecordType::HTTPS {
+        response.add_answer(Record::from_rdata(
+            name,
+            60,
+            RData::HTTPS(hickory_proto::rr::rdata::HTTPS(
+                hickory_proto::rr::rdata::SVCB::new(
+                    1,
+                    Name::from_ascii("Pool.Example.").unwrap(),
+                    vec![
+                        (
+                            SvcParamKey::Alpn,
+                            SvcParamValue::Alpn(Alpn(vec!["h2".into(), "h3".into()])),
+                        ),
+                        (
+                            SvcParamKey::EchConfigList,
+                            SvcParamValue::EchConfigList(EchConfigList(ECH_CONFIG.to_vec())),
+                        ),
+                    ],
+                ),
+            )),
         ));
     } else if q.query_type() == RecordType::AAAA {
         response.add_answer(Record::from_rdata(
@@ -2600,4 +2626,54 @@ async fn signed_zones_serve_verifiable_signatures_and_proofs_of_absence() {
     );
     server.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn forwarded_https_records_keep_ech_over_udp_tcp_and_the_cache() {
+    async fn tcp(address: SocketAddr, packet: &[u8]) -> Message {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let length = u16::try_from(packet.len()).unwrap().to_be_bytes();
+        stream.write_all(&length).await.unwrap();
+        stream.write_all(packet).await.unwrap();
+        let mut size = [0; 2];
+        stream.read_exact(&mut size).await.unwrap();
+        let mut reply = vec![0; usize::from(u16::from_be_bytes(size))];
+        stream.read_exact(&mut reply).await.unwrap();
+        Message::from_vec(&reply).unwrap()
+    }
+    use hickory_proto::rr::RData;
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let cfg = config(upstream.address, bind);
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    let check = |reply: &Message| {
+        let svcb = reply
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                RData::HTTPS(value) => Some(&value.0),
+                _ => None,
+            })
+            .expect("HTTPS answer");
+        assert!(
+            svcb.target_name
+                .to_ascii()
+                .eq_ignore_ascii_case("pool.example.")
+        );
+        assert!(svcb.svc_params.iter().any(|(key, value)| {
+            *key == SvcParamKey::EchConfigList
+                && matches!(value, SvcParamValue::EchConfigList(list) if list.0 == ECH_CONFIG)
+        }));
+        assert!(
+            svcb.svc_params
+                .iter()
+                .any(|(key, _)| *key == SvcParamKey::Alpn)
+        );
+    };
+    // First answer is live from the upstream, the next ones can come from the cache.
+    for _ in 0..3 {
+        check(&udp(bind, &query("svcb.example.", RecordType::HTTPS)).await);
+    }
+    check(&tcp(bind, &query("svcb.example.", RecordType::HTTPS)).await);
+    server.shutdown().await;
 }
