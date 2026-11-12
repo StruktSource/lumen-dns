@@ -172,12 +172,28 @@ impl From<LookupRecords> for AuthLookup {
 pub struct AxfrRecords {
     dnssec_ok: bool,
     rrsets: Vec<Arc<RecordSet>>,
+    /// LUMEN PATCH: exact records, SOA included, for an incremental (IXFR) answer.
+    explicit: Option<Vec<Record>>,
 }
 
 impl AxfrRecords {
+    /// LUMEN PATCH: wrap exact records that are yielded as given, including SOA records. Used
+    /// for the difference sequences of an incremental zone transfer (RFC 1995).
+    pub fn from_records(records: Vec<Record>) -> Self {
+        Self {
+            dnssec_ok: false,
+            rrsets: Vec::new(),
+            explicit: Some(records),
+        }
+    }
+
     /// Construct this wrapper around the contents of a zone.
     pub fn new(dnssec_ok: bool, rrsets: Vec<Arc<RecordSet>>) -> Self {
-        Self { dnssec_ok, rrsets }
+        Self {
+            dnssec_ok,
+            rrsets,
+            explicit: None,
+        }
     }
 
     fn iter(&self) -> AxfrRecordsIter<'_> {
@@ -194,6 +210,7 @@ impl<'r> IntoIterator for &'r AxfrRecords {
             dnssec_ok: self.dnssec_ok,
             rrsets: self.rrsets.iter(),
             records: None,
+            explicit: self.explicit.as_deref().map(<[Record]>::iter),
         }
     }
 }
@@ -204,12 +221,16 @@ pub struct AxfrRecordsIter<'r> {
     dnssec_ok: bool,
     rrsets: Iter<'r, Arc<RecordSet>>,
     records: Option<RrsetRecords<'r>>,
+    explicit: Option<Iter<'r, Record>>,
 }
 
 impl<'r> Iterator for AxfrRecordsIter<'r> {
     type Item = &'r Record;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if let Some(explicit) = &mut self.explicit {
+            return explicit.next();
+        }
         loop {
             if let Some(records) = &mut self.records {
                 if let Some(record) = records

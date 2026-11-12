@@ -27,7 +27,7 @@ _Last updated 2026-11-11 for version 0.6.0._
 **Still ahead**
 
 - Built-in certificate automation (ACME) and automatic trust-anchor rollover
-- DNSSEC key rollover for hosted zones, zone transfer deltas (real IXFR), and mDNS bridging
+- DNSSEC key rollover for hosted zones, and mDNS bridging
 - More encrypted DNS options: DNSCrypt upstreams, Anonymized DNSCrypt, and ECH support
 - Wider child-safety filtering categories
 - An optional DHCP server module
@@ -144,7 +144,7 @@ Principles that shape every decision:
 - [x] Authoritative DNS zones and operator-managed records from zone files or inline text, separate from Lumen's built-in empty local zones. Unsigned; see the DNSSEC signing item
 - [x] **Split-horizon views** by client network, **conditional forwarding**, and DNS-SD as ordinary records. mDNS bridging is not built
 - [x] Dynamic DNS updates (RFC 2136) with TSIG authentication, per-key name and type scope, a SQLite journal, and bounded size
-- [x] Zone transfers over TCP with TSIG-keyed policy and a one-message size bound. IXFR is answered as a full transfer (no change history), NOTIFY is sent to `notify` secondaries at startup and after accepted updates
+- [x] Zone transfers over TCP with TSIG-keyed policy and a one-message size bound. Dynamic zones answer IXFR with the differences from the last 32 updates (in memory; a full transfer after a restart or for older serials), NOTIFY is sent to `notify` secondaries at startup and after accepted updates
 - [x] DNSSEC signing for plain operator zones: one combined key (Ed25519 or ECDSA P-256), NSEC, daily signature renewal, `lumen --zone-key` for key creation and the DS record. **Still open:** key rollover, NSEC3, separate KSK/ZSK, and signing for dynamic or split-horizon zones
 - [x] Native DoH over HTTP/3 listener (`listen.doh3`), same `/dns-query` contract as HTTP/2 DoH. Client-side DoH3 to an upstream is available as `protocol = "h3"` for explicit upstreams; the automatic provider list does not use it yet, and Lumen does not advertise HTTP/3 itself
 - [x] DNSCrypt v2 **server** (UDP and TCP, both cipher suites, signed rotating certificates). Still open: DNSCrypt as an upstream transport, Anonymized DNSCrypt relays, and interop testing against `dnscrypt-proxy` releases

@@ -193,7 +193,7 @@ dig @192.168.1.2 home.example AXFR -k xfr.key
 - Transfers need a **valid TSIG signature from a listed key**, over **plain TCP** only. UDP, DoT, DoH, and the other transports are refused, and unsigned requests are refused.
 - A key allowed to update is not automatically allowed to transfer, and the other way round. Use separate keys.
 - **Bounded size:** the whole zone must fit one DNS message (about 64 KiB on the wire). A larger zone gets `SERVFAIL` instead of a partial copy. Split big zones, or use delegation.
-- **IXFR is answered as a full transfer.** Lumen keeps no history of changes, and RFC 1995 allows a server to reply to an incremental request with the whole zone. Secondaries still work; they just copy everything each time.
+- **IXFR (incremental transfers) for dynamic zones.** Lumen remembers the last 32 accepted updates, up to about 500 changed records, in memory. A secondary that asks with a serial Lumen remembers gets only the differences; one that is already current gets just the SOA. A secondary Lumen cannot bridge (older than the history, an unknown serial, or after a restart, which clears the history) gets the whole zone, which RFC 1995 allows. A plain zone from a file has no changes to remember, so its IXFR is always a full transfer.
 - **NOTIFY:** list secondaries in `notify` and Lumen tells them (RFC 1996) when the zone changes, so they transfer at once. It sends a NOTIFY at startup and after every accepted dynamic update, over UDP, up to three tries per secondary, never delaying the update itself:
 
   ```toml

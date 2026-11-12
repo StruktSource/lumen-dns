@@ -12,7 +12,8 @@ use hickory_server::{
     proto::{
         op::ResponseCode,
         rr::{
-            LowerName, Name, RecordType, TSigResponseContext, TSigner, rdata::tsig::TsigAlgorithm,
+            LowerName, Name, RData, Record, RecordType, TSigResponseContext, TSigner,
+            rdata::tsig::TsigAlgorithm,
         },
         serialize::txt::Parser,
     },
@@ -21,8 +22,9 @@ use hickory_server::{
     store::in_memory::InMemoryZoneHandler,
     store::sqlite::{SqliteConfig, SqliteZoneHandler},
     zone_handler::{
-        AuthLookup, AxfrPolicy, Catalog, LookupControlFlow, LookupError, LookupOptions,
-        Nsec3QueryInfo, UpdateRequest, ZoneHandler, ZoneTransfer, ZoneType,
+        AuthLookup, AxfrPolicy, AxfrRecords, Catalog, LookupControlFlow, LookupError,
+        LookupOptions, LookupRecords, Nsec3QueryInfo, UpdateRequest, ZoneHandler, ZoneTransfer,
+        ZoneType,
     },
 };
 use ipnet::IpNet;
@@ -231,6 +233,33 @@ struct ManagedZone {
     rules: Vec<Rule>,
     transfer_keys: Vec<LowerName>,
     notify: Vec<std::net::SocketAddr>,
+    /// Recent changes, newest last, so an IXFR client that is only a few serials behind gets the
+    /// differences. Kept in memory only: after a restart clients get the whole zone.
+    history: std::sync::Mutex<std::collections::VecDeque<Change>>,
+    /// Serializes updates so each recorded change matches exactly one update.
+    updating: tokio::sync::Mutex<()>,
+}
+
+/// What one accepted update changed. SOA records are kept apart from the rest.
+struct Change {
+    from: u32,
+    to: u32,
+    old_soa: Record,
+    new_soa: Record,
+    deleted: Vec<Record>,
+    added: Vec<Record>,
+}
+
+/// At most this many remembered updates, and this many changed records across all of them. An
+/// answer larger than that is not worth building, and the whole zone goes out instead.
+const MAX_HISTORY_CHANGES: usize = 32;
+const MAX_HISTORY_RECORDS: usize = 500;
+
+fn soa_serial(record: &Record) -> Option<u32> {
+    match &record.data {
+        RData::SOA(soa) => Some(soa.serial),
+        _ => None,
+    }
 }
 
 /// Most record sets a dynamic zone may hold, so updates cannot grow memory without bound.
@@ -325,6 +354,8 @@ fn managed_zone(
         inner,
         rules,
         notify: zone.notify.clone(),
+        history: std::sync::Mutex::default(),
+        updating: tokio::sync::Mutex::default(),
         transfer_keys: zone
             .transfer_keys
             .iter()
@@ -342,6 +373,88 @@ fn restrict_journal(path: &std::path::Path) {
     }
     #[cfg(not(unix))]
     let _ = path;
+}
+
+impl ManagedZone {
+    /// Every record of the zone, without signatures.
+    async fn snapshot(&self) -> Vec<Record> {
+        let records = self.inner.records().await;
+        records
+            .values()
+            .flat_map(|set| set.records_without_rrsigs().cloned().collect::<Vec<_>>())
+            .collect()
+    }
+
+    fn remember(&self, before: &[Record], after: &[Record]) {
+        let soa = |records: &[Record]| {
+            records
+                .iter()
+                .find(|record| record.record_type() == RecordType::SOA)
+                .cloned()
+        };
+        let (Some(old_soa), Some(new_soa)) = (soa(before), soa(after)) else {
+            return;
+        };
+        let (Some(from), Some(to)) = (soa_serial(&old_soa), soa_serial(&new_soa)) else {
+            return;
+        };
+        let plain = |record: &&Record| record.record_type() != RecordType::SOA;
+        let deleted: Vec<Record> = before
+            .iter()
+            .filter(plain)
+            .filter(|record| !after.contains(record))
+            .cloned()
+            .collect();
+        let added: Vec<Record> = after
+            .iter()
+            .filter(plain)
+            .filter(|record| !before.contains(record))
+            .cloned()
+            .collect();
+        let Ok(mut history) = self.history.lock() else {
+            return;
+        };
+        history.push_back(Change {
+            from,
+            to,
+            old_soa,
+            new_soa,
+            deleted,
+            added,
+        });
+        let total = |history: &std::collections::VecDeque<Change>| {
+            history
+                .iter()
+                .map(|change| change.deleted.len() + change.added.len() + 2)
+                .sum::<usize>()
+        };
+        while history.len() > MAX_HISTORY_CHANGES
+            || (history.len() > 1 && total(&history) > MAX_HISTORY_RECORDS)
+        {
+            history.pop_front();
+        }
+    }
+
+    /// The differences from `client` to `current` in IXFR order (RFC 1995 section 4): for each
+    /// change its old SOA, the deleted records, its new SOA, and the added records. `None` when
+    /// the history cannot bridge the gap exactly, which means the whole zone must be sent.
+    fn differences(&self, client: u32, current: u32) -> Option<Vec<Record>> {
+        let history = self.history.lock().ok()?;
+        let start = history.iter().position(|change| change.from == client)?;
+        let mut out = Vec::new();
+        let mut expected = client;
+        for change in history.iter().skip(start) {
+            if change.from != expected {
+                return None;
+            }
+            out.push(change.old_soa.clone());
+            out.extend(change.deleted.iter().cloned());
+            out.push(change.new_soa.clone());
+            out.extend(change.added.iter().cloned());
+            expected = change.to;
+        }
+        (expected == current && out.len() <= MAX_HISTORY_RECORDS + 2).then_some(out)
+    }
 }
 
 #[async_trait]
@@ -415,7 +528,12 @@ impl ZoneHandler for ManagedZone {
         if self.inner.records().await.len() + updates.len() > MAX_RRSETS {
             return (Err(ResponseCode::Refused), None);
         }
+        let _turn = self.updating.lock().await;
+        let before = self.snapshot().await;
         let result = self.inner.update(request, now).await;
+        if matches!(result.0, Ok(true)) {
+            self.remember(&before, &self.snapshot().await);
+        }
         if matches!(result.0, Ok(true)) && !self.notify.is_empty() {
             let zone: Name = self.inner.origin().into();
             tokio::spawn(crate::notify::send(zone, self.notify.clone()));
@@ -438,7 +556,39 @@ impl ZoneHandler for ManagedZone {
         if !permitted {
             return Some((Err(LookupError::from(ResponseCode::Refused)), None));
         }
-        self.inner.zone_transfer(request, options, now).await
+        let (result, context) = self.inner.zone_transfer(request, options, now).await?;
+        let Ok(full) = result else {
+            return Some((result, context));
+        };
+        let is_ixfr = request
+            .request_info()
+            .is_ok_and(|info| info.query.query_type() == RecordType::IXFR);
+        // The client states the serial it has in an SOA record of the authority section.
+        let client = request.updates().iter().find_map(soa_serial);
+        let current = full.start_soa.iter().find_map(soa_serial);
+        let (true, Some(client), Some(current)) = (is_ixfr, client, current) else {
+            return Some((Ok(full), context));
+        };
+        if client == current {
+            // Nothing newer: the current SOA alone is the whole answer.
+            let answer = ZoneTransfer {
+                start_soa: full.start_soa,
+                records: AxfrRecords::from_records(Vec::new()),
+                end_soa: LookupRecords::Empty,
+            };
+            return Some((Ok(answer), context));
+        }
+        match self.differences(client, current) {
+            Some(records) => {
+                let answer = ZoneTransfer {
+                    start_soa: full.start_soa,
+                    records: AxfrRecords::from_records(records),
+                    end_soa: full.end_soa,
+                };
+                Some((Ok(answer), context))
+            }
+            None => Some((Ok(full), context)),
+        }
     }
 }
 

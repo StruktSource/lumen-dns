@@ -2218,6 +2218,18 @@ async fn dynamic_updates_and_zone_transfers_use_scoped_tsig_keys() {
     let a = |ip: &str| hickory_proto::rr::RData::A(A(ip.parse().unwrap()));
     let owner = "new.dyn.test.";
 
+    let serial_of = |message: &Message| {
+        message
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                hickory_proto::rr::RData::SOA(soa) => Some(soa.serial),
+                _ => None,
+            })
+            .expect("SOA in answer")
+    };
+    let first_serial = serial_of(&udp(bind, &query("dyn.test.", RecordType::SOA)).await);
+
     // Unsigned, wrongly signed, and out-of-scope updates change nothing.
     let unsigned = update_message("dyn.test.", owner, RecordType::A, a("192.0.2.77"))
         .to_vec()
@@ -2354,12 +2366,57 @@ async fn dynamic_updates_and_zone_transfers_use_scoped_tsig_keys() {
         transfer.answers.last().unwrap().record_type(),
         RecordType::SOA
     );
-    let mut ixfr = axfr("dyn.test.");
-    ixfr.queries[0].set_query_type(RecordType::IXFR);
-    assert_eq!(
-        signed(bind, ixfr, &xfr, true).await.metadata.response_code,
-        ResponseCode::NoError
+    // Incremental transfer: a client holding the first serial gets only the differences.
+    let ixfr_from = |serial: u32| {
+        let mut message = axfr("dyn.test.");
+        message.queries[0].set_query_type(RecordType::IXFR);
+        message.add_authority(Record::from_rdata(
+            Name::from_ascii("dyn.test.").unwrap(),
+            0,
+            hickory_proto::rr::RData::SOA(SOA::new(
+                Name::from_ascii("ns.dyn.test.").unwrap(),
+                Name::from_ascii("hostmaster.dyn.test.").unwrap(),
+                serial,
+                60,
+                60,
+                60,
+                1,
+            )),
+        ));
+        message
+    };
+    let current_serial = serial_of(&udp(bind, &query("dyn.test.", RecordType::SOA)).await);
+    assert!(current_serial != first_serial);
+    let owners_of = |message: &Message| -> Vec<String> {
+        message.answers.iter().map(|r| r.name.to_ascii()).collect()
+    };
+    let diff = signed(bind, ixfr_from(first_serial), &xfr, true).await;
+    assert_eq!(diff.metadata.response_code, ResponseCode::NoError);
+    let owners = owners_of(&diff);
+    assert!(owners.contains(&"new.dyn.test.".to_string()), "{owners:?}");
+    assert!(owners.contains(&"txt.dyn.test.".to_string()));
+    assert!(
+        !owners.contains(&"host.dyn.test.".to_string()),
+        "unchanged records are not resent"
     );
+    assert_eq!(
+        serial_of(&diff),
+        current_serial,
+        "starts with the current SOA"
+    );
+    assert_eq!(diff.answers[1].record_type(), RecordType::SOA);
+    match &diff.answers[1].data {
+        hickory_proto::rr::RData::SOA(soa) => assert_eq!(soa.serial, first_serial),
+        other => panic!("expected the old SOA, got {other:?}"),
+    }
+    assert_eq!(diff.answers.last().unwrap().record_type(), RecordType::SOA);
+    // Already current: the SOA alone.
+    let current = signed(bind, ixfr_from(current_serial), &xfr, true).await;
+    assert_eq!(current.answers.len(), 1);
+    assert_eq!(serial_of(&current), current_serial);
+    // A serial the server does not remember: the whole zone, which is always allowed.
+    let unknown = signed(bind, ixfr_from(first_serial.wrapping_add(9999)), &xfr, true).await;
+    assert!(owners_of(&unknown).contains(&"host.dyn.test.".to_string()));
     assert_eq!(
         signed(bind, axfr("static.test."), &xfr, true)
             .await
