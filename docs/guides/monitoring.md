@@ -60,6 +60,10 @@ All metrics use stable `lumen_dns_` names (and `lumen_filter_` for filtering) wi
 | `lumen_dns_recursive_hedged_total` | counter | Hedged extra recursions started |
 | `lumen_dns_warm_queries_total` | counter | Startup priming queries |
 | `lumen_dns_warm_failures_total` | counter | Failed priming queries |
+| `lumen_dns_trust_anchor_checks_total` | counter | Root DNSKEY checks for RFC 5011 rollover |
+| `lumen_dns_trust_anchor_changes_total` | counter | Checks that changed the trusted keys |
+| `lumen_dns_trust_anchor_failures_total` | counter | Failed checks or key sets no trusted key signed |
+| `lumen_dns_trust_anchor_restart_pending` | gauge | `1` when a restart will load changed trust anchors |
 | `lumen_dns_prefetch_refreshes_total` | counter | Expiry refreshes done |
 | `lumen_dns_prefetch_failures_total` | counter | Failed refreshes |
 | `lumen_dns_prefetch_skipped_total` | counter | Refreshes skipped |

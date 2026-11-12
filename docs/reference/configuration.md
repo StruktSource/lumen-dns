@@ -116,6 +116,7 @@ Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these a
 | `mode` | `"recursive"` | `"recursive"` or `"forward"`. Only one runs at a time |
 | `dnssec` | `true` | Both modes validate locally by default |
 | `root_hints` | Bundled InterNIC hints | Optional BIND-format file. Recursive mode only. 64 KiB, 1 to 64 IP records, directives disabled |
+| `trust_anchor_state` | off | Path of the RFC 5011 trust-anchor state file. Setting it turns on automatic root key rollover. See [DNSSEC and trust](dnssec-and-trust.md#automatic-rollover-rfc-5011) |
 | `trust_anchor` | Hickory's bundled root DNSKEYs | Optional DNSKEY-format file. 64 KiB, at least one key. DNSSEC must be enabled |
 | `upstream_ca` | Public WebPKI roots | Optional PEM CA bundle (1 MiB). Replaces the public roots for encrypted forwarding |
 | `upstreams` | `[]` | Up to 8 custom endpoints, which rank after any providers. In forward mode you need at least one provider or upstream. Rejected in recursive mode |

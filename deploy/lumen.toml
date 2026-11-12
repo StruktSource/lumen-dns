@@ -60,6 +60,7 @@ diagnostics = false
 # Optional overrides: BIND-format root hints and DNSKEY-format trust anchors.
 # root_hints = "root.hints"
 # trust_anchor = "root.key"
+# trust_anchor_state = "anchors.state"   # RFC 5011 automatic root key rollover
 
 # Prime the root and common top-level zones once at startup so the first lookups skip the
 # slowest delegation and DNSSEC-key fetches. Queries name only these zones, never clients.

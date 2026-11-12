@@ -140,7 +140,7 @@ Principles that shape every decision:
 - [x] Optional **persistent DNS cache**: separate SQLite file, off by default, entry, byte and TTL caps, corrupt-file recovery, no client data (0.7.0)
 - [x] Certificate renewal without restart: renewed PEM pairs are verified and swapped in, with an expiry metric (0.7.0 line). Lumen still does not fetch certificates itself
 - [ ] Built-in certificate automation (ACME issuance and renewal)
-- [ ] Automatic trust-anchor rollover (RFC 5011 with persistent state and hold-down timers)
+- [x] Automatic trust-anchor rollover (RFC 5011): persistent state, 30-day hold-down, revocation, daily signed check. Opt-in with `trust_anchor_state`. Changes apply at the next restart; not yet run across a real root KSK rollover
 - [x] Authoritative DNS zones and operator-managed records from zone files or inline text, separate from Lumen's built-in empty local zones. Unsigned; see the DNSSEC signing item
 - [x] **Split-horizon views** by client network, **conditional forwarding**, and DNS-SD as ordinary records. mDNS bridging is not built
 - [x] Dynamic DNS updates (RFC 2136) with TSIG authentication, per-key name and type scope, a SQLite journal, and bounded size

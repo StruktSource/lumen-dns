@@ -89,6 +89,7 @@ diagnostics = false
 # Optional overrides: BIND-format root hints and DNSKEY-format trust anchors.
 # root_hints = "root.hints"
 # trust_anchor = "root.key"
+# trust_anchor_state = "anchors.state"   # RFC 5011 automatic root key rollover
 
 # Optional RFC 8767 stale answers. Off by default. Expired DNSSEC-authenticated data is not served.
 # [resolver.serve_stale]

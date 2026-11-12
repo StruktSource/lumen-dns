@@ -101,6 +101,7 @@ pub struct Resolver {
     /// Origins of operator zones and conditional forwarders. They bypass the response caches and
     /// the built-in local-zone answers, because their answers depend on the client and change.
     custom: Vec<LowerName>,
+    rollover: Option<rollover::Tracker>,
     metrics: Arc<Metrics>,
     background: Option<Background>,
     local_zones: bool,
@@ -148,6 +149,10 @@ pub struct Metrics {
     latency_sum_micros: AtomicU64,
     background_latency: [AtomicU64; 11],
     background_latency_sum_micros: AtomicU64,
+    anchor_checks: AtomicU64,
+    anchor_changes: AtomicU64,
+    anchor_failures: AtomicU64,
+    anchor_restart_pending: AtomicBool,
 }
 
 impl Metrics {
@@ -247,6 +252,21 @@ impl Metrics {
                 "Startup priming queries without an answer.",
                 &self.warm_failures,
             ),
+            (
+                "trust_anchor_checks_total",
+                "Root DNSKEY checks for RFC 5011 trust-anchor rollover.",
+                &self.anchor_checks,
+            ),
+            (
+                "trust_anchor_changes_total",
+                "Checks that changed the set of trusted keys.",
+                &self.anchor_changes,
+            ),
+            (
+                "trust_anchor_failures_total",
+                "Checks that failed or whose key set no trusted key signed.",
+                &self.anchor_failures,
+            ),
         ] {
             let _ = writeln!(
                 text,
@@ -254,6 +274,11 @@ impl Metrics {
                 value.load(Ordering::Relaxed)
             );
         }
+        let _ = writeln!(
+            text,
+            "# HELP lumen_dns_trust_anchor_restart_pending 1 when the trusted keys changed and a restart will load them.\n# TYPE lumen_dns_trust_anchor_restart_pending gauge\nlumen_dns_trust_anchor_restart_pending {}",
+            u8::from(self.anchor_restart_pending.load(Ordering::Relaxed))
+        );
         self.render_diagnostics(&mut text);
         render_histogram(
             &mut text,
@@ -515,6 +540,13 @@ impl Resolver {
                 Ok::<_, String>(Arc::new(anchors))
             })
             .transpose()?;
+        let (anchors, rollover) = match &settings.trust_anchor_state {
+            Some(path) => {
+                let (tracker, loaded) = rollover::startup(path, anchors.as_deref(), persist)?;
+                (Some(Arc::new(loaded)), Some(tracker))
+            }
+            None => (anchors, None),
+        };
         let mut options = ResolverOpts::default();
         options.validate = settings.dnssec;
         options.cache_size = u64::from(settings.cache_entries);
@@ -549,6 +581,7 @@ impl Resolver {
             catalog,
             cache,
             custom,
+            rollover,
             metrics,
             background,
             local_zones: settings.local_zones,

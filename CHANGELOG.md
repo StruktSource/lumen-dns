@@ -4,6 +4,10 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ## [Unreleased]
 
+### Added
+
+- **Automatic trust-anchor rollover (RFC 5011), opt-in.** `resolver.trust_anchor_state` keeps trust-anchor state in a `0600` file. Lumen checks the signed root DNSKEY set daily, trusts a new key after 30 days, drops revoked keys, and exports `lumen_dns_trust_anchor_*` metrics. Changes load at the next restart. See [DNSSEC and trust](docs/reference/dnssec-and-trust.md#automatic-rollover-rfc-5011).
+
 ## [0.7.0] - 2026-11-12
 
 ### Added

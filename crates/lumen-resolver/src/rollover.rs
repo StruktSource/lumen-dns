@@ -6,16 +6,24 @@
 //! hold-down and is never trusted again. Only an apex key set that a currently trusted key signed
 //! may change anything, and the caller states that with `validated`.
 
-#![allow(dead_code)] // Wired in by the updater step; remove then.
-
+use crate::{Protocol, Resolver};
 use hickory_server::proto::{
     dnssec::{
-        PublicKey, Verifier,
+        Algorithm, PublicKey, PublicKeyBuf, TrustAnchors, Verifier,
         rdata::{DNSKEY, DNSSECRData, RRSIG},
     },
+    op::{Edns, Message, Query as DnsQuery, ResponseCode},
     rr::{DNSClass, Name, RData, Record, RecordType},
 };
-use std::fmt::Write as _;
+use lumen_config::read_bounded;
+use lumen_proto::Query;
+use std::{
+    fmt::Write as _,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, atomic::Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// Seconds a new key must stay visible before it is trusted (30 days, RFC 5011 section 2.3).
 pub const ADD_HOLD_DOWN: u64 = 30 * 24 * 3600;
@@ -79,6 +87,7 @@ impl Anchors {
         anchors
     }
 
+    #[cfg(test)]
     pub fn tracked(&self) -> &[Tracked] {
         &self.keys
     }
@@ -214,6 +223,173 @@ impl Anchors {
             });
         }
         Ok(Self { keys })
+    }
+}
+
+/// What the running resolver tracks: the state, where it is saved, and the keys it started with.
+pub(crate) struct Tracker {
+    path: PathBuf,
+    persist: bool,
+    state: Mutex<Anchors>,
+    applied: Vec<(u8, Vec<u8>)>,
+}
+
+fn keys_of(anchors: &TrustAnchors) -> Vec<(u8, Vec<u8>)> {
+    (0..anchors.len())
+        .filter_map(|index| anchors.get(index))
+        .map(|key| (u8::from(key.algorithm()), key.public_bytes().to_vec()))
+        .collect()
+}
+
+/// Load the saved state, or start from the configured (or built-in root) anchors. Returns the
+/// tracker and the anchors the resolvers are built with.
+pub(crate) fn startup(
+    path: &Path,
+    configured: Option<&TrustAnchors>,
+    persist: bool,
+) -> Result<(Tracker, TrustAnchors), String> {
+    let anchors = match std::fs::symlink_metadata(path) {
+        Ok(_) => {
+            let bytes = read_bounded(path, 65536)?;
+            let text =
+                std::str::from_utf8(&bytes).map_err(|_| "trust anchor state must be UTF-8")?;
+            Anchors::from_text(text)?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let base = configured.map_or_else(|| keys_of(&TrustAnchors::default()), keys_of);
+            Anchors::seeded(base)
+        }
+        Err(_) => return Err("cannot read trust anchor state".into()),
+    };
+    let trusted = anchors.trusted();
+    if trusted.is_empty() {
+        return Err("trust anchor state has no trusted key".into());
+    }
+    let mut built = TrustAnchors::empty();
+    for (algorithm, key) in &trusted {
+        built.insert(&PublicKeyBuf::new(
+            key.clone(),
+            Algorithm::from_u8(*algorithm),
+        ));
+    }
+    let tracker = Tracker {
+        path: path.to_owned(),
+        persist,
+        state: Mutex::new(anchors),
+        applied: trusted,
+    };
+    if persist && !path.exists() {
+        tracker.save()?;
+    }
+    Ok((tracker, built))
+}
+
+impl Tracker {
+    fn save(&self) -> Result<(), String> {
+        let text = self
+            .state
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .to_text();
+        write_private(&self.path, text.as_bytes())
+    }
+}
+
+/// Replace `path` atomically with a mode `0600` file.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|_| "cannot write trust anchor state")?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| "cannot write trust anchor state")?;
+    std::fs::rename(&temporary, path).map_err(|_| "cannot save trust anchor state".to_string())
+}
+
+impl Resolver {
+    /// Fetch the root DNSKEY set once and apply RFC 5011. Does nothing without
+    /// `trust_anchor_state`. Returns true when the trusted keys changed.
+    ///
+    /// Keys added or removed take effect for validation at the next start: the resolvers hold
+    /// their anchors from startup. `lumen_dns_trust_anchor_restart_pending` says when to restart.
+    ///
+    /// # Errors
+    /// A non-sensitive message when the lookup or the state file fails.
+    pub async fn refresh_trust_anchors(self: &Arc<Self>) -> Result<bool, String> {
+        let Some(tracker) = &self.rollover else {
+            return Ok(false);
+        };
+        let metrics = &self.metrics;
+        metrics.anchor_checks.fetch_add(1, Ordering::Relaxed);
+        let result = self.check_anchors(tracker).await;
+        if result.is_err() {
+            metrics.anchor_failures.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    async fn check_anchors(self: &Arc<Self>, tracker: &Tracker) -> Result<bool, String> {
+        let mut message = Message::query();
+        message.add_query(DnsQuery::query(Name::root(), RecordType::DNSKEY));
+        let mut edns = Edns::new();
+        edns.set_dnssec_ok(true);
+        edns.set_max_payload(1232);
+        message.edns = Some(edns);
+        let packet = message.to_vec().map_err(|_| "cannot encode DNSKEY query")?;
+        let query = Query::parse(&packet).map_err(|_| "cannot build DNSKEY query")?;
+        let peer = SocketAddr::from(([127, 0, 0, 1], 0));
+        let reply = self
+            .answer(&query, peer, Protocol::Tcp, usize::from(u16::MAX))
+            .await?;
+        let reply = Message::from_vec(&reply).map_err(|_| "unreadable DNSKEY answer")?;
+        if reply.metadata.response_code != ResponseCode::NoError {
+            return Err("root DNSKEY lookup failed".into());
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "clock before 1970")?
+            .as_secs();
+        let trusted = tracker
+            .state
+            .lock()
+            .map_err(|_| "state lock poisoned")?
+            .trusted();
+        let (seen, validated) = evaluate(
+            &trusted,
+            &Name::root(),
+            &reply.answers,
+            u32::try_from(now).unwrap_or(u32::MAX),
+        );
+        if !validated {
+            return Err("root DNSKEY set not signed by a trusted key".into());
+        }
+        let (changed, current) = {
+            let mut state = tracker.state.lock().map_err(|_| "state lock poisoned")?;
+            let changed = state.observe(now, &seen, true);
+            (changed, state.trusted())
+        };
+        if tracker.persist {
+            tracker.save()?;
+        }
+        if changed {
+            self.metrics.anchor_changes.fetch_add(1, Ordering::Relaxed);
+            eprintln!("trust anchors changed under RFC 5011; restart to apply");
+        }
+        self.metrics
+            .anchor_restart_pending
+            .store(current != tracker.applied, Ordering::Relaxed);
+        Ok(changed)
     }
 }
 
@@ -393,6 +569,51 @@ mod tests {
         let mut anchors = Anchors::seeded([(8, vec![1; 4])]);
         anchors.observe(0, &[seen(1, false), seen(3, true)], true);
         assert_eq!(anchors.tracked().len(), 1);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("lumen-rollover-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("anchors.state")
+    }
+
+    #[test]
+    fn startup_seeds_from_the_root_anchors_and_saves_a_private_file() {
+        let path = scratch("seed");
+        let (_tracker, anchors) = startup(&path, None, true).unwrap();
+        assert!(anchors.len() >= 2);
+        let saved = Anchors::from_text(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved.trusted().len(), anchors.len());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        // Check mode never writes.
+        let path = scratch("check");
+        startup(&path, None, false).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn startup_trusts_only_validated_keys_from_the_saved_state() {
+        let path = scratch("state");
+        let text =
+            "valid 13 0 0102\naddpend 13 100 0304\nrevoked 13 100 0506\nmissing 13 50 0708\n";
+        std::fs::write(&path, text).unwrap();
+        let (tracker, anchors) = startup(&path, None, true).unwrap();
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(tracker.applied.len(), 2);
+        // A state with nothing trusted, or garbage, refuses to start.
+        std::fs::write(&path, "revoked 13 100 0506\n").unwrap();
+        assert!(startup(&path, None, true).is_err());
+        std::fs::write(&path, "nonsense").unwrap();
+        assert!(startup(&path, None, true).is_err());
     }
 
     #[test]

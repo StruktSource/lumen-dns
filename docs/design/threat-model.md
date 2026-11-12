@@ -91,7 +91,7 @@ The management API uses bearer tokens, scoped roles, audit, and rate limits. It 
 
 - **Memory.** Caches have entry and TTL bounds, not a contractual memory ceiling. Transient cache maintenance and protocol libraries use extra memory, and rate-limit state holds IP addresses only in transient bounded memory. Apply OS or container limits for hard isolation.
 - **Denial of service.** Tests exercise overload and timeout paths but do not establish resistance to every strategy.
-- **DNSSEC.** It authenticates signed data only. Unsigned zones can legitimately validate as insecure. Static root anchors need reviewed updates, because automatic RFC 5011 rollover is not implemented.
+- **DNSSEC.** It authenticates signed data only. Unsigned zones can legitimately validate as insecure. Root anchors are static unless you opt in to `trust_anchor_state`; then Lumen follows RFC 5011 rollover, applies changes at restart, and trusts only keys a current anchor signed.
 - **Hickory.** Its recursive implementation is upstream-experimental. External review, broader conformance, and extended soak testing remain stable-release gates. Fuzz smoke tests and a clean dependency audit are useful checks, not proof of security.
 - **Supply chain.** GitHub Actions and third-party actions are part of the release trust boundary. Actions are pinned to reviewed commit IDs, but updates still need review. Artifact provenance records a build, and it does not make a compromised build safe.
 - **Kubernetes.** Probes and Kind smoke tests do not prove CNI source-IP preservation, public-recursion safety, or real platform isolation.

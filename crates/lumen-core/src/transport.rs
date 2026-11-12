@@ -292,6 +292,19 @@ impl RunningServer {
         });
         // Every bind succeeded; only now may priming and refresh touch the network.
         service.resolver.start_background();
+        if config.resolver.trust_anchor_state.is_some() {
+            let resolver = Arc::clone(&service.resolver);
+            tasks.spawn(async move {
+                // RFC 5011 asks for a check at least every 15 days. Daily is cheap: one query.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                loop {
+                    if let Err(error) = resolver.refresh_trust_anchors().await {
+                        eprintln!("trust anchor check failed: {error}");
+                    }
+                    tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+                }
+            });
+        }
         if let Some(listener) = metrics_listener {
             tasks.spawn(serve_metrics(listener, Arc::clone(&service)));
         }

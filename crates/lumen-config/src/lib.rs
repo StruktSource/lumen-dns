@@ -392,6 +392,8 @@ pub struct Resolver {
     pub dnssec: bool,
     pub root_hints: Option<PathBuf>,
     pub trust_anchor: Option<PathBuf>,
+    /// File that keeps RFC 5011 trust-anchor state. Setting it turns automatic rollover on.
+    pub trust_anchor_state: Option<PathBuf>,
     pub upstream_ca: Option<PathBuf>,
     pub upstreams: Vec<Upstream>,
     pub providers: Vec<ProviderSelection>,
@@ -437,6 +439,7 @@ impl Default for Resolver {
             dnssec: true,
             root_hints: None,
             trust_anchor: None,
+            trust_anchor_state: None,
             upstream_ca: None,
             upstreams: vec![],
             providers: vec![],
@@ -732,6 +735,7 @@ impl Config {
             &mut config.listen.private_key,
             &mut config.resolver.root_hints,
             &mut config.resolver.trust_anchor,
+            &mut config.resolver.trust_anchor_state,
             &mut config.resolver.upstream_ca,
             &mut config.resolver.persistent_cache.path,
             &mut config.dnscrypt.key_file,
@@ -1232,6 +1236,9 @@ impl Config {
         if !r.dnssec && r.trust_anchor.is_some() {
             return Err("trust_anchor requires DNSSEC validation".into());
         }
+        if !r.dnssec && r.trust_anchor_state.is_some() {
+            return Err("trust_anchor_state requires DNSSEC validation".into());
+        }
         self.validate_fallback()?;
         self.validate_acceleration()?;
         if r.mode == Mode::Recursive {
@@ -1517,6 +1524,17 @@ pub fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trust_anchor_state_needs_dnssec_validation() {
+        let mut config = Config::default();
+        config.resolver.trust_anchor_state = Some("anchors.state".into());
+        config.resolver.dnssec = false;
+        assert_eq!(
+            config.validate_resolver().unwrap_err(),
+            "trust_anchor_state requires DNSSEC validation"
+        );
+    }
 
     #[test]
     fn version_and_unknown_fields_fail_closed() {
