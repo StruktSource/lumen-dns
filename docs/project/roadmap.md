@@ -148,7 +148,7 @@ Principles that shape every decision:
 - [ ] DNSSEC zone signing and safe key lifecycle for Lumen-hosted authoritative zones
 - [x] Native DoH over HTTP/3 listener (`listen.doh3`), same `/dns-query` contract as HTTP/2 DoH. Client-side DoH3 to upstream providers is not built, and Lumen does not advertise HTTP/3 itself
 - [x] DNSCrypt v2 **server** (UDP and TCP, both cipher suites, signed rotating certificates). Still open: DNSCrypt as an upstream transport, Anonymized DNSCrypt relays, and interop testing against `dnscrypt-proxy` releases
-- [ ] HTTPS and SVCB record interoperability, including preserving ECH configuration from authoritative answer to browser ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36))
+- [ ] HTTPS and SVCB record interoperability, including preserving ECH configuration from authoritative answer to browser ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36)). Started: an end-to-end test proves an HTTPS record with `alpn` and `ech` from an operator zone arrives byte-identical, live and repeated. Still open: the same proof for forwarded, recursive, cached, and DNSSEC-signed answers
 - [ ] Optional native ECH for Lumen's own TLS connections and encrypted DNS listeners where the TLS stack supports it ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36))
 - [x] Regular-expression blocking with explicit syntax, compile limits, linear-time matching, and explainable matches (0.7.0)
 - [x] CNAME-based tracker blocking that inspects upstream answer chains without bypassing DNSSEC or response bounds (0.7.0)

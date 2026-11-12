@@ -2447,3 +2447,50 @@ async fn renewed_certificates_replace_the_served_pair_without_a_restart() {
     assert!(metrics.contains("lumen_dns_certificate_reload_failures_total 2"));
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn https_records_keep_their_ech_configuration_end_to_end() {
+    use hickory_proto::rr::{
+        RData,
+        rdata::svcb::{SvcParamKey, SvcParamValue},
+    };
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    // base64 of the bytes 00 07 fe 0d 01 02 03, a minimal ECHConfigList shape.
+    let ech = [0u8, 7, 0xfe, 0x0d, 1, 2, 3];
+    let mut text = zone_text("svc.test", "192.0.2.1");
+    text.push_str("svc.test. 60 IN HTTPS 1 Pool.SVC.test. alpn=h2,h3 ech=AAf+DQECAw==\n");
+    cfg.zones = vec![lumen_config::Zone {
+        name: "svc.test".into(),
+        text: Some(text),
+        ..Default::default()
+    }];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    // The first answer is built live and the second is repeated, which is where
+    // a cache or a name rewrite could alter the record.
+    for _ in 0..2 {
+        let reply = udp(bind, &query("svc.test.", RecordType::HTTPS)).await;
+        assert!(reply.metadata.authoritative);
+        let svcb = reply
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                RData::HTTPS(value) => Some(&value.0),
+                _ => None,
+            })
+            .expect("HTTPS answer");
+        assert_eq!(svcb.target_name.to_ascii(), "pool.svc.test.");
+        let has_ech = svcb.svc_params.iter().any(|(key, value)| {
+            *key == SvcParamKey::EchConfigList
+                && matches!(value, SvcParamValue::EchConfigList(list) if list.0 == ech)
+        });
+        assert!(has_ech, "ECH configuration was altered: {svcb:?}");
+        assert!(
+            svcb.svc_params
+                .iter()
+                .any(|(key, _)| *key == SvcParamKey::Alpn)
+        );
+    }
+    server.shutdown().await;
+}
