@@ -2494,3 +2494,110 @@ async fn https_records_keep_their_ech_configuration_end_to_end() {
     }
     server.shutdown().await;
 }
+
+fn dnssec_query(name: &str, kind: RecordType) -> Vec<u8> {
+    let mut query = Message::query();
+    query.metadata.id = 4321;
+    query.metadata.recursion_desired = true;
+    query.add_query(Query::query(Name::from_ascii(name).unwrap(), kind));
+    let mut edns = hickory_proto::op::Edns::new();
+    edns.set_dnssec_ok(true);
+    edns.set_max_payload(1232);
+    query.edns = Some(edns);
+    query.to_vec().unwrap()
+}
+
+#[tokio::test]
+async fn signed_zones_serve_verifiable_signatures_and_proofs_of_absence() {
+    use hickory_proto::dnssec::{Verifier, rdata::DNSSECRData};
+    use hickory_proto::rr::{DNSClass, RData};
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let dir = std::env::temp_dir().join(format!("lumen-signed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_file = dir.join("zone.pem");
+    let description = lumen_resolver::zone_key(
+        &key_file,
+        "signed.test",
+        lumen_config::SigningAlgorithm::Ed25519,
+    )
+    .unwrap();
+    assert!(description.contains("IN DS "));
+    let mut cfg = config(upstream.address, bind);
+    cfg.zones = vec![lumen_config::Zone {
+        name: "signed.test".into(),
+        text: Some(zone_text("signed.test", "192.0.2.1")),
+        dnssec: Some(lumen_config::ZoneSigning {
+            key_file,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+
+    // The zone's own DNSKEY, then a signature over the A set that it must verify.
+    let keys = udp(bind, &dnssec_query("signed.test.", RecordType::DNSKEY)).await;
+    let dnskey = keys
+        .answers
+        .iter()
+        .find_map(|record| match &record.data {
+            RData::DNSSEC(DNSSECRData::DNSKEY(key)) => Some(key.clone()),
+            _ => None,
+        })
+        .expect("DNSKEY served");
+    let reply = udp(bind, &dnssec_query("host.signed.test.", RecordType::A)).await;
+    assert!(reply.metadata.authoritative);
+    let set: Vec<_> = reply
+        .answers
+        .iter()
+        .filter(|record| record.record_type() == RecordType::A)
+        .collect();
+    let sig = reply
+        .answers
+        .iter()
+        .find_map(|record| match &record.data {
+            RData::DNSSEC(DNSSECRData::RRSIG(sig)) => Some(sig.clone()),
+            _ => None,
+        })
+        .expect("RRSIG with the answer");
+    assert_eq!(sig.input().key_tag, dnskey.calculate_key_tag().unwrap());
+    dnskey
+        .verify_rrsig(
+            &Name::from_ascii("host.signed.test.").unwrap(),
+            DNSClass::IN,
+            &sig,
+            set.iter().copied(),
+        )
+        .expect("signature verifies against the zone key");
+
+    // A name that does not exist comes with NSEC and its signature.
+    let missing = udp(bind, &dnssec_query("nope.signed.test.", RecordType::A)).await;
+    assert_eq!(
+        missing.metadata.response_code,
+        hickory_proto::op::ResponseCode::NXDomain
+    );
+    assert!(
+        missing
+            .authorities
+            .iter()
+            .any(|r| r.record_type() == RecordType::NSEC)
+    );
+    assert!(
+        missing
+            .authorities
+            .iter()
+            .any(|r| r.record_type() == RecordType::RRSIG)
+    );
+
+    // A client that did not ask for DNSSEC data gets none.
+    let plain = udp(bind, &query("host.signed.test.", RecordType::A)).await;
+    assert!(
+        plain
+            .answers
+            .iter()
+            .all(|r| r.record_type() != RecordType::RRSIG)
+    );
+    server.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

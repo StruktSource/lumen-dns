@@ -11,11 +11,12 @@ Lumen 0.7.0 adds optional stale answers, a persistent cache, stronger filtering,
 - **DoH over HTTP/3 and DNSCrypt v2.** `listen.doh3` serves `/dns-query` over QUIC. `[dnscrypt]` serves encrypted queries over UDP and TCP with rotating signed certificates.
 - **Your own DNS zones.** `[[zones]]` serves records from zone files, with split-horizon `views` and `[[forwarders]]` for conditional forwarding. See [Your own DNS zones](docs/guides/authoritative-dns.md).
 - **Dynamic updates and zone transfers.** TSIG-signed RFC 2136 updates scoped per key to names and types, saved to a SQLite journal, and TSIG-protected AXFR/IXFR over TCP. IXFR is answered as a full transfer, and NOTIFY is not sent.
+- **DNSSEC for your own zones and automatic root key rollover.** `[zones.dnssec]` signs a plain zone (Ed25519 or ECDSA P-256, NSEC), and `lumen --zone-key` creates the key and prints the `DS` record. `resolver.trust_anchor_state` follows RFC 5011 root key rollovers, applied at restart.
 - **Certificate renewal without restart.** Renewed DoT, DoH, DoH3, and DoQ certificates are picked up within 30 seconds; a bad file keeps the old pair serving.
 
 ## Not in this release
 
-Zone signing, built-in ACME issuance, RFC 5011 trust-anchor rollover, native ECH, DHCP, DNSCrypt or DoH3 upstreams, and Anonymized DNSCrypt. DNSCrypt has not been tested against a third-party client.
+Zone key rollover and NSEC3, built-in ACME issuance, native ECH, DHCP, DNSCrypt or DoH3 upstreams, and Anonymized DNSCrypt. DNSCrypt has not been tested against a third-party client.
 
 ## Check the download
 

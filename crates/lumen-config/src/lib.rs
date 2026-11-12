@@ -59,6 +59,39 @@ pub struct Zone {
     /// Names of `tsig_keys` that may transfer this zone (AXFR and IXFR, over TCP). Empty refuses
     /// every transfer.
     pub transfer_keys: Vec<String>,
+    /// Sign this zone with DNSSEC. Only plain zones: no views, journal, or transfers.
+    pub dnssec: Option<ZoneSigning>,
+}
+
+/// DNSSEC algorithms Lumen can sign with.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SigningAlgorithm {
+    #[default]
+    Ed25519,
+    Ecdsap256sha256,
+}
+
+/// How Lumen signs one zone: a single combined signing key, NSEC denial of existence, and
+/// signatures that are renewed every day.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ZoneSigning {
+    /// PKCS#8 PEM private key. Create one with `lumen --zone-key FILE --zone NAME`.
+    pub key_file: PathBuf,
+    pub algorithm: SigningAlgorithm,
+    /// How long each signature stays valid, in days (2 to 90).
+    pub signature_days: u16,
+}
+
+impl Default for ZoneSigning {
+    fn default() -> Self {
+        Self {
+            key_file: PathBuf::new(),
+            algorithm: SigningAlgorithm::default(),
+            signature_days: 14,
+        }
+    }
 }
 
 /// What one TSIG key may change in a dynamic zone.
@@ -752,6 +785,11 @@ impl Config {
             }
         }
         for zone in &mut config.zones {
+            if let Some(signing) = &mut zone.dnssec
+                && signing.key_file.is_relative()
+            {
+                signing.key_file = base.join(&signing.key_file);
+            }
             for path in std::iter::once(&mut zone.file)
                 .chain(std::iter::once(&mut zone.journal))
                 .chain(zone.views.iter_mut().map(|view| &mut view.file))
@@ -1003,6 +1041,19 @@ impl Config {
             let known = |name: &str| names.contains(&name.to_ascii_lowercase());
             if zone.transfer_keys.len() > 8 || !zone.transfer_keys.iter().all(|key| known(key)) {
                 return Err("transfer_keys must name at most 8 configured tsig_keys".into());
+            }
+            if let Some(signing) = &zone.dnssec {
+                if signing.key_file.as_os_str().is_empty()
+                    || !(2..=90).contains(&signing.signature_days)
+                {
+                    return Err("zone dnssec needs a key_file and 2..=90 signature_days".into());
+                }
+                if zone.journal.is_some()
+                    || !zone.views.is_empty()
+                    || !zone.transfer_keys.is_empty()
+                {
+                    return Err("a signed zone cannot have views, a journal, or transfers".into());
+                }
             }
             if zone.journal.is_some() {
                 if zone.file.is_none() || !zone.views.is_empty() || zone.update_rules.is_empty() {
@@ -1524,6 +1575,50 @@ pub fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_zones_are_plain_and_bounded() {
+        let ok = |signing: ZoneSigning, journal: bool| {
+            let config = Config {
+                zones: vec![Zone {
+                    name: "a.test".into(),
+                    text: Some("x".into()),
+                    journal: journal.then(|| "j".into()),
+                    dnssec: Some(signing),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            config.validate_zones()
+        };
+        let signing = ZoneSigning {
+            key_file: "k.pem".into(),
+            ..Default::default()
+        };
+        assert!(ok(signing.clone(), false).is_ok());
+        assert!(
+            ok(
+                ZoneSigning {
+                    signature_days: 1,
+                    ..signing.clone()
+                },
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            ok(
+                ZoneSigning {
+                    signature_days: 91,
+                    ..signing.clone()
+                },
+                false
+            )
+            .is_err()
+        );
+        assert!(ok(ZoneSigning::default(), false).is_err());
+        assert!(ok(signing, true).is_err());
+    }
 
     #[test]
     fn trust_anchor_state_needs_dnssec_validation() {

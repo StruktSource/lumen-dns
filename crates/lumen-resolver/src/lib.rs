@@ -28,9 +28,10 @@ use hickory_server::{
         recursor::{DnssecConfig, DnssecPolicy, Recursor, RecursorOptions},
     },
     server::{Request, RequestHandler, RequestInfo, ResponseHandler, ResponseInfo},
+    store::in_memory::InMemoryZoneHandler,
     zone_handler::{
-        AuthLookup, AxfrPolicy, Catalog, LookupControlFlow, LookupError, LookupOptions,
-        MessageResponse, Nsec3QueryInfo, ZoneHandler, ZoneType,
+        AuthLookup, AxfrPolicy, Catalog, DnssecZoneHandler, LookupControlFlow, LookupError,
+        LookupOptions, MessageResponse, Nsec3QueryInfo, ZoneHandler, ZoneType,
     },
 };
 use lumen_config::{Config, ForwardStrategy, Mode, UpstreamProtocol, read_bounded};
@@ -51,6 +52,8 @@ mod accel;
 mod cache;
 mod forward;
 mod rollover;
+mod signing;
+pub use signing::zone_key;
 mod zones;
 
 pub use hickory_server::net::xfer::Protocol as Transport;
@@ -102,6 +105,8 @@ pub struct Resolver {
     /// the built-in local-zone answers, because their answers depend on the client and change.
     custom: Vec<LowerName>,
     rollover: Option<rollover::Tracker>,
+    signed: Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
+    resigners: Resigners,
     metrics: Arc<Metrics>,
     background: Option<Background>,
     local_zones: bool,
@@ -502,6 +507,43 @@ fn empty_zone_response(query: &Query, zone: &Name) -> Message {
     response
 }
 
+/// Signature renewal tasks for signed operator zones. Dropping the resolver stops them.
+#[derive(Default)]
+struct Resigners(std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>);
+
+impl Resigners {
+    fn start(&self, zones: &[Arc<InMemoryZoneHandler<TokioRuntimeProvider>>]) {
+        let Ok(mut tasks) = self.0.lock() else {
+            return;
+        };
+        if !tasks.is_empty() {
+            return;
+        }
+        for zone in zones {
+            let zone = Arc::clone(zone);
+            tasks.push(tokio::spawn(async move {
+                // Signatures last days; renewing daily leaves a long margin for failures.
+                loop {
+                    tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+                    if DnssecZoneHandler::secure_zone(&*zone).await.is_err() {
+                        eprintln!("zone signature renewal failed; keeping current signatures");
+                    }
+                }
+            }));
+        }
+    }
+}
+
+impl Drop for Resigners {
+    fn drop(&mut self) {
+        if let Ok(tasks) = self.0.lock() {
+            for task in tasks.iter() {
+                task.abort();
+            }
+        }
+    }
+}
+
 impl Resolver {
     /// Build the selected mode and trust anchors before opening listeners.
     ///
@@ -570,7 +612,8 @@ impl Resolver {
         };
         let mut catalog = Catalog::new();
         catalog.upsert(Name::root().into(), vec![handler]);
-        let custom_handlers = zones::build(config, &options, persist)?.handlers;
+        let built = zones::build(config, &options, persist)?;
+        let (custom_handlers, signed) = (built.handlers, built.resign);
         let custom: Vec<LowerName> = custom_handlers
             .iter()
             .map(|handler| handler.origin().clone())
@@ -582,6 +625,8 @@ impl Resolver {
             cache,
             custom,
             rollover,
+            signed,
+            resigners: Resigners::default(),
             metrics,
             background,
             local_zones: settings.local_zones,
@@ -591,6 +636,7 @@ impl Resolver {
     /// Begin optional priming and refresh. Call once, after every listener is bound;
     /// dropping the resolver stops them. Does nothing when both are disabled.
     pub fn start_background(&self) {
+        self.resigners.start(&self.signed);
         if let Some(background) = &self.background {
             (background.start)();
         }

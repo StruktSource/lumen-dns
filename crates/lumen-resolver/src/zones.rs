@@ -32,6 +32,8 @@ use std::{net::IpAddr, sync::Arc, time::Duration};
 /// Handlers to install, with each origin so callers can skip response caches for them.
 pub(crate) struct Built {
     pub handlers: Vec<Arc<dyn ZoneHandler>>,
+    /// Signed zones, which need their signatures renewed on a schedule.
+    pub resign: Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
 }
 
 /// Build every configured zone and conditional forwarder.
@@ -49,13 +51,14 @@ pub(crate) fn build(
         .map(|key| Ok((key.name.to_ascii_lowercase(), load_signer(key)?)))
         .collect::<Result<std::collections::HashMap<_, _>, String>>()?;
     let mut handlers = Vec::new();
+    let mut resign = Vec::new();
     for zone in &config.zones {
-        handlers.push(zone_handler(zone, &signers, persist)?);
+        handlers.push(zone_handler(zone, &signers, persist, &mut resign)?);
     }
     for forwarder in &config.forwarders {
         handlers.push(forwarder_handler(config, forwarder, options)?);
     }
-    Ok(Built { handlers })
+    Ok(Built { handlers, resign })
 }
 
 /// Install handlers for the longest-match routing the catalog provides.
@@ -94,11 +97,50 @@ fn static_zone(name: &str, source: &str) -> Result<Arc<dyn ZoneHandler>, String>
     Ok(Arc::new(handler))
 }
 
+/// A plain zone signed with one combined key and NSEC denial of existence. The caller renews the
+/// signatures by calling `secure_zone` again before they expire.
+fn signed_zone(
+    name: &str,
+    source: &str,
+    signing: &lumen_config::ZoneSigning,
+) -> Result<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>, String> {
+    let origin =
+        Name::from_ascii(format!("{name}.")).map_err(|_| format!("invalid zone name {name}"))?;
+    let (_, records) = Parser::new(source.to_owned(), None, Some(origin.clone()))
+        .parse()
+        .map_err(|_| format!("zone {name} is not valid zone data"))?;
+    let mut handler = InMemoryZoneHandler::<TokioRuntimeProvider>::new(
+        origin.clone(),
+        records,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        Some(NxProofKind::Nsec),
+    )
+    .map_err(|_| format!("zone {name} needs a SOA record at its apex"))?;
+    handler
+        .add_zone_signing_key_mut(crate::signing::signer(signing, &origin)?)
+        .map_err(|_| format!("cannot use the signing key for zone {name}"))?;
+    handler
+        .secure_zone_mut()
+        .map_err(|_| format!("cannot sign zone {name}"))?;
+    Ok(Arc::new(handler))
+}
+
 fn zone_handler(
     zone: &Zone,
     signers: &std::collections::HashMap<String, TSigner>,
     persist: bool,
+    resign: &mut Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
 ) -> Result<Arc<dyn ZoneHandler>, String> {
+    if let Some(signing) = &zone.dnssec {
+        let handler = signed_zone(
+            &zone.name,
+            &read_source(zone.file.as_ref(), zone.text.as_ref())?,
+            signing,
+        )?;
+        resign.push(Arc::clone(&handler));
+        return Ok(handler);
+    }
     if zone.journal.is_some() || !zone.transfer_keys.is_empty() {
         return managed_zone(zone, signers, persist);
     }

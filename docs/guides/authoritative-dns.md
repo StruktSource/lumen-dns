@@ -7,10 +7,11 @@ Lumen can answer for names you own, instead of asking the internet. This page co
 | [Authoritative zones](#authoritative-zones) | Serve `home.example` records (hosts, services, DNS-SD) from a zone file or inline text |
 | [Split-horizon views](#split-horizon-views) | Give different clients different answers for the same zone |
 | [Conditional forwarding](#conditional-forwarding) | Send one domain to a specific internal resolver |
+| [DNSSEC signing](#dnssec-signing) | Sign a plain zone so validating clients can verify it |
 | [Dynamic updates and transfers](#dynamic-updates-rfc-2136) | Let a router or DHCP server edit records (RFC 2136) and let a secondary server copy a zone (AXFR/IXFR), both with TSIG keys |
 
 > [!NOTE]
-> These zones are separate from Lumen's built-in empty local zones (`home.arpa`, `.local`, reverse zones). A zone you define always wins for its own names. Lumen does **not** sign these zones, so DNSSEC-validating clients treat them as unsigned.
+> These zones are separate from Lumen's built-in empty local zones (`home.arpa`, `.local`, reverse zones). A zone you define always wins for its own names. Zones are unsigned unless you turn on [DNSSEC signing](#dnssec-signing); then validating clients can verify them.
 
 Operator zones and forwarders are **never cached** by Lumen's response caches (see [Resolver modes](resolver-modes.md)). Answers depend on the client and change when records change, so each query reads the live zone.
 
@@ -90,6 +91,34 @@ upstreams = ["10.0.0.53:53", "10.0.0.54:53"]
 - 1 to 8 upstreams per domain, at most 64 forwarders. A domain cannot be both a zone and a forwarder. An upstream cannot be one of Lumen's own listeners.
 - Filtering rules still apply first. A name your filter blocks is never forwarded.
 - Names under the domain use only these resolvers, even when Lumen's main mode is recursive. They never fall back to the main resolver.
+
+## DNSSEC signing
+
+Sign a plain zone so that clients that validate DNSSEC can check its answers. It is **off by default** and works per zone.
+
+```sh
+lumen --zone-key zones/home.example.pem --zone home.example
+```
+
+This creates a private key (mode `0600`, never overwritten) and prints the zone's `DNSKEY` and `DS` records. Run it again to print them again. Add `--algorithm ecdsap256sha256` for ECDSA P-256 instead of the default Ed25519. Then turn signing on:
+
+```toml
+[[zones]]
+name = "home.example"
+file = "zones/home.example.zone"
+
+  [zones.dnssec]
+  key_file = "zones/home.example.pem"
+  # algorithm = "ed25519"        # or "ecdsap256sha256"
+  # signature_days = 14          # 2 to 90
+```
+
+- Give the **`DS` line to the operator of the parent zone** (your registrar, or your own parent zone). Until the parent publishes it, validators treat the zone as unsigned, which is safe. A public name needs this step. A private zone needs a trust anchor on each validating client instead.
+- Lumen uses one combined key for the zone and key-signing roles, and NSEC for proving that a name does not exist. Signatures are served to clients that ask for DNSSEC data (the DO bit) and are renewed every day, with the validity set by `signature_days`. Each renewal also raises the zone's SOA serial.
+- The key file must be PKCS#8 PEM and not readable by group or others. Startup fails otherwise. Back it up with your config: losing it means a new `DS` at the parent.
+- A signed zone must be plain: no `views`, no `journal`, no `transfer_keys`. A zone you change rarely suits signing; edit the file and restart to publish changes.
+- **Not built:** key rollover (replacing a key needs a new `DS` and a manual change), NSEC3, separate key- and zone-signing keys, and signing for dynamic or split-horizon zones.
+- Lumen does not validate its own operator zones against the parent. It serves what you configured.
 
 ## Dynamic updates (RFC 2136)
 

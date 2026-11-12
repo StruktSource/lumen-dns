@@ -1368,6 +1368,7 @@ dependencies = [
  "lumen-api",
  "lumen-config",
  "lumen-core",
+ "lumen-resolver",
  "lumen-store",
  "tokio",
 ]

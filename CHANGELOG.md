@@ -4,14 +4,12 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ## [Unreleased]
 
-### Added
-
-- **Automatic trust-anchor rollover (RFC 5011), opt-in.** `resolver.trust_anchor_state` keeps trust-anchor state in a `0600` file. Lumen checks the signed root DNSKEY set daily, trusts a new key after 30 days, drops revoked keys, and exports `lumen_dns_trust_anchor_*` metrics. Changes load at the next restart. See [DNSSEC and trust](docs/reference/dnssec-and-trust.md#automatic-rollover-rfc-5011).
-
 ## [0.7.0] - 2026-11-12
 
 ### Added
 
+- **DNSSEC signing for your own zones, opt-in.** `[zones.dnssec]` signs a plain zone with one Ed25519 or ECDSA P-256 key and NSEC, renews signatures daily, and serves them to clients that ask for DNSSEC data. `lumen --zone-key FILE --zone NAME` creates the key (mode `0600`) and prints the `DNSKEY` and `DS` records. Not built: key rollover, NSEC3, signing for dynamic or split-horizon zones. See [Your own DNS zones](docs/guides/authoritative-dns.md#dnssec-signing).
+- **Automatic trust-anchor rollover (RFC 5011), opt-in.** `resolver.trust_anchor_state` keeps trust-anchor state in a `0600` file. Lumen checks the signed root DNSKEY set daily, trusts a new key after 30 days, drops revoked keys, and exports `lumen_dns_trust_anchor_*` metrics. Changes load at the next restart. See [DNSSEC and trust](docs/reference/dnssec-and-trust.md#automatic-rollover-rfc-5011).
 - **DNS over HTTP/3 (DoH3).** `listen.doh3` serves `/dns-query` over QUIC with ALPN `h3`, with the same methods, media type, status codes, limits, certificate, and `allow_clients` rules as DoH over HTTP/2. Metrics gain an `http3` transport label (the former `other` label moves to a new index but keeps its name).
 - **DNSCrypt v2 server (opt-in).** `[dnscrypt]` serves signed, automatically rotating certificates and encrypted queries over UDP and TCP, with `X25519-XChaCha20Poly1305` and `X25519-XSalsa20Poly1305`. The long-term provider key lives in a `0600` file, UDP replies are never larger than the query, and Lumen logs a `sdns://` stamp at startup. Not included: DNSCrypt upstreams and Anonymized DNSCrypt.
 - **Your own DNS zones (opt-in).** `[[zones]]` serves authoritative records from zone files or inline text, with split-horizon `views` by client network, DNS-SD as ordinary records, and `[[forwarders]]` for conditional forwarding of a domain to specific resolvers. These names bypass the response caches. See [Your own DNS zones](docs/guides/authoritative-dns.md).
@@ -30,7 +28,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Not included
 
-Zone signing, built-in ACME issuance, RFC 5011 trust-anchor rollover, native ECH, DHCP, DNSCrypt or DoH3 upstreams, and Anonymized DNSCrypt are **not** available in this release.
+Zone key rollover and NSEC3, built-in ACME issuance, native ECH, DHCP, DNSCrypt or DoH3 upstreams, and Anonymized DNSCrypt are **not** available in this release.
 
 ## [0.6.0] - 2026-11-09
 

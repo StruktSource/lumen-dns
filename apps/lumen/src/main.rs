@@ -13,10 +13,15 @@ use std::{
     time::Duration,
 };
 
-const HELP: &str = "Lumen — private DNS, in your control.\n\nUsage: lumen --config FILE [--state FILE] [--check]\n       lumen --bind ADDRESS\n       lumen --version\n\n--config FILE   Load schema-versioned TOML configuration.\n--state FILE    Enable SQLite config/device storage and cross-platform control.\n--bind ADDRESS  Run UDP/TCP recursive DNS (loopback clients by default).\n--check         Validate config, filter sources, root hints, trust anchors, and TLS keys, then exit.\n--help          Show help.\n--version       Show version.\n\nEncrypted DNS and web listeners require explicit config and certificate/key files.";
+const HELP: &str = "Lumen — private DNS, in your control.\n\nUsage: lumen --config FILE [--state FILE] [--check]\n       lumen --bind ADDRESS\n       lumen --version\n\n--config FILE   Load schema-versioned TOML configuration.\n--state FILE    Enable SQLite config/device storage and cross-platform control.\n--bind ADDRESS  Run UDP/TCP recursive DNS (loopback clients by default).\n--check         Validate config, filter sources, root hints, trust anchors, and TLS keys, then exit.\n--zone-key FILE --zone NAME [--algorithm ed25519|ecdsap256sha256]\n                Create a DNSSEC signing key for a zone if FILE is missing, then print its DNSKEY and DS.\n--help          Show help.\n--version       Show version.\n\nEncrypted DNS and web listeners require explicit config and certificate/key files.";
 
 enum Command {
     Help,
+    ZoneKey {
+        file: PathBuf,
+        zone: String,
+        algorithm: lumen_config::SigningAlgorithm,
+    },
     Version,
     Run {
         path: Option<PathBuf>,
@@ -35,8 +40,22 @@ fn arguments(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     let mut bind = None;
     let mut state = None;
     let mut check = false;
+    let (mut zone_key, mut zone, mut algorithm) = (None, None, None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--zone-key" if zone_key.is_none() => {
+                zone_key = Some(PathBuf::from(args.next().ok_or("--zone-key needs a file")?));
+            }
+            "--zone" if zone.is_none() => zone = Some(args.next().ok_or("--zone needs a name")?),
+            "--algorithm" if algorithm.is_none() => {
+                algorithm = Some(
+                    match args.next().ok_or("--algorithm needs a name")?.as_str() {
+                        "ed25519" => lumen_config::SigningAlgorithm::Ed25519,
+                        "ecdsap256sha256" => lumen_config::SigningAlgorithm::Ecdsap256sha256,
+                        _ => return Err("--algorithm must be ed25519 or ecdsap256sha256".into()),
+                    },
+                );
+            }
             "--help" | "-h"
                 if path.is_none() && bind.is_none() && !check && args.peek().is_none() =>
             {
@@ -65,6 +84,19 @@ fn arguments(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
             _ => return Err(format!("unknown or repeated argument: {arg}")),
         }
     }
+    if let Some(file) = zone_key {
+        if path.is_some() || bind.is_some() || state.is_some() || check {
+            return Err("--zone-key stands alone".into());
+        }
+        return Ok(Command::ZoneKey {
+            file,
+            zone: zone.ok_or("--zone-key needs --zone NAME")?,
+            algorithm: algorithm.unwrap_or_default(),
+        });
+    }
+    if zone.is_some() || algorithm.is_some() {
+        return Err("--zone and --algorithm go with --zone-key".into());
+    }
     if path.is_some() && bind.is_some() {
         return Err("choose --config or --bind".into());
     }
@@ -87,6 +119,14 @@ async fn main() -> io::Result<()> {
     match arguments(std::env::args().skip(1)).map_err(io::Error::other)? {
         Command::Help => println!("{HELP}"),
         Command::Version => println!("Lumen {}", env!("CARGO_PKG_VERSION")),
+        Command::ZoneKey {
+            file,
+            zone,
+            algorithm,
+        } => print!(
+            "{}",
+            lumen_resolver::zone_key(&file, &zone, algorithm).map_err(io::Error::other)?
+        ),
         Command::Run {
             path,
             state,

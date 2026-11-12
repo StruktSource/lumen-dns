@@ -76,6 +76,7 @@ Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these a
 | `views` | `[]` | Up to 8 `[[zones.views]]` with `clients` (1 to 32 CIDRs) and their own `file` or `text`. First match wins |
 | `journal` | unset | SQLite file that makes the zone dynamic. Needs `file`, `update_rules`, and no `views` |
 | `update_rules` | `[]` | Up to 16 `[[zones.update_rules]]` with `key`, `names` (exact or `*.suffix`, inside the zone), and `types` |
+| `dnssec` | off | `[zones.dnssec]` with `key_file` (PKCS#8 PEM, mode 0600), `algorithm` (`ed25519` or `ecdsap256sha256`) and `signature_days` (2 to 90, default 14). Not with `views`, `journal`, or `transfer_keys`. See [DNSSEC signing](../guides/authoritative-dns.md#dnssec-signing) |
 | `transfer_keys` | `[]` | Up to 8 TSIG key names allowed to run AXFR/IXFR over TCP. Empty refuses all transfers |
 
 `[[forwarders]]`
