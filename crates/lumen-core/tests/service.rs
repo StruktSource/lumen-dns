@@ -143,6 +143,8 @@ async fn framed<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, packet: &[u8]
 struct Fixture {
     address: SocketAddr,
     queries: Arc<AtomicUsize>,
+    /// Set when any upstream query carried an EDNS Client Subnet option.
+    subnet_seen: Arc<std::sync::atomic::AtomicBool>,
     tasks: JoinSet<()>,
 }
 impl Drop for Fixture {
@@ -176,14 +178,22 @@ async fn fixture_with_servfail(servfail: bool) -> Fixture {
         }
     };
     let queries = Arc::new(AtomicUsize::new(0));
+    let subnet_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut tasks = JoinSet::new();
     let count = Arc::clone(&queries);
+    let subnet = Arc::clone(&subnet_seen);
     tasks.spawn(async move {
         let mut buffer = vec![0; 65535];
         loop {
             let (size, peer) = udp.recv_from(&mut buffer).await.unwrap();
             let request = Message::from_vec(&buffer[..size]).unwrap();
             count.fetch_add(1, Ordering::Relaxed);
+            if request.edns.as_ref().is_some_and(|edns| {
+                edns.option(hickory_proto::rr::rdata::opt::EdnsCode::Subnet)
+                    .is_some()
+            }) {
+                subnet.store(true, Ordering::Relaxed);
+            }
             if request.queries[0]
                 .name()
                 .to_ascii()
@@ -246,6 +256,7 @@ async fn fixture_with_servfail(servfail: bool) -> Fixture {
     Fixture {
         address,
         queries,
+        subnet_seen,
         tasks,
     }
 }
@@ -3804,4 +3815,130 @@ async fn the_mdns_discovery_proxy_answers_dns_questions_from_what_devices_announ
     assert_ne!(outside.metadata.response_code, ResponseCode::NXDomain);
     server.shutdown().await;
     responder.abort();
+}
+
+fn padded_query(name: &str, padding: bool) -> Vec<u8> {
+    let mut message = Message::from_vec(&query(name, RecordType::A)).unwrap();
+    let mut edns = Edns::new();
+    edns.set_max_payload(1232);
+    if padding {
+        edns.options_mut()
+            .insert(hickory_proto::rr::rdata::opt::EdnsOption::Unknown(
+                12,
+                vec![0; 20],
+            ));
+    }
+    message.edns = Some(edns);
+    message.to_vec().unwrap()
+}
+
+#[tokio::test]
+async fn encrypted_answers_are_padded_only_when_the_client_asks() {
+    let fixture = fixture().await;
+    let (directory, cert) = certificates();
+    let mut cfg = config(fixture.address, address("127.0.0.1"));
+    let dot = address("127.0.0.1");
+    let doh_addr = address("127.0.0.1");
+    cfg.listen.dot = vec![dot];
+    cfg.listen.doh = vec![doh_addr];
+    cfg.listen.certificate = Some(directory.path().join("cert.pem"));
+    cfg.listen.private_key = Some(directory.path().join("key.pem"));
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    // 468 is the block RFC 8467 recommends for servers.
+    let block = 468;
+
+    let stream = TcpStream::connect(dot).await.unwrap();
+    let mut stream = TlsConnector::from(Arc::new(client_tls(cert.clone(), b"dot")))
+        .connect(ServerName::try_from("localhost").unwrap(), stream)
+        .await
+        .unwrap();
+    for (name, asked) in [("ok.example.", true), ("ok.example.", false)] {
+        let packet = padded_query(name, asked);
+        stream
+            .write_u16(u16::try_from(packet.len()).unwrap())
+            .await
+            .unwrap();
+        stream.write_all(&packet).await.unwrap();
+        stream.flush().await.unwrap();
+        let length = usize::from(
+            timeout(Duration::from_secs(3), stream.read_u16())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        let mut bytes = vec![0; length];
+        stream.read_exact(&mut bytes).await.unwrap();
+        let message = Message::from_vec(&bytes).unwrap();
+        assert!(!message.answers.is_empty());
+        assert_eq!(
+            length % block == 0,
+            asked,
+            "DoT padded={asked} len={length}"
+        );
+    }
+    for (asked, expect) in [(true, true), (false, false)] {
+        let (status, body) = doh(
+            doh_addr,
+            client_tls(cert.clone(), b"h2"),
+            &padded_query("ok.example.", asked),
+            "POST",
+            "/dns-query",
+            "application/dns-message",
+        )
+        .await;
+        assert!(status.is_success());
+        assert_eq!(
+            body.len() % block == 0,
+            expect,
+            "DoH padded={asked} len={}",
+            body.len()
+        );
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_client_subnet_option_is_never_sent_upstream() {
+    let fixture = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut server = RunningServer::start(config(fixture.address, bind))
+        .await
+        .unwrap();
+    let mut message = Message::from_vec(&query("ecs.example.", RecordType::A)).unwrap();
+    let mut edns = Edns::new();
+    edns.set_max_payload(1232);
+    edns.options_mut()
+        .insert(hickory_proto::rr::rdata::opt::EdnsOption::Subnet(
+            hickory_proto::rr::rdata::opt::ClientSubnet::new(
+                std::net::IpAddr::from([192, 0, 2, 0]),
+                24,
+                0,
+            ),
+        ));
+    message.edns = Some(edns);
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket
+        .send_to(&message.to_vec().unwrap(), bind)
+        .await
+        .unwrap();
+    let mut buffer = vec![0; 4096];
+    let (size, _) = timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !Message::from_vec(&buffer[..size])
+            .unwrap()
+            .answers
+            .is_empty()
+    );
+    assert!(
+        fixture.queries.load(Ordering::Relaxed) > 0,
+        "upstream was asked"
+    );
+    assert!(
+        !fixture.subnet_seen.load(Ordering::Relaxed),
+        "ECS must not reach the upstream"
+    );
+    server.shutdown().await;
 }

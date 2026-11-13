@@ -1,6 +1,6 @@
 # Vendored dependencies
 
-`hickory-net` 0.26.3 with one change, marked `LUMEN PATCH` in `src/dnssec/mod.rs`:
+`hickory-net` 0.26.3 with two changes, both marked `LUMEN PATCH`. The second is EDNS(0) padding (RFC 7830, 128-byte blocks) for queries on the DoT, DoH, DoH3, and DoQ client transports: `src/xfer/padding.rs` is new, and `tls.rs`, `h2.rs`, `h3/h3_client_stream.rs`, `quic/quic_client_stream.rs`, `xfer/dns_multiplexer.rs`, and `xfer/mod.rs` call it. Tests for it are in `crates/lumen-core/tests/padding.rs`. Remove it once upstream hickory pads encrypted queries. The first change is in `src/dnssec/mod.rs`:
 
 A DS answer that includes the child zone's own SOA (parent and child served by the same
 name servers, as with Google's `l.google.com`) was validated through the very DS record

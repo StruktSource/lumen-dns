@@ -77,6 +77,16 @@ Notes:
 
 Both DoH and DoQ allow at most eight concurrent streams per connection.
 
+## Padding
+
+Encryption hides what is asked, but not how long a message is. Lumen pads with the EDNS(0) Padding option (RFC 7830) so length reveals less:
+
+- **Queries to upstreams** over DoT, DoH, DoH3, and DoQ are padded to a multiple of 128 bytes (RFC 8467, client policy). Always on, no setting.
+- **Answers from Lumen's own DoT, DoH, DoH3, and DoQ listeners** are padded to a multiple of 468 bytes (RFC 8467, server policy), but only when the client's query contained a Padding option. Clients that do not ask get the plain answer.
+- Plain UDP and TCP are never padded: the length is visible anyway, and padding would only make answers bigger.
+
+**EDNS Client Subnet (ECS) is not used.** ECS passes part of the client's network address to authoritative servers so CDNs can pick a nearby server. That is the opposite of what Lumen is for, and it would force the caches to keep one entry per client network. Lumen sends no ECS option upstream. If a client sends one, it is not forwarded.
+
 ## Test it
 
 ```sh

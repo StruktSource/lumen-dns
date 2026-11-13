@@ -4,6 +4,7 @@
 mod acme;
 mod certs;
 mod dnscrypt;
+mod padding;
 mod transport;
 pub use certs::Reload;
 pub use lumen_filter::{Filter, activity, configure_download_cache};
@@ -330,6 +331,26 @@ impl Service {
     }
 
     async fn answer(
+        &self,
+        packet: &[u8],
+        peer: SocketAddr,
+        protocol: Transport,
+    ) -> Option<Vec<u8>> {
+        let response = self.answer_unpadded(packet, peer, protocol).await?;
+        // Encrypted transports honour a client's request for padding (RFC 7830).
+        Some(
+            if matches!(
+                protocol,
+                Transport::Tls | Transport::Https | Transport::Quic | Transport::H3
+            ) {
+                padding::pad_response(packet, response)
+            } else {
+                response
+            },
+        )
+    }
+
+    async fn answer_unpadded(
         &self,
         packet: &[u8],
         peer: SocketAddr,

@@ -104,7 +104,10 @@ pub async fn tls_exchange_with_bind_addr<P: RuntimeProvider<Tcp = S>, S: DnsTcpS
         Arc::new(config),
     );
 
-    let mut multiplexer = DnsMultiplexer::new(future.await?, sender).with_timeout(timeout);
+    // LUMEN PATCH: pad queries (RFC 7830, RFC 8467 block of 128 bytes).
+    let mut multiplexer = DnsMultiplexer::new(future.await?, sender)
+        .with_timeout(timeout)
+        .with_padding(crate::xfer::padding::QUERY_BLOCK);
     if let Some(max) = max_active_requests {
         multiplexer = multiplexer.with_max_active_requests(max);
     }
