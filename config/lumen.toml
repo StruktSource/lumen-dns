@@ -146,6 +146,20 @@ io_timeout_ms = 5000
 # Maximum accepted DNS message size.
 max_message_bytes = 4096
 
+# DHCP server for IPv4 and IPv6 (off by default). A network needs exactly one DHCP server:
+# turn your router's off first. See docs/guides/dhcp.md.
+# [dhcp]
+# enabled = true
+# domain = "home.lan"
+# lease_file = "dhcp-leases.db"
+# [[dhcp.scopes]]
+# interface = "eth0"
+# subnet = "192.168.1.0/24"
+# server_address = "192.168.1.2"
+# range_start = "192.168.1.100"
+# range_end = "192.168.1.199"
+# router = "192.168.1.1"
+
 # Filtering is empty by default. See filtering.example.toml to opt in.
 
 # Automatic certificates (ACME, HTTP-01). Needs port 80 reachable from the internet and the

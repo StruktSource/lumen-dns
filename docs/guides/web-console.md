@@ -170,6 +170,10 @@ The console talks to `/api/*` on the same listener. This is an **internal interf
 
 Modules are big, optional features. Each one is **off until an administrator turns it on** under **Modules**, and a module that is off adds nothing to the sidebar. The choice is stored in the state database and applies to everyone who uses the console.
 
+### DHCP
+
+Shows the networks of the [DHCP server](dhcp.md), how full each one is, and every lease with its name, device, and expiry. Read-only and for administrators; the configuration decides what is served.
+
 ### Traffic map
 
 An interactive tree of your DNS traffic: the Lumen server at the top, then domain endings (`.com`, `.co.uk`), then the domains under each one.

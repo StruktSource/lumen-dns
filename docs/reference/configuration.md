@@ -81,6 +81,22 @@ Off unless `domains` is set. See [Automatic certificates](../guides/certificates
 
 Needs `listen.certificate`, `listen.private_key`, and at least one encrypted listener.
 
+## `[dhcp]`
+
+Off unless `enabled = true`. See [DHCP server](../guides/dhcp.md).
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Serve DHCP. Nothing listens otherwise |
+| `domain` | unset | DNS name, no trailing dot | Required when enabled. Leased names become `host.<domain>`. Must not overlap a `[[zones]]` zone |
+| `lease_file` | unset | Path | Required when enabled. SQLite file, mode `0600`. Relative paths resolve beside the config file |
+| `listen4` / `listen6` | `0.0.0.0:67` / `[::]:547` | Socket address | Server sockets. Change only for testing or behind a relay |
+| `client_port4` / `client_port6` | `68` / `546` | 1 to 65535 | Ports clients listen on |
+
+`[[dhcp.scopes]]` (IPv4, up to 16): `interface` (needed when there are several), `subnet`, `server_address`, `range_start`, `range_end` (at most 65,536 addresses), `router`, `dns` (defaults to `server_address`), `lease_secs` (default `43200`, 60 to 2,592,000), and `[[dhcp.scopes.reservations]]` with `mac`, `ip`, `hostname` (up to 512).
+
+`[[dhcp.scopes6]]` (IPv6, up to 16): `interface` (required), `prefix`, `range_start`, `range_end`, `dns` (required), `preferred_secs` (default `21600`, at least 60), `valid_secs` (default `43200`, at least `preferred_secs`, at most 2,592,000), and `[[dhcp.scopes6.reservations]]` with `duid` (hex), `ip`, `hostname`.
+
 ## Authoritative zones, forwarders, and TSIG keys
 
 Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these are off until you add a table.

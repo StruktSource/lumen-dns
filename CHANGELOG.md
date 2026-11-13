@@ -8,6 +8,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Added
 
+- **DHCP server for IPv4 and IPv6 (module, off by default).** `[dhcp]` hands out addresses with reservations, bounded ranges, and leases kept in a `0600` SQLite file. IPv4 follows RFC 2131 (relays included); IPv6 is stateful `IA_NA` (RFC 8415) with Rapid Commit. Leased names with a host name are published in Lumen's DNS, forward and reverse, and withdrawn when the lease ends. The web console gains an optional **DHCP** module with networks and leases. Not included: prefix delegation, IPv6 relays, failover. See [DHCP server](docs/guides/dhcp.md).
 - **Automatic certificates (ACME), opt-in.** `[acme]` obtains and renews the certificate for the encrypted listeners from an ACME CA such as Let's Encrypt, using the HTTP-01 challenge on a port that is open only while an order runs, or the DNS-01 challenge (`challenge = "dns-01"`), which Lumen answers itself and which allows wildcard names. Renewed files load through certificate reload, so nothing restarts. Tested against Pebble. See [Automatic certificates](docs/guides/certificates.md).
 - **DoH3 upstreams.** An explicit upstream can use `protocol = "h3"` (DNS over HTTP/3, QUIC with ALPN `h3`, optional `doh_path`). Certificates and names are verified like the other encrypted transports. The automatic provider list does not use it yet.
 - **DNSSEC signing for your own zones, opt-in.** `[zones.dnssec]` signs a plain zone with one Ed25519 or ECDSA P-256 key and NSEC, renews signatures daily, and serves them to clients that ask for DNSSEC data. `lumen --zone-key FILE --zone NAME` creates the key (mode `0600`) and prints the `DNSKEY` and `DS` records. Not built: key rollover, NSEC3, signing for dynamic or split-horizon zones. See [Your own DNS zones](docs/guides/authoritative-dns.md#dnssec-signing).
@@ -30,7 +31,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Not included
 
-Zone key rollover and NSEC3, TLS-ALPN-01 ACME challenges, native ECH, DHCP, DNSCrypt or DoH3 upstreams, and Anonymized DNSCrypt are **not** available in this release.
+Zone key rollover and NSEC3, TLS-ALPN-01 ACME challenges, native ECH, DNSCrypt upstreams, and Anonymized DNSCrypt are **not** available in this release.
 
 ## [0.6.0] - 2026-11-09
 

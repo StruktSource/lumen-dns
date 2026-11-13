@@ -29,7 +29,6 @@ _Last updated 2026-11-11 for version 0.6.0._
 - DNSSEC key rollover for hosted zones, and mDNS bridging
 - More encrypted DNS options: DNSCrypt upstreams, Anonymized DNSCrypt, and ECH support
 - Wider child-safety filtering categories
-- An optional DHCP server module
 - High availability and cluster configuration replication
 - Phase 7: high availability, threat feeds and enterprise policy, extended conformance and soak tests, and an external security review
 - Real-hardware validation for Proxmox, Unraid, Raspberry Pi, and dual-stack Kubernetes
@@ -152,7 +151,7 @@ Principles that shape every decision:
 - [x] Regular-expression blocking with explicit syntax, compile limits, linear-time matching, and explainable matches (0.7.0)
 - [x] CNAME-based tracker blocking that inspects upstream answer chains without bypassing DNSSEC or response bounds (0.7.0)
 - [x] SafeSearch with explicit opt-in, per-profile scope, documented providers (Google, Bing, YouTube), and no hidden logging (0.7.0). Wider child-safety categories remain open
-- [ ] Optional DHCP server module with bounded leases, reservations, DNS integration, and no default network authority
+- [x] Optional DHCP server module with bounded leases, reservations, DNS integration, and no default network authority (0.7.0): IPv4 and stateful IPv6, SQLite leases, names published to DNS, console module. Prefix delegation, relays for IPv6, and failover remain open
 
 ### Phase 6: Customization
 
@@ -212,7 +211,7 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 11. **Authoritative and local DNS.** Add authoritative zones, operator-managed records, a split-horizon module, conditional forwarding, RFC 2136 updates, AXFR/IXFR, and DNSSEC zone signing.
 12. **Encrypted DNS and ECH.** Keep current DoH over HTTP/2; add native DoH over HTTP/3, DNSCrypt, HTTPS/SVCB and ECH-config delivery to browsers, and optional native ECH in Lumen's own TLS paths.
 13. **Filtering and family policy (mostly done in 0.7.0).** Regex rules, CNAME-based blocking, and opt-in SafeSearch profiles shipped. Wider child-safety categories remain.
-14. **Optional DHCP server module.** Integrate leases and reservations with device and local-DNS policy without making Lumen authoritative for the network by default.
+14. **Optional DHCP server module (done in 0.7.0).** IPv4 and IPv6 with reservations, SQLite leases and DNS names. Open: prefix delegation, DHCPv6 relays, failover. Integrate leases and reservations with device and local-DNS policy without making Lumen authoritative for the network by default.
 15. **Trust-anchor rollover automation and certificate lifecycle tooling.**
 
 ### Large efforts, before or after 1.0
