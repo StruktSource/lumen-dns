@@ -1594,10 +1594,10 @@ async fn forward_strategies_fail_over_spread_race_and_skip_dead_upstreams() {
         bad_after_first,
         "SERVFAIL provider should rest after the first failure"
     );
-    assert_eq!(
-        upstreams[1].queries.load(Ordering::Relaxed) - before_live,
-        4,
-        "the next provider should answer every query"
+    let live_queries = upstreams[1].queries.load(Ordering::Relaxed) - before_live;
+    assert!(
+        (4..=8).contains(&live_queries),
+        "the next provider should answer every query with at most one UDP retry each: {live_queries}"
     );
     server.shutdown().await;
 }
