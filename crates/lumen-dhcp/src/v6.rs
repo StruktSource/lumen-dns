@@ -372,6 +372,16 @@ impl Engine6 {
         !self.reservations.contains_key(client) && (start..=end).contains(&u128::from(ip))
     }
 
+    /// True when no live lease holds `ip`, apart from this very association (same client, same
+    /// `IAID`, same kind). One client's temporary and permanent addresses, or two of its
+    /// `IAID`s, must never share an address.
+    fn unclaimed(&self, ip: Ipv6Addr, client: &[u8], iaid: u32, temporary: bool, now: u64) -> bool {
+        self.leases.get(&ip).is_none_or(|lease| {
+            lease.expires <= now
+                || (lease.client == client && lease.iaid == iaid && lease.temporary == temporary)
+        })
+    }
+
     fn pick(
         &self,
         client: &[u8],
@@ -390,6 +400,7 @@ impl Engine6 {
         }
         if let Some(ip) = wanted
             && self.usable(ip, client, now)
+            && self.unclaimed(ip, client, iaid, false, now)
         {
             return Some(ip);
         }
@@ -399,7 +410,9 @@ impl Engine6 {
         // The range is bounded by validation, so this walk is too.
         for step in 0..size {
             let candidate = Ipv6Addr::from(start + (first + step) % size);
-            if self.usable(candidate, client, now) {
+            if self.usable(candidate, client, now)
+                && self.unclaimed(candidate, client, iaid, false, now)
+            {
                 return Some(candidate);
             }
         }
@@ -510,7 +523,7 @@ impl Engine6 {
     /// An address a client may use for outgoing connections only. Each one is picked at random
     /// from the free addresses, so it does not tie one client's connections together. It is
     /// never renewed and never gets a DNS name.
-    fn pick_temporary(&self, client: &[u8], now: u64) -> Option<Ipv6Addr> {
+    fn pick_temporary(&self, client: &[u8], iaid: u32, now: u64) -> Option<Ipv6Addr> {
         // A device with a reservation takes only that address.
         if self.reservations.contains_key(client) {
             return None;
@@ -522,7 +535,9 @@ impl Engine6 {
         let first = u128::from_be_bytes(seed) % size;
         for step in 0..size {
             let candidate = Ipv6Addr::from(start + (first + step) % size);
-            if self.usable(candidate, client, now) {
+            if self.usable(candidate, client, now)
+                && self.unclaimed(candidate, client, iaid, true, now)
+            {
                 return Some(candidate);
             }
         }
@@ -596,7 +611,8 @@ impl Engine6 {
                                 && lease.expires > now
                         })
                     });
-                    let Some(ip) = offered.or_else(|| self.pick_temporary(client, now)) else {
+                    let Some(ip) = offered.or_else(|| self.pick_temporary(client, ia.id, now))
+                    else {
                         reply.opts_mut().insert(self.temporary_option(ia.id, None));
                         continue;
                     };
