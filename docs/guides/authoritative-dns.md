@@ -44,7 +44,7 @@ _ipp._tcp IN SRV 0 0 631 printer.home.example.
 
 ### Service discovery (DNS-SD)
 
-Wide-area DNS-SD is just records: a `PTR` under `_services._dns-sd._udp`, plus `PTR`, `SRV`, and `TXT` records for each instance. Put them in the zone as above, and clients configured with the search domain can browse them. Lumen does **not** bridge or reflect multicast DNS, so devices that only speak mDNS stay invisible outside their own network segment.
+Wide-area DNS-SD is just records: a `PTR` under `_services._dns-sd._udp`, plus `PTR`, `SRV`, and `TXT` records for each instance. Put them in the zone as above, and clients configured with the search domain can browse them. Devices that only speak multicast DNS stay on their own network segment unless you turn on the [multicast DNS bridge](mdns.md), which can answer for them under a domain and repeat their announcements between networks.
 
 ## Split-horizon views
 

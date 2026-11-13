@@ -26,7 +26,8 @@ _Last updated 2026-11-11 for version 0.6.0._
 
 **Still ahead**
 
-- mDNS bridging
+- [ ] **Easy local DNS manager:** Add an optional web-console module to create, edit, and delete custom zones and records, including hostname-to-IP mappings such as `dash.home.arpa` → `192.168.0.10`. Support detailed record types and settings using the existing authoritative DNS features. Validate changes, persist them, and apply them without a reload or restart where possible; clearly report when one is required. Explain client DNS setup and `.local`/mDNS limitations.
+- [ ] **Device and room manager:** Add a simple web UI to name devices, assign them to virtual rooms or areas, and manage their DNS policies using the existing group and profile support. Group a device's IPv4 and multiple IPv6 addresses under one identity, including changing IPv6 privacy addresses where possible. Explore optional FRITZ!Box integration to discover devices and address associations; support manual linking and corrections when matching is uncertain. Consider router-managed IPv4 reservations where supported, with explicit user control. Show when a device or query cannot be identified reliably.
 - More encrypted DNS options: DNSCrypt upstreams, Anonymized DNSCrypt, and ECH support
 - High availability and cluster configuration replication
 - Phase 7: high availability, threat feeds and enterprise policy, extended conformance and soak tests, and an external security review
@@ -139,7 +140,8 @@ Principles that shape every decision:
 - [x] Built-in certificate automation: ACME issuance and daily renewal with the HTTP-01 and DNS-01 challenges (wildcards with DNS-01, answered by Lumen's own resolver), tested against Pebble. Not built: TLS-ALPN-01, External Account Binding, DNS-provider APIs, and managing the web console's certificate. Not yet run against Let's Encrypt
 - [x] Automatic trust-anchor rollover (RFC 5011): persistent state, 30-day hold-down, revocation, daily signed check. Opt-in with `trust_anchor_state`. Changes apply at the next restart; not yet run across a real root KSK rollover
 - [x] Authoritative DNS zones and operator-managed records from zone files or inline text, separate from Lumen's built-in empty local zones. Unsigned; see the DNSSEC signing item
-- [x] **Split-horizon views** by client network, **conditional forwarding**, and DNS-SD as ordinary records. mDNS bridging is not built
+- [x] **Split-horizon views** by client network, **conditional forwarding**, and DNS-SD as ordinary records. mDNS bridging (discovery proxy and reflector, 0.7.0) is a separate opt-in module
+- [x] Multicast DNS bridge (0.7.0): a discovery proxy (`.local` devices answered under your own domain, service browsing included) and a reflector between interfaces. Opt-in, Linux and macOS. Open: publishing Lumen's own names over mDNS, DNS Push, and per-service reflection filters
 - [x] Dynamic DNS updates (RFC 2136) with TSIG authentication, per-key name and type scope, a SQLite journal, and bounded size
 - [x] Zone transfers over TCP with TSIG-keyed policy and a one-message size bound. Dynamic zones answer IXFR with the differences from the last 32 updates (in memory; a full transfer after a restart or for older serials), NOTIFY is sent to `notify` secondaries at startup and after accepted updates
 - [x] DNSSEC signing for plain operator zones (NSEC3 and double-signature key rollover added in 0.7.0): one combined key (Ed25519 or ECDSA P-256), NSEC, daily signature renewal, `lumen --zone-key` for key creation and the DS record. **Still open:** timer-driven rollover, separate KSK/ZSK, and signing for dynamic or split-horizon zones

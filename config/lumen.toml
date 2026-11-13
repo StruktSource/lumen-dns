@@ -146,6 +146,13 @@ io_timeout_ms = 5000
 # Maximum accepted DNS message size.
 max_message_bytes = 4096
 
+# Multicast DNS bridge (off by default): answers for .local devices under a domain of yours and
+# can repeat mDNS between networks. See docs/guides/mdns.md.
+# [mdns]
+# enabled = true
+# interfaces = ["eth0"]
+# domain = "mdns.home.example"
+
 # DHCP server for IPv4 and IPv6 (off by default). A network needs exactly one DHCP server:
 # turn your router's off first. See docs/guides/dhcp.md.
 # [dhcp]

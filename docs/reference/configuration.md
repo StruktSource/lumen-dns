@@ -99,6 +99,23 @@ Off unless `enabled = true`. See [DHCP server](../guides/dhcp.md).
 
 `[dhcp.failover]`: `role` (`primary` or `secondary`), `peer` (the primary connects here), `listen` (the secondary accepts here), `secret_file` (at least 16 characters, mode `0600`), `takeover_secs` (default `30`, 5 to 3600), `reserve_percent` (default `20`, 5 to 50). See [Failover](../guides/dhcp.md#failover).
 
+## `[mdns]`
+
+Off unless `enabled = true`. See [Multicast DNS bridge](../guides/mdns.md).
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Listen for and ask multicast DNS. Nothing is sent otherwise |
+| `interfaces` | `[]` | 1 to 8 names, no repeats | Networks to listen on, such as `eth0` |
+| `domain` | unset | DNS name, not `.local`, not under `.arpa`, no overlap with a zone or `dhcp.domain` | Turns on the discovery proxy: `<name>.<domain>` mirrors `<name>.local` |
+| `reflect` | `false` | Needs two or more interfaces | Repeat mDNS between the interfaces. Crosses network boundaries |
+| `ipv6` | `true` | | Also use `ff02::fb` |
+| `wait_ms` | `700` | 100 to 3000 | How long a question waits for devices |
+| `ttl_cap_secs` | `120` | 1 to 3600 | Longest TTL given to an answer |
+| `max_records` | `4096` | 64 to 65536 | Records kept. The soonest to expire go first |
+
+At least one of `domain` and `reflect` is required.
+
 ## Authoritative zones, forwarders, and TSIG keys
 
 Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these are off until you add a table.

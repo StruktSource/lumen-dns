@@ -26,6 +26,8 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Added (continued)
 
+- **Multicast DNS bridge (opt-in).** `[mdns]` adds a *discovery proxy* that answers DNS questions under a domain you choose from what devices announce (`printer.<domain>` is `printer.local`, service browsing included, with targets rewritten) and a *reflector* that repeats mDNS between the listed interfaces, with loop suppression, rate limits, and on-link checks. IPv4 and IPv6, Linux and macOS. Verified against a real responder on a real interface as well as in tests. See [Multicast DNS bridge](docs/guides/mdns.md).
+
 - **NSEC3 and zone key rollover for signed zones.** `[zones.dnssec] denial = "nsec3"` proves absence with hashed names (SHA-1, zero extra iterations, optional salt and opt-out, per RFC 9276). `next_key_file` (and `next_algorithm`) starts a double-signature rollover: both keys are published and every record set is signed twice until you drop the old key, so the parent's `DS` can move without a gap. Operator-driven, not timer-driven. See [Your own DNS zones](docs/guides/authoritative-dns.md#key-rollover).
 
 - **DoH3 in the automatic provider list.** `transport_priority` accepts `h3`, and `protocol = "h3"` selects it explicitly. Freifunk Munich, dns.sb, Quad9, UncensoredDNS, Cloudflare and Google have an `h3` entry (their own DoH endpoints advertise HTTP/3); the others are not documented. Automatic order is QUIC, HTTPS, HTTP/3, TLS, since HTTP/3 shares QUIC's UDP path. Catalog status is `not_tested`.
