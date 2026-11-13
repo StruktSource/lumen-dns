@@ -171,6 +171,49 @@ pub struct Dhcp {
     pub client_port6: u16,
     pub scopes: Vec<DhcpScope>,
     pub scopes6: Vec<DhcpScope6>,
+    /// A second Lumen that takes over when this one stops answering.
+    pub failover: Option<DhcpFailover>,
+}
+
+/// Which side of a failover pair this server is. The primary answers; the secondary stays quiet
+/// until it has not heard from the primary for `takeover_secs`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailoverRole {
+    Primary,
+    Secondary,
+}
+
+/// Hot-standby failover between two Lumen servers with the same `[dhcp]` scopes.
+///
+/// Both sides copy every lease to each other over a connection signed with a shared secret.
+/// While the primary is silent the secondary answers, giving new leases only from the last
+/// `reserve_percent` of each range so it cannot hand out an address the primary gave just before
+/// it failed.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DhcpFailover {
+    pub role: FailoverRole,
+    /// The secondary's failover address. The primary connects to it, so the primary needs it.
+    pub peer: Option<SocketAddr>,
+    /// Where the secondary accepts the primary's connection. The secondary needs it.
+    pub listen: Option<SocketAddr>,
+    /// File holding the shared secret (at least 16 characters, mode 0600 on unix).
+    pub secret_file: PathBuf,
+    /// Seconds of silence before the secondary takes over.
+    #[serde(default = "default_takeover_secs")]
+    pub takeover_secs: u32,
+    /// Share of each range kept for the secondary's new leases while it covers for the primary.
+    #[serde(default = "default_reserve_percent")]
+    pub reserve_percent: u8,
+}
+
+fn default_takeover_secs() -> u32 {
+    30
+}
+
+fn default_reserve_percent() -> u8 {
+    20
 }
 
 impl Default for Dhcp {
@@ -185,6 +228,7 @@ impl Default for Dhcp {
             client_port6: 546,
             scopes: Vec::new(),
             scopes6: Vec::new(),
+            failover: None,
         }
     }
 }
@@ -210,6 +254,10 @@ pub struct DhcpScope {
     pub lease_secs: u32,
     #[serde(default)]
     pub reservations: Vec<Reservation4>,
+    /// Boot server for network boot (`siaddr` and option 66). Needs `boot_file`.
+    pub next_server: Option<std::net::Ipv4Addr>,
+    /// Boot file name (`file` field and option 67), at most 128 printable characters.
+    pub boot_file: Option<String>,
 }
 
 fn default_lease_secs() -> u32 {
@@ -230,8 +278,9 @@ pub struct Reservation4 {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DhcpScope6 {
-    /// Interface to serve. Required: `DHCPv6` clients find the server by multicast.
-    pub interface: String,
+    /// Interface to serve. Needed for clients on the same link, which find the server by
+    /// multicast. A network reached only through a relay agent needs none.
+    pub interface: Option<String>,
     pub prefix: ipnet::Ipv6Net,
     pub range_start: std::net::Ipv6Addr,
     pub range_end: std::net::Ipv6Addr,
@@ -243,6 +292,29 @@ pub struct DhcpScope6 {
     pub valid_secs: u32,
     #[serde(default)]
     pub reservations: Vec<Reservation6>,
+    /// Prefixes handed to routers (`IA_PD`). Off unless set.
+    pub delegation: Option<PrefixDelegation>,
+}
+
+/// A pool of prefixes a router can ask for (prefix delegation, RFC 8415 `IA_PD`).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrefixDelegation {
+    /// The pool, for example `2001:db8:100::/40`. Must not overlap the scope's `prefix`.
+    pub pool: ipnet::Ipv6Net,
+    /// Length of each delegated prefix, for example 56 or 60. At most 64, and at most 16 bits
+    /// longer than the pool.
+    pub length: u8,
+    #[serde(default)]
+    pub reservations: Vec<PrefixReservation>,
+}
+
+/// A router that always gets the same prefix.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrefixReservation {
+    pub duid: String,
+    pub prefix: ipnet::Ipv6Net,
 }
 
 fn default_preferred_secs() -> u32 {
@@ -1377,12 +1449,36 @@ impl Config {
             if !dhcp
                 .scopes6
                 .iter()
-                .all(|scope| seen.insert(scope.interface.as_str()))
+                .filter_map(|scope| scope.interface.as_deref())
+                .all(|name| seen.insert(name))
             {
                 return Err("dhcp.scopes6: each scope needs its own interface".into());
             }
         }
         let host_ok = |host: &Option<String>| host.as_deref().is_none_or(label_ok);
+        for scope in &dhcp.scopes {
+            let boot_ok = scope.boot_file.as_deref().is_none_or(|file| {
+                (1..=128).contains(&file.len()) && file.bytes().all(|b| (0x21..0x7f).contains(&b))
+            });
+            if !boot_ok || scope.boot_file.is_some() != scope.next_server.is_some() {
+                return Err(
+                    "dhcp scope: next_server and boot_file go together, and the file name must be printable"
+                        .into(),
+                );
+            }
+        }
+        if let Some(failover) = &dhcp.failover
+            && (!(5..=3600).contains(&failover.takeover_secs)
+                || !(5..=50).contains(&failover.reserve_percent)
+                || match failover.role {
+                    FailoverRole::Primary => {
+                        failover.peer.is_none_or(|peer| peer.ip().is_unspecified())
+                    }
+                    FailoverRole::Secondary => failover.listen.is_none(),
+                })
+        {
+            return Err("dhcp.failover is not valid".into());
+        }
         for (index, scope) in dhcp.scopes.iter().enumerate() {
             let net = scope.subnet;
             let in_net = |ip: std::net::Ipv4Addr| net.contains(&ip);
@@ -1439,8 +1535,10 @@ impl Config {
                 || end - start >= u128::from(MAX_DHCP_RANGE)
                 || scope.dns.is_empty()
                 || scope.dns.len() > 4
-                || scope.interface.is_empty()
-                || scope.interface.len() > 15
+                || scope
+                    .interface
+                    .as_deref()
+                    .is_some_and(|name| name.is_empty() || name.len() > 15)
                 || scope.preferred_secs < 60
                 || scope.valid_secs < scope.preferred_secs
                 || scope.valid_secs > 2_592_000
@@ -1462,6 +1560,38 @@ impl Config {
                     return Err(format!(
                         "dhcp scopes6 entry {index} has an invalid or duplicate reservation"
                     ));
+                }
+            }
+            if let Some(delegation) = &scope.delegation {
+                let pool = delegation.pool;
+                let length = delegation.length;
+                if length > 64
+                    || length <= pool.prefix_len()
+                    || length - pool.prefix_len() > 16
+                    || pool.contains(&net.network())
+                    || net.contains(&pool.network())
+                    || delegation.reservations.len() > MAX_DHCP_RESERVATIONS
+                {
+                    return Err(format!(
+                        "dhcp scopes6 entry {index} has an invalid delegation"
+                    ));
+                }
+                let mut seen_prefix = std::collections::HashSet::new();
+                let mut seen_owner = std::collections::HashSet::new();
+                for reservation in &delegation.reservations {
+                    let Some(duid) = parse_hex(&reservation.duid) else {
+                        return Err(format!("dhcp scopes6 entry {index} has an invalid duid"));
+                    };
+                    if reservation.prefix.prefix_len() != length
+                        || !pool.contains(&reservation.prefix.network())
+                        || reservation.prefix != reservation.prefix.trunc()
+                        || !seen_prefix.insert(reservation.prefix)
+                        || !seen_owner.insert(duid)
+                    {
+                        return Err(format!(
+                            "dhcp scopes6 entry {index} has an invalid or duplicate prefix reservation"
+                        ));
+                    }
                 }
             }
             for other in &dhcp.scopes6[..index] {
@@ -2048,6 +2178,8 @@ mod tests {
             router: Some("192.168.1.1".parse().unwrap()),
             dns: Vec::new(),
             lease_secs: 43_200,
+            next_server: None,
+            boot_file: None,
             reservations: vec![Reservation4 {
                 mac: "aa:bb:cc:dd:ee:01".into(),
                 ip: "192.168.1.10".parse().unwrap(),
@@ -2055,13 +2187,14 @@ mod tests {
             }],
         }];
         config.dhcp.scopes6 = vec![DhcpScope6 {
-            interface: "eth0".into(),
+            interface: Some("eth0".into()),
             prefix: "fd00:1::/64".parse().unwrap(),
             range_start: "fd00:1::100".parse().unwrap(),
             range_end: "fd00:1::1ff".parse().unwrap(),
             dns: vec!["fd00:1::2".parse().unwrap()],
             preferred_secs: 3600,
             valid_secs: 7200,
+            delegation: None,
             reservations: vec![Reservation6 {
                 duid: "00010001aabbccdd".into(),
                 ip: "fd00:1::10".parse().unwrap(),
@@ -2069,6 +2202,86 @@ mod tests {
             }],
         }];
         config
+    }
+
+    #[test]
+    fn delegation_failover_and_boot_settings_are_checked() {
+        let delegation = || PrefixDelegation {
+            pool: "2001:db8:100::/40".parse().unwrap(),
+            length: 56,
+            reservations: vec![PrefixReservation {
+                duid: "0001000109".into(),
+                prefix: "2001:db8:100:4200::/56".parse().unwrap(),
+            }],
+        };
+        let mut config = dhcp_config();
+        config.dhcp.scopes6[0].delegation = Some(delegation());
+        assert!(config.validate_dhcp().is_ok());
+        let bad: Vec<fn(&mut PrefixDelegation)> = vec![
+            |d| d.length = 40,
+            |d| d.length = 65,
+            |d| d.length = 60 + 8,
+            |d| d.pool = "fd00:1::/48".parse().unwrap(),
+            |d| d.reservations[0].prefix = "2001:db8:100:4200::/60".parse().unwrap(),
+            |d| d.reservations[0].prefix = "2001:db9::/56".parse().unwrap(),
+            |d| d.reservations[0].duid = "zz".into(),
+            |d| {
+                let copy = d.reservations[0].clone();
+                d.reservations.push(copy);
+            },
+        ];
+        for mutate in bad {
+            let mut config = dhcp_config();
+            let mut value = delegation();
+            mutate(&mut value);
+            config.dhcp.scopes6[0].delegation = Some(value);
+            assert!(config.validate_dhcp().is_err());
+        }
+
+        // Network boot needs both settings, and a printable file name.
+        let mut boot = dhcp_config();
+        boot.dhcp.scopes[0].next_server = Some("192.168.1.9".parse().unwrap());
+        assert!(boot.validate_dhcp().is_err(), "a server without a file");
+        boot.dhcp.scopes[0].boot_file = Some("pxe linux".into());
+        assert!(boot.validate_dhcp().is_err(), "a space in the file name");
+        boot.dhcp.scopes[0].boot_file = Some("pxelinux.0".into());
+        assert!(boot.validate_dhcp().is_ok());
+
+        // A relayed IPv6 network needs no interface; a failover pair needs its address.
+        let mut relay = dhcp_config();
+        relay.dhcp.scopes6[0].interface = None;
+        assert!(relay.validate_dhcp().is_ok());
+        let failover = |role, peer: Option<&str>, listen: Option<&str>| DhcpFailover {
+            role,
+            peer: peer.map(|p| p.parse().unwrap()),
+            listen: listen.map(|l| l.parse().unwrap()),
+            secret_file: "secret".into(),
+            takeover_secs: 30,
+            reserve_percent: 20,
+        };
+        let mut pair = dhcp_config();
+        pair.dhcp.failover = Some(failover(
+            FailoverRole::Primary,
+            Some("192.168.1.3:647"),
+            None,
+        ));
+        assert!(pair.validate_dhcp().is_ok());
+        pair.dhcp.failover = Some(failover(FailoverRole::Primary, None, Some("0.0.0.0:647")));
+        assert!(
+            pair.validate_dhcp().is_err(),
+            "the primary needs the secondary's address"
+        );
+        pair.dhcp.failover = Some(failover(FailoverRole::Secondary, None, None));
+        assert!(
+            pair.validate_dhcp().is_err(),
+            "the secondary needs an address to listen on"
+        );
+        pair.dhcp.failover = Some(failover(FailoverRole::Secondary, None, Some("0.0.0.0:647")));
+        assert!(pair.validate_dhcp().is_ok());
+        let mut timing = failover(FailoverRole::Secondary, None, Some("0.0.0.0:647"));
+        timing.takeover_secs = 1;
+        pair.dhcp.failover = Some(timing);
+        assert!(pair.validate_dhcp().is_err());
     }
 
     #[test]

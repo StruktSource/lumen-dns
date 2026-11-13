@@ -533,11 +533,13 @@ impl lumen_web::Host for Service {
                 .map(|l| lumen_web::DhcpLeaseInfo {
                     family: l.family,
                     ip: l.ip,
+                    prefix_len: l.prefix_len,
                     client: l.client,
                     hostname: l.hostname,
                     expires: l.expires,
                 })
                 .collect(),
+            failover: snapshot.failover.map(|f| (f.role.to_owned(), f.active)),
         })
     }
 

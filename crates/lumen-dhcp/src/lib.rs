@@ -4,9 +4,11 @@
 //! and the lease changes come out. Sockets, storage, and DNS publishing live around it, so every
 //! rule can be tested without a network.
 
+pub mod failover;
+pub mod relay;
 pub mod server;
 pub mod store;
 pub mod v4;
 pub mod v6;
 
-pub use server::{Handle, LeaseInfo, Running, ScopeInfo, Snapshot, start};
+pub use server::{FailoverInfo, Handle, LeaseInfo, Running, ScopeInfo, Snapshot, start};

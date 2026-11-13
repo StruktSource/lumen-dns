@@ -1,12 +1,15 @@
 //! Sockets, storage and DNS publishing around the pure engines.
 
 use crate::{
+    failover::{self, Failover, Wire},
+    relay,
     store::Store,
     v4::{self, Change, Destination},
     v6::{self, Change6},
 };
 use dhcproto::{Decodable, Decoder, Encodable};
-use lumen_config::Dhcp;
+use ipnet::Ipv6Net;
+use lumen_config::{Dhcp, DhcpScope, FailoverRole};
 use lumen_resolver::Hosts;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
@@ -52,11 +55,22 @@ pub struct ScopeInfo {
 #[derive(Clone, Debug)]
 pub struct LeaseInfo {
     pub family: u8,
+    /// The address, or the network address of a delegated prefix.
     pub ip: IpAddr,
+    /// Set for a delegated prefix: its length.
+    pub prefix_len: Option<u8>,
     /// Hardware address (`aa:bb:..`) for IPv4 clients with no identifier, else the identifier in hex.
     pub client: String,
     pub hostname: Option<String>,
     pub expires: u64,
+}
+
+/// This server's place in a failover pair.
+#[derive(Clone, Debug)]
+pub struct FailoverInfo {
+    pub role: &'static str,
+    /// Whether it is answering clients now.
+    pub active: bool,
 }
 
 /// A view of the server for status pages. Taking it never blocks packet handling for long.
@@ -64,6 +78,7 @@ pub struct LeaseInfo {
 pub struct Snapshot {
     pub scopes: Vec<ScopeInfo>,
     pub leases: Vec<LeaseInfo>,
+    pub failover: Option<FailoverInfo>,
 }
 
 /// The most leases a snapshot lists, so a status page stays small.
@@ -80,6 +95,8 @@ fn hex(bytes: &[u8]) -> String {
 pub struct Handle {
     engines4: Vec<Engine4>,
     engines6: Vec<Engine6>,
+    failover: Option<Arc<Failover>>,
+    role: Option<FailoverRole>,
 }
 
 impl Handle {
@@ -103,6 +120,7 @@ impl Handle {
             out.leases.extend(bound.into_iter().map(|lease| LeaseInfo {
                 family: 4,
                 ip: lease.ip.into(),
+                prefix_len: None,
                 client: hex(&lease.client),
                 hostname: lease.hostname,
                 expires: lease.expires,
@@ -115,7 +133,7 @@ impl Handle {
             let capacity = u128::from(scope.range_end) - u128::from(scope.range_start) + 1;
             out.scopes.push(ScopeInfo {
                 family: 6,
-                interface: Some(scope.interface.clone()),
+                interface: scope.interface.clone(),
                 network: scope.prefix.to_string(),
                 range: format!("{} – {}", scope.range_start, scope.range_end),
                 active: bound.len(),
@@ -124,12 +142,34 @@ impl Handle {
             out.leases.extend(bound.into_iter().map(|lease| LeaseInfo {
                 family: 6,
                 ip: lease.ip.into(),
+                prefix_len: None,
                 client: hex(&lease.client),
                 hostname: lease.hostname,
                 expires: lease.expires,
             }));
+            out.leases
+                .extend(engine.bound_prefixes().into_iter().map(|item| LeaseInfo {
+                    family: 6,
+                    ip: item.prefix.network().into(),
+                    prefix_len: Some(item.prefix.prefix_len()),
+                    client: hex(&item.client),
+                    hostname: None,
+                    expires: item.expires,
+                }));
         }
         out.leases.truncate(SNAPSHOT_LEASES);
+        out.failover = self
+            .failover
+            .as_ref()
+            .zip(self.role)
+            .map(|(link, role)| FailoverInfo {
+                role: if role == FailoverRole::Primary {
+                    "primary"
+                } else {
+                    "secondary"
+                },
+                active: link.active(now()),
+            });
         out
     }
 }
@@ -162,6 +202,7 @@ impl Drop for Running {
 struct Shared {
     store: Store,
     hosts: Arc<Hosts>,
+    failover: Option<Arc<Failover>>,
 }
 
 impl Shared {
@@ -173,27 +214,80 @@ impl Shared {
         }
     }
 
-    fn apply4(&self, change: Change) {
+    fn tell(&self, wire: Wire) {
+        if let Some(link) = &self.failover {
+            link.send(wire);
+        }
+    }
+
+    /// A change made here; `replicate` is false for one that came from the failover partner.
+    fn apply4(&self, change: Change, replicate: bool) {
         match change {
             Change::Bind(lease) => {
                 if let Err(error) = self.store.put4(&lease) {
                     eprintln!("dhcp: cannot save a lease ({error})");
                 }
                 self.publish(lease.hostname.as_deref(), lease.ip.into());
+                if replicate {
+                    self.tell(Wire::Lease4 {
+                        ip: lease.ip,
+                        client: lease.client,
+                        hostname: lease.hostname,
+                        expires: lease.expires,
+                    });
+                }
             }
-            Change::End(ip) => self.end(ip.into()),
+            Change::End(ip) => {
+                self.end(ip.into());
+                if replicate {
+                    self.tell(Wire::End4 { ip });
+                }
+            }
         }
     }
 
-    fn apply6(&self, change: Change6) {
+    fn apply6(&self, change: Change6, replicate: bool) {
         match change {
             Change6::Bind(lease) => {
                 if let Err(error) = self.store.put6(&lease) {
                     eprintln!("dhcp: cannot save a lease ({error})");
                 }
                 self.publish(lease.hostname.as_deref(), lease.ip.into());
+                if replicate {
+                    self.tell(Wire::Lease6 {
+                        ip: lease.ip,
+                        client: lease.client,
+                        iaid: lease.iaid,
+                        hostname: lease.hostname,
+                        expires: lease.expires,
+                    });
+                }
             }
-            Change6::End(ip) => self.end(ip.into()),
+            Change6::End(ip) => {
+                self.end(ip.into());
+                if replicate {
+                    self.tell(Wire::End6 { ip });
+                }
+            }
+            Change6::BindPrefix(item) => {
+                if let Err(error) = self.store.put_prefix(&item) {
+                    eprintln!("dhcp: cannot save a prefix ({error})");
+                }
+                if replicate {
+                    self.tell(Wire::Prefix {
+                        prefix: item.prefix,
+                        client: item.client,
+                        iaid: item.iaid,
+                        expires: item.expires,
+                    });
+                }
+            }
+            Change6::EndPrefix(prefix) => {
+                self.end_prefix(prefix);
+                if replicate {
+                    self.tell(Wire::EndPrefix { prefix });
+                }
+            }
         }
     }
 
@@ -203,6 +297,149 @@ impl Shared {
         }
         self.hosts.withdraw(ip);
     }
+
+    fn end_prefix(&self, prefix: Ipv6Net) {
+        if let Err(error) = self.store.remove_prefix(prefix) {
+            eprintln!("dhcp: cannot delete a prefix ({error})");
+        }
+    }
+}
+
+/// The engines of every scope, for the failover link.
+struct Engines {
+    v4: Vec<Engine4>,
+    v6: Vec<Engine6>,
+}
+
+impl Engines {
+    /// Everything bound now, as failover messages.
+    fn snapshot(&self) -> Vec<Wire> {
+        let mut out = Vec::new();
+        for engine in &self.v4 {
+            out.extend(
+                locked(engine)
+                    .bound()
+                    .into_iter()
+                    .map(|lease| Wire::Lease4 {
+                        ip: lease.ip,
+                        client: lease.client,
+                        hostname: lease.hostname,
+                        expires: lease.expires,
+                    }),
+            );
+        }
+        for engine in &self.v6 {
+            let engine = locked(engine);
+            out.extend(engine.bound().into_iter().map(|lease| Wire::Lease6 {
+                ip: lease.ip,
+                client: lease.client,
+                iaid: lease.iaid,
+                hostname: lease.hostname,
+                expires: lease.expires,
+            }));
+            out.extend(
+                engine
+                    .bound_prefixes()
+                    .into_iter()
+                    .map(|item| Wire::Prefix {
+                        prefix: item.prefix,
+                        client: item.client,
+                        iaid: item.iaid,
+                        expires: item.expires,
+                    }),
+            );
+        }
+        out
+    }
+
+    /// Take a change the partner made.
+    fn apply(&self, wire: Wire, shared: &Shared) {
+        let moment = now();
+        match wire {
+            Wire::Beat => {}
+            Wire::Lease4 {
+                ip,
+                client,
+                hostname,
+                expires,
+            } => {
+                let lease = v4::Lease {
+                    ip,
+                    client,
+                    hostname,
+                    expires,
+                    offered: false,
+                };
+                for engine in &self.v4 {
+                    if locked(engine).adopt(lease.clone(), moment) {
+                        shared.apply4(Change::Bind(lease), false);
+                        return;
+                    }
+                }
+            }
+            Wire::End4 { ip } => {
+                for engine in &self.v4 {
+                    if locked(engine).forget(ip) {
+                        shared.apply4(Change::End(ip), false);
+                    }
+                }
+            }
+            Wire::Lease6 {
+                ip,
+                client,
+                iaid,
+                hostname,
+                expires,
+            } => {
+                let lease = v6::Lease6 {
+                    ip,
+                    client,
+                    iaid,
+                    hostname,
+                    expires,
+                    offered: false,
+                };
+                for engine in &self.v6 {
+                    if locked(engine).adopt(lease.clone(), moment) {
+                        shared.apply6(Change6::Bind(lease), false);
+                        return;
+                    }
+                }
+            }
+            Wire::End6 { ip } => {
+                for engine in &self.v6 {
+                    locked(engine).forget(ip);
+                }
+                shared.apply6(Change6::End(ip), false);
+            }
+            Wire::Prefix {
+                prefix,
+                client,
+                iaid,
+                expires,
+            } => {
+                let item = v6::Delegation6 {
+                    prefix,
+                    client,
+                    iaid,
+                    expires,
+                    offered: false,
+                };
+                for engine in &self.v6 {
+                    if locked(engine).adopt_prefix(item.clone(), moment) {
+                        shared.apply6(Change6::BindPrefix(item), false);
+                        return;
+                    }
+                }
+            }
+            Wire::EndPrefix { prefix } => {
+                for engine in &self.v6 {
+                    locked(engine).forget_prefix(prefix);
+                }
+                shared.apply6(Change6::EndPrefix(prefix), false);
+            }
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -211,22 +448,32 @@ fn interface_index(name: &str) -> io::Result<u32> {
         .map_err(|error| io::Error::other(format!("interface {name}: {error}")))
 }
 
+/// On Windows an interface is named by its index (see `netsh interface ipv6 show interfaces`).
 #[cfg(not(unix))]
 fn interface_index(name: &str) -> io::Result<u32> {
-    Err(io::Error::other(format!(
-        "interface {name}: binding to an interface is not supported on this system"
-    )))
+    name.parse().map_err(|_| {
+        io::Error::other(format!(
+            "interface {name}: on this system give the interface index, such as \"12\""
+        ))
+    })
 }
 
 /// A `DHCPv4` socket: broadcast-capable, shared with other servers' ports, and tied to one
-/// interface so a request on one network is never answered from another.
-fn socket4(listen: SocketAddr, interface: Option<&str>) -> io::Result<UdpSocket> {
+/// network so a request on one is never answered from another.
+///
+/// Linux binds to the device and macOS to the interface index. Windows binds to the scope's own
+/// address, which still receives the broadcasts of its network. Other systems cannot tell
+/// networks apart this way, so they serve a single scope and drop requests that are plainly
+/// from elsewhere.
+fn socket4(listen: SocketAddr, scope: &DhcpScope, scopes: usize) -> io::Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
     socket.set_reuse_port(true)?;
     socket.set_broadcast(true)?;
-    if let Some(name) = interface {
+    #[allow(unused_mut)]
+    let mut address = listen;
+    if let Some(name) = scope.interface.as_deref() {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         socket.bind_device(Some(name.as_bytes()))?;
         #[cfg(target_os = "macos")]
@@ -234,17 +481,46 @@ fn socket4(listen: SocketAddr, interface: Option<&str>) -> io::Result<UdpSocket>
             let index = interface_index(name)?;
             socket.bind_device_by_index_v4(std::num::NonZeroU32::new(index))?;
         }
-        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        #[cfg(windows)]
         {
             let _ = name;
-            return Err(io::Error::other(
-                "binding DHCPv4 to an interface is supported on Linux and macOS",
-            ));
+            if listen.ip().is_unspecified() {
+                address = SocketAddr::new(scope.server_address.into(), listen.port());
+            }
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            windows
+        )))]
+        {
+            let _ = name;
+            if scopes > 1 {
+                return Err(io::Error::other(
+                    "this system serves one DHCPv4 scope; use Linux, macOS or Windows for several",
+                ));
+            }
         }
     }
-    socket.bind(&listen.into())?;
+    let _ = scopes;
+    socket.bind(&address.into())?;
     socket.set_nonblocking(true)?;
     UdpSocket::from_std(socket.into())
+}
+
+/// Systems that cannot bind to a device must drop requests that are plainly for another network.
+fn plainly_elsewhere(scope: &DhcpScope, request: &dhcproto::v4::Message) -> bool {
+    if cfg!(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        windows
+    )) {
+        return false;
+    }
+    let near = |ip: std::net::Ipv4Addr| ip.is_unspecified() || scope.subnet.contains(&ip);
+    !(near(request.giaddr()) && near(request.ciaddr()))
 }
 
 fn socket6(listen: SocketAddr, interfaces: &[u32], join: bool) -> io::Result<UdpSocket> {
@@ -292,15 +568,37 @@ async fn serve4(socket: UdpSocket, engine: Engine4, shared: Arc<Shared>, config:
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
+        let moment = now();
+        // The standby stays silent while the primary is alive.
+        if shared
+            .failover
+            .as_ref()
+            .is_some_and(|link| !link.active(moment))
+        {
+            continue;
+        }
         let Ok(request) = dhcproto::v4::Message::decode(&mut Decoder::new(&buffer[..length]))
         else {
             continue;
         };
-        let Some(reply) = locked(&engine).handle(&request, now()) else {
+        let reply = {
+            let mut engine = locked(&engine);
+            if plainly_elsewhere(engine.scope(), &request) {
+                continue;
+            }
+            engine.set_reserve(
+                shared
+                    .failover
+                    .as_ref()
+                    .and_then(|link| link.reserve(moment)),
+            );
+            engine.handle(&request, moment)
+        };
+        let Some(reply) = reply else {
             continue;
         };
         if let Some(change) = reply.change {
-            shared.apply4(change);
+            shared.apply4(change, true);
         }
         let Some(target) = target4(reply.destination, source, &config) else {
             continue;
@@ -311,56 +609,113 @@ async fn serve4(socket: UdpSocket, engine: Engine4, shared: Arc<Shared>, config:
     }
 }
 
-async fn serve6(socket: UdpSocket, scopes: Vec<(u32, Engine6)>, shared: Arc<Shared>) {
+/// One `DHCPv6` network and how to recognize its clients.
+struct Scope6 {
+    /// The interface index, for clients on the server's own link.
+    index: Option<u32>,
+    prefix: Ipv6Net,
+    engine: Engine6,
+}
+
+fn scope_for(scopes: &[Scope6], scope_id: u32, link: Option<Ipv6Addr>) -> Option<&Scope6> {
+    if let Some(link) = link {
+        return scopes.iter().find(|scope| scope.prefix.contains(&link));
+    }
+    scopes
+        .iter()
+        .find(|scope| scope_id != 0 && scope.index == Some(scope_id))
+        // A single scope also serves clients that arrive without a link (unicast, or testing).
+        .or_else(|| (scopes.len() == 1 && scope_id == 0).then(|| &scopes[0]))
+}
+
+async fn serve6(socket: UdpSocket, scopes: Vec<Scope6>, shared: Arc<Shared>) {
     let mut buffer = [0u8; 1500];
     loop {
         let Ok((length, source)) = socket.recv_from(&mut buffer).await else {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
-        let Ok(request) = dhcproto::v6::Message::decode(&mut Decoder::new(&buffer[..length]))
-        else {
+        let moment = now();
+        if shared
+            .failover
+            .as_ref()
+            .is_some_and(|link| !link.active(moment))
+        {
+            continue;
+        }
+        let packet = &buffer[..length];
+        // A relay agent forwards the client's message inside its own.
+        let relayed = if relay::is_relay_forward(packet) {
+            match relay::unwrap(packet) {
+                Some(relayed) => Some(relayed),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        let inner = relayed
+            .as_ref()
+            .map_or(packet, |relayed| &relayed.message[..]);
+        let Ok(request) = dhcproto::v6::Message::decode(&mut Decoder::new(inner)) else {
             continue;
         };
-        // The link a client is on is the interface its link-local address belongs to. A single
-        // scope also serves clients that arrive without one (unicast, or testing).
+        // The link a client is on is the interface its link-local address belongs to, or, behind
+        // a relay, the link address the relay reports.
         let scope_id = match source {
             SocketAddr::V6(address) => address.scope_id(),
             SocketAddr::V4(_) => 0,
         };
-        let engine = scopes
-            .iter()
-            .find(|(index, _)| *index == scope_id)
-            .or_else(|| (scopes.len() == 1 && scope_id == 0).then(|| &scopes[0]))
-            .map(|(_, engine)| engine);
-        let Some(engine) = engine else {
+        let link = relayed.as_ref().map(relay::Relayed::link);
+        let Some(scope) = scope_for(&scopes, scope_id, link.flatten()).or_else(|| {
+            // A relay that reports no link, with a single scope to choose from.
+            (relayed.is_some() && scopes.len() == 1).then(|| &scopes[0])
+        }) else {
             continue;
         };
-        let Some(reply) = locked(engine).handle(&request, now()) else {
+        let reply = {
+            let mut engine = locked(&scope.engine);
+            engine.set_reserve(
+                shared
+                    .failover
+                    .as_ref()
+                    .and_then(|link| link.reserve(moment)),
+            );
+            engine.handle(&request, moment)
+        };
+        let Some(reply) = reply else {
             continue;
         };
         for change in reply.changes {
-            shared.apply6(change);
+            shared.apply6(change, true);
         }
-        if let Ok(bytes) = reply.message.to_vec() {
-            let _ = socket.send_to(&bytes, source).await;
-        }
+        let Ok(bytes) = reply.message.to_vec() else {
+            continue;
+        };
+        let bytes = match &relayed {
+            Some(relayed) => relay::wrap(&relayed.layers, &bytes),
+            None => bytes,
+        };
+        let _ = socket.send_to(&bytes, source).await;
     }
 }
 
-async fn expire(engines4: Vec<Engine4>, engines6: Vec<Engine6>, shared: Arc<Shared>) {
+async fn expire(engines: Arc<Engines>, shared: Arc<Shared>) {
     let mut tick = tokio::time::interval(EXPIRY_INTERVAL);
     loop {
         tick.tick().await;
         let moment = now();
-        for engine in &engines4 {
+        for engine in &engines.v4 {
             for ip in locked(engine).expire(moment) {
                 shared.end(ip.into());
             }
         }
-        for engine in &engines6 {
-            for ip in locked(engine).expire(moment) {
+        for engine in &engines.v6 {
+            let mut engine = locked(engine);
+            for ip in engine.expire(moment) {
                 shared.end(ip.into());
+            }
+            for prefix in engine.expire_prefixes(moment) {
+                shared.end_prefix(prefix);
             }
         }
     }
@@ -385,20 +740,29 @@ fn new_duid() -> Vec<u8> {
 /// read. Returns once the sockets are bound.
 ///
 /// # Errors
-/// A socket cannot be bound (port 67 and 547 need privileges), an interface does not exist, or
-/// the lease file cannot be opened.
+/// A socket cannot be bound (port 67 and 547 need privileges), an interface does not exist, the
+/// lease file cannot be opened, or the failover secret cannot be used.
+#[allow(clippy::too_many_lines)]
 pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
     let store = Store::open(config.lease_file.as_deref()).map_err(io::Error::other)?;
     let moment = now();
     let restored4 = store.load4(moment).map_err(io::Error::other)?;
     let restored6 = store.load6(moment).map_err(io::Error::other)?;
+    let restored_prefixes = store.load_prefixes(moment).map_err(io::Error::other)?;
     let duid = store.server_duid(new_duid).map_err(io::Error::other)?;
-    let shared = Arc::new(Shared { store, hosts });
+    let link = config.failover.as_ref().map(Failover::new);
+    let shared = Arc::new(Shared {
+        store,
+        hosts,
+        failover: link.clone(),
+    });
     let domain = config.domain.clone().unwrap_or_default();
     let config = Arc::new(config.clone());
     let mut tasks = Vec::new();
     let mut engines4 = Vec::new();
     let mut engines6 = Vec::new();
+    let mut scopes6 = Vec::new();
+    let mut sockets4 = Vec::new();
     let mut bound4 = Vec::new();
     let mut bound6 = None;
 
@@ -412,63 +776,87 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
             shared.publish(lease.hostname.as_deref(), lease.ip.into());
         }
         let engine = Arc::new(Mutex::new(v4::Engine::new(scope, &domain, mine, moment)));
-        let socket = socket4(config.listen4, scope.interface.as_deref())?;
+        let socket = socket4(config.listen4, scope, config.scopes.len())?;
         bound4.push(socket.local_addr()?);
-        tasks.push(tokio::spawn(serve4(
-            socket,
-            engine.clone(),
-            shared.clone(),
-            config.clone(),
-        )));
+        sockets4.push((socket, engine.clone()));
         engines4.push(engine);
     }
 
-    if !config.scopes6.is_empty() {
-        let mut indexes = Vec::new();
-        let mut scopes = Vec::new();
-        for scope in &config.scopes6 {
-            let index = interface_index(&scope.interface).or_else(|error| {
+    let mut indexes = Vec::new();
+    for scope in &config.scopes6 {
+        let index = match scope.interface.as_deref() {
+            Some(name) => Some(interface_index(name).or_else(|error| {
                 // Testing against a fixed address needs no real interface.
                 if config.listen6.ip().is_unspecified() {
                     Err(error)
                 } else {
                     Ok(0)
                 }
-            })?;
-            let mine: Vec<_> = restored6
-                .iter()
-                .filter(|lease| scope.prefix.contains(&lease.ip))
-                .cloned()
-                .collect();
-            for lease in &mine {
-                shared.publish(lease.hostname.as_deref(), lease.ip.into());
-            }
-            let engine = Arc::new(Mutex::new(v6::Engine6::new(
-                scope,
-                duid.clone(),
-                mine,
-                moment,
-            )));
-            indexes.push(index);
-            scopes.push((index, engine.clone()));
-            engines6.push(engine);
+            })?),
+            None => None,
+        };
+        let mine: Vec<_> = restored6
+            .iter()
+            .filter(|lease| scope.prefix.contains(&lease.ip))
+            .cloned()
+            .collect();
+        for lease in &mine {
+            shared.publish(lease.hostname.as_deref(), lease.ip.into());
         }
+        let mut engine = v6::Engine6::new(scope, duid.clone(), mine, moment);
+        engine.restore_prefixes(restored_prefixes.clone(), moment);
+        let engine = Arc::new(Mutex::new(engine));
+        indexes.extend(index);
+        scopes6.push(Scope6 {
+            index,
+            prefix: scope.prefix,
+            engine: engine.clone(),
+        });
+        engines6.push(engine);
+    }
+
+    let engines = Arc::new(Engines {
+        v4: engines4.clone(),
+        v6: engines6.clone(),
+    });
+    // The failover link comes up first, so a secondary never answers before it has listened.
+    if let (Some(settings), Some(link)) = (config.failover.as_ref(), link.clone()) {
+        let (for_snapshot, for_apply, apply_shared) =
+            (engines.clone(), engines.clone(), shared.clone());
+        tasks.push(
+            failover::start(
+                settings,
+                link,
+                Arc::new(move || for_snapshot.snapshot()),
+                Arc::new(move |wire| for_apply.apply(wire, &apply_shared)),
+            )
+            .await?,
+        );
+    }
+    for (socket, engine) in sockets4 {
+        tasks.push(tokio::spawn(serve4(
+            socket,
+            engine,
+            shared.clone(),
+            config.clone(),
+        )));
+    }
+    if !scopes6.is_empty() {
         // Multicast is joined only when listening on every address; a fixed address is for
         // tests and relays.
-        let socket = socket6(
-            config.listen6,
-            &indexes,
-            config.listen6.ip().is_unspecified(),
-        )?;
+        let join = config.listen6.ip().is_unspecified();
+        let socket = socket6(config.listen6, &indexes, join)?;
         bound6 = Some(socket.local_addr()?);
-        tasks.push(tokio::spawn(serve6(socket, scopes, shared.clone())));
+        tasks.push(tokio::spawn(serve6(socket, scopes6, shared.clone())));
     }
 
     let handle = Handle {
-        engines4: engines4.clone(),
-        engines6: engines6.clone(),
+        engines4,
+        engines6,
+        failover: link,
+        role: config.failover.as_ref().map(|settings| settings.role),
     };
-    tasks.push(tokio::spawn(expire(engines4, engines6, shared)));
+    tasks.push(tokio::spawn(expire(engines, shared)));
     Ok(Running {
         handle,
         tasks,

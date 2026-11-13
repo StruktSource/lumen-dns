@@ -1784,14 +1784,17 @@ impl Console {
             .iter()
             .map(|l| {
                 json!({
-                    "family": l.family, "ip": l.ip.to_string(), "client": l.client,
+                    "family": l.family, "ip": l.ip.to_string(), "prefix_len": l.prefix_len, "client": l.client,
                     "hostname": l.hostname, "expires": l.expires,
                 })
             })
             .collect();
         reply(
             StatusCode::OK,
-            &json!({ "running": true, "scopes": scopes, "leases": leases }),
+            &json!({
+                "running": true, "scopes": scopes, "leases": leases,
+                "failover": info.failover.as_ref().map(|(role, active)| json!({ "role": role, "active": active })),
+            }),
         )
     }
 

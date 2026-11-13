@@ -795,5 +795,9 @@ L.i18n.add('es', {
 "Name": "Nombre",
 "Expires": "Caduca",
 "No leases yet": "Aún no hay concesiones",
-"Devices that ask for an address will show up here.": "Los dispositivos que pidan una dirección aparecerán aquí."
+"Devices that ask for an address will show up here.": "Los dispositivos que pidan una dirección aparecerán aquí.",
+"Failover: this is the {role} server and it is answering clients.": "Conmutación: este es el servidor {role} y está respondiendo a los clientes.",
+"Failover: this is the {role} server and it is standing by.": "Conmutación: este es el servidor {role} y está en espera.",
+"primary": "principal",
+"secondary": "secundario"
 });

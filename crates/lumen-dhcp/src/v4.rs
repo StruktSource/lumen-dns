@@ -59,6 +59,9 @@ pub struct Engine {
     reservations: HashMap<[u8; 6], (Ipv4Addr, Option<String>)>,
     reserved: HashMap<Ipv4Addr, [u8; 6]>,
     cursor: u32,
+    /// While a secondary covers for a failed primary: new leases come only from this share of
+    /// the range (the end of it), so they cannot clash with ones the primary gave just before.
+    reserve: Option<u8>,
 }
 
 /// A host name made safe to publish: the first label, lowercase letters, digits and hyphens.
@@ -103,7 +106,53 @@ impl Engine {
             reservations,
             reserved,
             cursor: 0,
+            reserve: None,
         }
+    }
+
+    /// Restrict new leases to the last `percent` of the range, or lift the restriction.
+    pub fn set_reserve(&mut self, percent: Option<u8>) {
+        self.reserve = percent;
+    }
+
+    fn window_ok(&self, ip: Ipv4Addr, client: &[u8], now: u64) -> bool {
+        let Some(percent) = self.reserve else {
+            return true;
+        };
+        if self.reserved.contains_key(&ip)
+            || self
+                .leases
+                .get(&ip)
+                .is_some_and(|lease| lease.client == client && lease.expires > now)
+        {
+            return true;
+        }
+        let (start, end) = self.range();
+        let tail = ((end - start + 1) * u32::from(percent) / 100).max(1);
+        u32::from(ip) + tail > end
+    }
+
+    /// Take a lease learned from the failover peer. Returns false when the address is held by
+    /// someone else or the lease is not for this scope.
+    pub fn adopt(&mut self, lease: Lease, now: u64) -> bool {
+        if lease.offered
+            || lease.expires <= now
+            || !self.scope.subnet.contains(&lease.ip)
+            || self.taken_by_other(lease.ip, &lease.client, now)
+        {
+            return false;
+        }
+        self.leases.insert(lease.ip, lease);
+        true
+    }
+
+    /// Forget a lease the failover peer ended. Returns true when one was bound.
+    pub fn forget(&mut self, ip: Ipv4Addr) -> bool {
+        if self.leases.get(&ip).is_some_and(|lease| !lease.offered) {
+            self.leases.remove(&ip);
+            return true;
+        }
+        false
     }
 
     #[must_use]
@@ -161,6 +210,9 @@ impl Engine {
     /// The address a client may have right now, or `None` when there is none to give.
     fn usable(&self, ip: Ipv4Addr, client: &[u8], mac: Option<[u8; 6]>, now: u64) -> bool {
         if !self.scope.subnet.contains(&ip) || ip == self.scope.server_address {
+            return false;
+        }
+        if !self.window_ok(ip, client, now) {
             return false;
         }
         if self.taken_by_other(ip, client, now) {
@@ -264,6 +316,13 @@ impl Engine {
         };
         options.insert(DhcpOption::DomainNameServer(dns));
         options.insert(DhcpOption::DomainName(self.domain.clone()));
+        // Network boot: where to fetch the boot file, in both the fixed fields and the options.
+        if let (Some(server), Some(file)) = (self.scope.next_server, &self.scope.boot_file) {
+            options.insert(DhcpOption::TFTPServerName(server.to_string().into_bytes()));
+            options.insert(DhcpOption::BootfileName(file.clone().into_bytes()));
+            reply.set_siaddr(server);
+            reply.set_fname_str(file);
+        }
         reply
     }
 
@@ -474,6 +533,8 @@ mod tests {
             router: Some("192.168.1.1".parse().unwrap()),
             dns: vec![],
             lease_secs: 3600,
+            next_server: None,
+            boot_file: None,
             reservations: vec![lumen_config::Reservation4 {
                 mac: "aa:bb:cc:00:00:99".into(),
                 ip: "192.168.1.50".parse().unwrap(),
@@ -790,5 +851,66 @@ mod tests {
         assert_eq!(bound.len(), 1);
         assert_eq!(bound[0].expires, 3600);
         assert!(engine.expire(500).is_empty());
+    }
+
+    #[test]
+    fn network_boot_options_carry_the_server_and_file() {
+        let mut scope = scope();
+        scope.next_server = Some("192.168.1.9".parse().unwrap());
+        scope.boot_file = Some("pxelinux.0".into());
+        let mut engine = Engine::new(&scope, "home.example", vec![], 0);
+        let offer = engine
+            .handle(&client(1, MessageType::Discover), 0)
+            .unwrap()
+            .message;
+        assert_eq!(offer.siaddr().to_string(), "192.168.1.9");
+        assert!(offer.fname().unwrap_or_default().starts_with(b"pxelinux.0"));
+        assert!(matches!(
+            offer.opts().get(OptionCode::BootfileName),
+            Some(DhcpOption::BootfileName(file)) if file == b"pxelinux.0"
+        ));
+    }
+
+    #[test]
+    fn a_standby_gives_new_leases_only_from_the_end_and_refuses_other_requests() {
+        let mut engine = Engine::new(&scope(), "home.example", vec![], 0);
+        let held = lease_through(&mut engine, 1, 0);
+        // Three addresses: the last one is the reserve (at least one address).
+        engine.set_reserve(Some(20));
+        let offer = engine.handle(&client(2, MessageType::Discover), 1).unwrap();
+        assert_eq!(offer.message.yiaddr().to_string(), "192.168.1.102");
+        // The client that already had an address keeps it.
+        let again = engine.handle(&client(1, MessageType::Discover), 1).unwrap();
+        assert_eq!(again.message.yiaddr(), held);
+        // A request for a free address outside the reserve is refused.
+        let ask = with(
+            with(
+                client(3, MessageType::Request),
+                DhcpOption::RequestedIpAddress("192.168.1.101".parse().unwrap()),
+            ),
+            DhcpOption::ServerIdentifier("192.168.1.2".parse().unwrap()),
+        );
+        assert_eq!(kind_of(&engine.handle(&ask, 2).unwrap()), MessageType::Nak);
+    }
+
+    #[test]
+    fn leases_from_the_partner_are_adopted_unless_someone_else_holds_the_address() {
+        let mut engine = Engine::new(&scope(), "home.example", vec![], 0);
+        let lease = Lease {
+            ip: "192.168.1.101".parse().unwrap(),
+            client: vec![1],
+            hostname: Some("tv".into()),
+            expires: 500,
+            offered: false,
+        };
+        assert!(engine.adopt(lease.clone(), 0));
+        let mut other = lease.clone();
+        other.client = vec![2];
+        assert!(!engine.adopt(other, 0));
+        let mut foreign = lease.clone();
+        foreign.ip = "10.0.0.1".parse().unwrap();
+        assert!(!engine.adopt(foreign, 0));
+        assert!(engine.forget(lease.ip));
+        assert!(!engine.forget(lease.ip));
     }
 }

@@ -20,7 +20,8 @@ L.views.dhcp = () => {
   if (!d) return [head, L.empty('Loading', 'One moment.')];
   if (!d.running) return [head, L.empty('The DHCP server is not running', 'Turn it on in the configuration (dhcp.enabled). Lumen never hands out addresses on its own.')];
   const leases = d.leases.filter(l => !q || (l.ip + l.client + (l.hostname || '')).toLowerCase().includes(q.toLowerCase()));
-  return [head, summary(d),
+  const fo = d.failover ? h('div', { class: 'note', style: 'margin-top:16px' }, L.ic('info'), h('p', {}, L.t(d.failover.active ? 'Failover: this is the {role} server and it is answering clients.' : 'Failover: this is the {role} server and it is standing by.', { role: d.failover.role === 'primary' ? L.t('primary') : L.t('secondary') }))) : null;
+  return [head, summary(d), fo,
     h('div', { class: 'card', style: 'margin-top:16px' }, h('div', { class: 'card-h' }, h('strong', {}, 'Networks')),
       h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Network', 'Range', 'In use'].map(x => h('th', {}, x)))),
         h('tbody', {}, d.scopes.map(s => h('tr', {}, h('td', {}, h('strong', {}, s.network), ' ', h('span', { class: 'chip' }, 'IPv' + s.family), s.interface ? [' ', h('span', { class: 'hint' }, s.interface)] : null),
@@ -28,7 +29,7 @@ L.views.dhcp = () => {
     h('div', { class: 'card', style: 'margin-top:16px' },
       h('div', { class: 'card-h' }, h('input', { class: 'input', style: 'width:280px', placeholder: 'Search leases', 'aria-label': 'Search leases', value: q, oninput: e => { q = e.target.value; L.paintMain(); const i = L.$('input[aria-label="Search leases"]'); i.focus(); i.setSelectionRange(q.length, q.length); } }), h('span', { class: 'mono muted' }, L.fmt.n(d.leases.length))),
       leases.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Address', 'Name', 'Device', 'Expires'].map(x => h('th', {}, x)))),
-        h('tbody', {}, leases.map(l => h('tr', {}, h('td', { class: 'mono-c' }, l.ip), h('td', {}, l.hostname ? h('strong', {}, l.hostname) : h('span', { class: 'muted' }, '—')), h('td', { class: 'mono-c' }, l.client), h('td', { class: 'mono-c' }, L.fmt.time(l.expires * 1000)))))))
+        h('tbody', {}, leases.map(l => h('tr', {}, h('td', { class: 'mono-c' }, l.prefix_len ? l.ip + '/' + l.prefix_len : l.ip), h('td', {}, l.hostname ? h('strong', {}, l.hostname) : h('span', { class: 'muted' }, '—')), h('td', { class: 'mono-c' }, l.client), h('td', { class: 'mono-c' }, L.fmt.time(l.expires * 1000)))))))
         : L.empty('No leases yet', q ? 'Nothing matches your search.' : 'Devices that ask for an address will show up here.'))];
 };
 })();

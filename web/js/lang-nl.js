@@ -795,5 +795,9 @@ L.i18n.add('nl', {
 "Name": "Naam",
 "Expires": "Verloopt",
 "No leases yet": "Nog geen leases",
-"Devices that ask for an address will show up here.": "Apparaten die een adres vragen verschijnen hier."
+"Devices that ask for an address will show up here.": "Apparaten die een adres vragen verschijnen hier.",
+"Failover: this is the {role} server and it is answering clients.": "Failover: dit is de {role} server en hij beantwoordt clients.",
+"Failover: this is the {role} server and it is standing by.": "Failover: dit is de {role} server en hij staat stand-by.",
+"primary": "primaire",
+"secondary": "secundaire"
 });

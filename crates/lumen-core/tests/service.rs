@@ -2809,6 +2809,8 @@ async fn dhcp_leases_become_dns_names_and_are_off_by_default() {
             router: None,
             dns: Vec::new(),
             lease_secs: 3600,
+            next_server: None,
+            boot_file: None,
             reservations: Vec::new(),
         }],
         ..lumen_config::Dhcp::default()

@@ -1,6 +1,9 @@
 //! Lease storage in `SQLite`, so leases and the server's `DUID` survive a restart.
 
-use crate::{v4::Lease, v6::Lease6};
+use crate::{
+    v4::Lease,
+    v6::{Delegation6, Lease6},
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     net::{Ipv4Addr, Ipv6Addr},
@@ -39,6 +42,9 @@ impl Store {
              CREATE TABLE IF NOT EXISTS leases6 (
                  ip TEXT PRIMARY KEY, client BLOB NOT NULL, iaid INTEGER NOT NULL,
                  hostname TEXT, expires INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS prefixes6 (
+                 prefix TEXT PRIMARY KEY, client BLOB NOT NULL, iaid INTEGER NOT NULL,
+                 expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);",
         )?;
         Ok(Self {
@@ -144,6 +150,67 @@ impl Store {
         Ok(out)
     }
 
+    /// Live delegated prefixes.
+    ///
+    /// # Errors
+    /// The database cannot be read.
+    pub fn load_prefixes(&self, now: u64) -> rusqlite::Result<Vec<Delegation6>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare("SELECT prefix, client, iaid, expires FROM prefixes6 WHERE expires > ?1")?;
+        let rows = statement.query_map(params![clamp_secs(now)], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (prefix, client, iaid, expires) = row?;
+            if let Ok(prefix) = prefix.parse() {
+                out.push(Delegation6 {
+                    prefix,
+                    client,
+                    iaid,
+                    expires: u64::try_from(expires).unwrap_or(0),
+                    offered: false,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Save or replace a delegated prefix.
+    ///
+    /// # Errors
+    /// The database cannot be written.
+    pub fn put_prefix(&self, item: &Delegation6) -> rusqlite::Result<()> {
+        self.connection().execute(
+            "INSERT OR REPLACE INTO prefixes6 (prefix, client, iaid, expires) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                item.prefix.to_string(),
+                item.client,
+                item.iaid,
+                clamp_secs(item.expires)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a delegated prefix.
+    ///
+    /// # Errors
+    /// The database cannot be written.
+    pub fn remove_prefix(&self, prefix: ipnet::Ipv6Net) -> rusqlite::Result<()> {
+        self.connection().execute(
+            "DELETE FROM prefixes6 WHERE prefix = ?1",
+            params![prefix.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// Save or replace a `DHCPv4` lease.
     ///
     /// # Errors
@@ -239,6 +306,17 @@ mod tests {
         assert!(store.load4(1000).unwrap().is_empty());
         // The DUID is kept, not regenerated.
         assert_eq!(store.server_duid(|| vec![1]).unwrap(), first);
+        let prefix = Delegation6 {
+            prefix: "2001:db8:100:4200::/56".parse().unwrap(),
+            client: vec![5],
+            iaid: 2,
+            expires: 1000,
+            offered: false,
+        };
+        store.put_prefix(&prefix).unwrap();
+        assert_eq!(store.load_prefixes(10).unwrap(), vec![prefix.clone()]);
+        store.remove_prefix(prefix.prefix).unwrap();
+        assert!(store.load_prefixes(10).unwrap().is_empty());
         store.remove(v4.ip.into()).unwrap();
         assert!(store.load4(10).unwrap().is_empty());
     }

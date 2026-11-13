@@ -20,6 +20,8 @@ pub struct DhcpScopeInfo {
 pub struct DhcpLeaseInfo {
     pub family: u8,
     pub ip: IpAddr,
+    /// Set for a delegated prefix: its length.
+    pub prefix_len: Option<u8>,
     pub client: String,
     pub hostname: Option<String>,
     /// Unix seconds.
@@ -31,6 +33,8 @@ pub struct DhcpLeaseInfo {
 pub struct DhcpInfo {
     pub scopes: Vec<DhcpScopeInfo>,
     pub leases: Vec<DhcpLeaseInfo>,
+    /// `(role, answering now)` when this server is half of a failover pair.
+    pub failover: Option<(String, bool)>,
 }
 
 /// Aggregate counters. No domain names, clients, or profiles.
