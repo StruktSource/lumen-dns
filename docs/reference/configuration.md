@@ -125,7 +125,7 @@ Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these a
 | Field | Default | Meaning |
 | :--- | :--- | :--- |
 | `name` | required | Zone apex without a trailing dot. Unique per config. Up to 64 zones |
-| `file` / `text` | exactly one | RFC 1035 zone file path (relative to the config file) or inline text, at most 1 MiB. Needs a SOA at the apex |
+| `file` / `text` / `managed` | exactly one | RFC 1035 zone file path (relative to the config file), inline text (at most 1 MiB), or a typed [console-managed zone](#console-managed-zones). File and text zones need a SOA at the apex |
 | `views` | `[]` | Up to 8 `[[zones.views]]` with `clients` (1 to 32 CIDRs) and their own `file` or `text`. First match wins |
 | `journal` | unset | SQLite file that makes the zone dynamic. Needs `file`, `update_rules`, and no `views` |
 | `update_rules` | `[]` | Up to 16 `[[zones.update_rules]]` with `key`, `names` (exact or `*.suffix`, inside the zone), and `types` |
@@ -147,6 +147,44 @@ Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these a
 | `name` | Unique DNS-style key name. Updaters and secondaries must use the same name |
 | `algorithm` | `hmac-sha256`, `hmac-sha384`, or `hmac-sha512` |
 | `secret_file` | File with one line of base64 (at least 16 bytes decoded). Up to 32 keys |
+
+### Console-managed zones
+
+`[zones.managed]` is the typed form used by **DNS → Local DNS** in the web console. It is also valid TOML:
+
+```toml
+[[zones]]
+name = "home.arpa"
+
+  [zones.managed]
+  description = "Names used on the home network"
+  default_ttl = 300
+
+    [[zones.managed.records]]
+    name = "dash"
+    type = "a"
+    address = "192.168.0.10"
+```
+
+Lumen generates the zone's SOA and apex NS records. `name = "@"` means the apex; other owner names are relative to the zone, without a trailing dot. A wildcard is allowed only as the first complete label. The zone description is optional plain text, at most 200 characters, and is never published in DNS. `default_ttl` defaults to `300`; it and each optional record `ttl` must be 1 to 604,800 seconds.
+Target and exchange names are relative to the zone unless they end in a dot. For example,
+`target = "server"` and `target = "server.home.arpa."` name the same host in `home.arpa`.
+
+One managed zone has at most 1,024 records. It cannot also use `file`, `text`, `views`, `journal`, `update_rules`, `transfer_keys`, `notify`, or `dnssec`. `local` and names below `.local` are rejected because `.local` belongs to mDNS; use `home.arpa` for ordinary local DNS or the [mDNS bridge](../guides/mdns.md). The limit of 64 total `[[zones]]` entries includes managed and advanced zones together.
+
+| `type` | Required fields and bounds |
+| :--- | :--- |
+| `a` | `address`: IPv4 address |
+| `aaaa` | `address`: IPv6 address |
+| `cname` | `target`: DNS name. Its owner cannot have another record |
+| `txt` | `value`: plain text, at most 255 bytes |
+| `ptr` | `target`: DNS name |
+| `mx` | `priority`: 0 to 65535; `exchange`: DNS name |
+| `srv` | `priority`, `weight`, `port`: each 0 to 65535; `target`: DNS name |
+| `caa` | `flags`: 0 to 255; `tag`: 1 to 15 ASCII letters or digits; `value`: plain text, at most 255 bytes |
+| `tlsa` | `usage`: 0 to 3; `selector`: 0 to 1; `matching_type`: 0 to 2; `certificate_association_data`: nonempty hexadecimal, even length, at most 4,096 characters |
+
+Console edits are saved as a staged managed-mode config revision. Applying them restarts DNS listeners and clears caches; a validation or startup failure discards the candidate and restores the previous config and listeners. Advanced file, text, split, dynamic, transferred, and signed zones are listed read-only in the console.
 
 ## Listeners
 

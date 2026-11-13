@@ -2,7 +2,7 @@
 
 Where Lumen is today and where it is going. This page replaces the former separate *progress*, *TODO*, and *product plan* documents.
 
-_Last updated 2026-11-11 for version 0.6.0._
+_Last updated 2026-11-13 for version 0.7.0._
 
 > [!IMPORTANT]
 > Lumen is **pre-release**. A checked box means *implemented, documented, and covered by the checks in the [verification record](verification.md)*. It does **not** mean production-ready, and unrun platform checks or planned features are never marked as shipped.
@@ -23,10 +23,14 @@ _Last updated 2026-11-11 for version 0.6.0._
 - Forward mode with up to 8 ranked providers and a choice of ranked fallback, fastest first, round-robin, or race
 - Optional external console login through OpenID Connect providers (off by default)
 - Native packages for six platforms and container images for `linux/amd64` and `linux/arm64`
+- An admin-only local DNS manager with typed, bounded zones and records, safe staged apply, and advanced zones shown read-only
+
+**Completed in 0.7.0**
+
+- [x] **Easy local DNS manager (0.7.0):** The admin-only **DNS → Local DNS** page creates, edits, and deletes bounded typed zones and `A`, `AAAA`, `CNAME`, `TXT`, `PTR`, `MX`, `SRV`, `CAA`, and `TLSA` records. It includes a quick hostname-to-IP path, recommends `home.arpa`, rejects `.local`, explains client DNS setup, and shows advanced zones read-only. Changes stay in the normal draft, validate before apply, restart DNS and clear caches when applied, and roll back if startup fails. Config and resolver tests cover the typed bounds and generated authoritative zone data.
 
 **Still ahead**
 
-- [ ] **Easy local DNS manager:** Add an optional web-console module to create, edit, and delete custom zones and records, including hostname-to-IP mappings such as `dash.home.arpa` → `192.168.0.10`. Support detailed record types and settings using the existing authoritative DNS features. Validate changes, persist them, and apply them without a reload or restart where possible; clearly report when one is required. Explain client DNS setup and `.local`/mDNS limitations.
 - [ ] **Device and room manager:** Add a simple web UI to name devices, assign them to virtual rooms or areas, and manage their DNS policies using the existing group and profile support. Group a device's IPv4 and multiple IPv6 addresses under one identity, including changing IPv6 privacy addresses where possible. Explore optional FRITZ!Box integration to discover devices and address associations; support manual linking and corrections when matching is uncertain. Consider router-managed IPv4 reservations where supported, with explicit user control. Show when a device or query cannot be identified reliably.
 - More encrypted DNS options: DNSCrypt upstreams, Anonymized DNSCrypt, and ECH support
 - High availability and cluster configuration replication
@@ -55,7 +59,7 @@ Principles that shape every decision:
 
 ### Foundation
 
-- [x] Rust workspace, Apache-2.0, SemVer (currently `0.6.0`)
+- [x] Rust workspace, Apache-2.0, SemVer (currently `0.7.0`)
 - [x] README, contributor guide, security policy, and code of conduct
 - [x] Architecture, threat model, privacy defaults, and protocol scope
 - [x] CI for Linux, macOS, Windows, lint, tests, and the minimum Rust version

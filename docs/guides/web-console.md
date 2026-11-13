@@ -63,6 +63,18 @@ While lists are downloading, an administrator can press **Cancel**. The download
 - `[management]` API settings pass through untouched. The console does not use API tokens.
 - Devices are stored separately and applied immediately.
 
+### Local DNS
+
+Administrators can open **DNS → Local DNS** to create a zone and typed records without writing a zone file. `home.arpa` is the recommended zone for a home network: record `dash` plus IPv4 address `192.168.0.10` produces `dash.home.arpa`. Point each client, or the router's DHCP DNS setting, at Lumen before testing the name.
+
+The form supports `A`, `AAAA`, `CNAME`, `TXT`, `PTR`, `MX`, `SRV`, `CAA`, and `TLSA`. It uses separate fields for addresses, targets, ports, priorities, CAA values, and TLSA values. `@` means the zone apex. A zone has a default TTL and each record can override it.
+
+Local DNS follows the normal draft and apply flow. Create, edit, and delete actions change only the draft. **Apply** validates the complete config, restarts the DNS listeners, clears caches, and reconnects the console. If the candidate cannot validate or start, Lumen restores the previous config and listeners. The revision remains available under **System** for later rollback.
+
+Only administrators can open or change this page. Zones backed by files or inline zone text, split-horizon views, dynamic updates, transfers, NOTIFY, or DNSSEC signing appear as **Advanced** and are read-only in the console; edit their TOML or source files instead.
+
+Do not use `local` or anything below `.local` here. `.local` belongs to multicast DNS and many clients do not send it to a normal DNS server. Use `home.arpa`, or use the separate [mDNS bridge](mdns.md) to expose mDNS devices under another domain. Exact record fields and limits are in [Your own DNS zones](authoritative-dns.md#easy-local-dns-manager).
+
 ### Privacy
 
 The overview shows aggregate counters only. **[Query history](query-history.md)** is off by default. An administrator can turn on *recent only* (the last 1,000 lookups, in memory, never written to disk) or *saved* (kept in the state database for 1 to 90 days), either anonymous or with the device and address. See [Query history](query-history.md).

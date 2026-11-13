@@ -343,3 +343,22 @@ Users tabs for an administrator, only *My account* for a user, both System tabs,
 save buttons, and the guard that blocks saving while DNS settings are unapplied. Not verified:
 a real browser (layout, focus, keyboard use), a real provider, and a screen reader. The
 translations of the new strings were written by hand and not reviewed by native speakers.
+
+## 2026-11-13 — easy local DNS manager
+
+Managed-zone config tests cover JSON and TOML round trips for all nine record types, strict
+names and record values, TTL and record-count bounds, case-insensitive `.local` rejection,
+duplicate and CNAME-owner conflicts, and exclusion of advanced zone features. Resolver tests
+render the typed model through the normal authoritative-zone parser. A service test proves UDP
+and TCP answers, an edited address after managed restart, and authoritative NODATA or NXDOMAIN
+after deletion without an upstream query.
+
+The console test loads the shipped `core.js` and checks an exact normalize/to-server round trip
+for a managed TLSA zone and an advanced read-only zone. JavaScript syntax checks and the
+standalone managed-zone round-trip test pass. The web crate has 37 passing tests.
+
+`./scripts/dev.sh check` passes format, locked all-target Clippy with warnings denied, 276
+workspace tests, and all doc tests. `scripts/verify-release.py --version v0.7.0` and JavaScript
+syntax and schema checks pass. During the first full run, the filter progress unit test exposed
+an existing parallel-test race against process-wide console state; it now tests the same state
+transitions on local state, and the full run passes. Hosted cross-platform results remain pending.

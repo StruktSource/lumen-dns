@@ -1,9 +1,10 @@
 # Your own DNS zones
 
-Lumen can answer for names you own, instead of asking the internet. This page covers four related features, all **off by default**:
+Lumen can answer for names you own, instead of asking the internet. This page covers related features that are all **off by default**:
 
 | Feature | Use it to |
 | :--- | :--- |
+| [Easy local DNS manager](#easy-local-dns-manager) | Create common local records with typed fields in the web console |
 | [Authoritative zones](#authoritative-zones) | Serve `home.example` records (hosts, services, DNS-SD) from a zone file or inline text |
 | [Split-horizon views](#split-horizon-views) | Give different clients different answers for the same zone |
 | [Conditional forwarding](#conditional-forwarding) | Send one domain to a specific internal resolver |
@@ -14,6 +15,44 @@ Lumen can answer for names you own, instead of asking the internet. This page co
 > These zones are separate from Lumen's built-in empty local zones (`home.arpa`, `.local`, reverse zones). A zone you define always wins for its own names. Zones are unsigned unless you turn on [DNSSEC signing](#dnssec-signing); then validating clients can verify them.
 
 Operator zones and forwarders are **never cached** by Lumen's response caches (see [Resolver modes](resolver-modes.md)). Answers depend on the client and change when records change, so each query reads the live zone.
+
+## Easy local DNS manager
+
+In managed mode, administrators can open **DNS → Local DNS** in the web console and create a zone without writing a zone file. A good home-network choice is `home.arpa`, the name reserved for residential networks. For example, create zone `home.arpa`, then add an `A` record named `dash` with address `192.168.0.10`; Lumen answers `dash.home.arpa`.
+
+> [!IMPORTANT]
+> Every client must use Lumen as its DNS server. Set the DNS server handed out by your router or DHCP server to Lumen's address, or set it on each device. Use the complete name (`dash.home.arpa`) unless the client also has `home.arpa` as a search domain.
+
+The editor supports these record types with separate, validated fields:
+
+| Type | Fields |
+| :--- | :--- |
+| `A` | IPv4 address |
+| `AAAA` | IPv6 address |
+| `CNAME` | Target name |
+| `TXT` | Text value, at most 255 bytes |
+| `PTR` | Target name |
+| `MX` | Priority and exchange name |
+| `SRV` | Priority, weight, port, and target name |
+| `CAA` | Flags, tag, and value |
+| `TLSA` | Usage, selector, matching type, and hexadecimal certificate-association data |
+
+Record owners are relative to the zone; `@` means the zone apex. Each record can use the zone's default TTL or set its own. Lumen generates the required SOA and apex NS records. A managed zone allows at most 1,024 records. The default TTL and every record TTL must be 1 to 604,800 seconds; the initial default is 300 seconds. A CNAME owner cannot have another record.
+Target and exchange names without a trailing dot are relative to the zone. Add the trailing dot
+for a complete name, such as `server.home.arpa.`.
+
+Changes use the normal configuration draft:
+
+1. Create, edit, or delete zones and records. Nothing changes in live DNS yet.
+2. Press **Apply**. Lumen validates the complete candidate configuration before it changes service.
+3. Applying local DNS restarts the DNS listeners and clears their caches. The activity panel reports the restart and reconnects the console.
+4. If validation, a bind, or startup fails, Lumen discards the candidate and restores the prior revision and listeners.
+
+Only administrators can see or change Local DNS. The managed records are stored in the versioned managed-mode configuration, so they take part in revision history and rollback. File or inline zones, split views, dynamic journals, transfers, NOTIFY, and DNSSEC signing are **advanced zones**: the console lists them read-only, and you keep editing their TOML and files. A console-managed zone cannot use those advanced settings.
+
+Do not create `local` or a name below `.local`. That suffix belongs to multicast DNS (mDNS), and clients may never send it to Lumen. Use `home.arpa` for ordinary local DNS. To discover devices that only announce `.local` names, use the separate, opt-in [multicast DNS bridge](mdns.md) and expose them under another domain.
+
+The same managed zone has a typed TOML form, documented under [`[[zones]]`](../reference/configuration.md#console-managed-zones). This lets managed-mode revisions round-trip it without generating or editing a zone file.
 
 ## Authoritative zones
 
