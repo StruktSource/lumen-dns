@@ -604,6 +604,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn console_managed_zone_schema_round_trips() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let status = std::process::Command::new("node")
+            .arg(root.join("web/tests/config-roundtrip.mjs"))
+            .current_dir(root)
+            .status()
+            .expect("Node.js is required for the console JavaScript test");
+        assert!(
+            status.success(),
+            "managed-zone JavaScript round-trip failed"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn api_works_over_a_socket_with_cookies_and_blocking_work_off_the_executor() {
         struct Host0;

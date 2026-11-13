@@ -113,8 +113,140 @@ function limitsTab() {
     h('div', { class: 'note' }, L.ic('info'), h('p', {}, 'These cap work per client and per process. They are not a memory ceiling; use container or OS limits for a hard RSS cap.')));
 }
 
+/* ---------- local DNS ---------- */
+const RR_TYPES = ['a', 'aaaa', 'cname', 'txt', 'mx', 'srv', 'ptr', 'caa', 'tlsa'];
+const rrLabel = type => type.toUpperCase();
+const newRecord = (type = 'a') => ({ name: '@', ttl: null, type, ...({
+  a: { address: '' }, aaaa: { address: '' }, cname: { target: '' }, txt: { value: '' }, ptr: { target: '' },
+  mx: { priority: 10, exchange: '' }, srv: { priority: 0, weight: 0, port: 443, target: '' },
+  caa: { flags: 0, tag: 'issue', value: '' }, tlsa: { usage: 3, selector: 1, matching_type: 1, certificate_association_data: '' }
+}[type] || {}) });
+const relativeName = value => value === '@' || (value.length <= 253 && !value.endsWith('.') && value.split('.').every((part, i) => part.length > 0 && part.length <= 63 && ((i === 0 && part === '*') || /^[a-z0-9_-]+$/i.test(part))));
+const targetName = value => value === '@' || L.v.domain(String(value).replace(/\.$/, ''));
+const uint = (value, max) => Number.isInteger(value) && value >= 0 && value <= max;
+const recordData = record => {
+  const base = { name: record.name.trim().toLowerCase(), ttl: record.ttl == null ? null : record.ttl, type: record.type };
+  const fields = { a: ['address'], aaaa: ['address'], cname: ['target'], txt: ['value'], ptr: ['target'], mx: ['priority', 'exchange'], srv: ['priority', 'weight', 'port', 'target'], caa: ['flags', 'tag', 'value'], tlsa: ['usage', 'selector', 'matching_type', 'certificate_association_data'] }[record.type] || [];
+  for (const key of fields) base[key] = typeof record[key] === 'string' ? record[key].trim() : record[key];
+  return base;
+};
+const recordIdentity = record => {
+  const data = recordData(record); delete data.ttl;
+  for (const key of ['target', 'exchange', 'tag', 'certificate_association_data']) if (typeof data[key] === 'string') data[key] = data[key].toLowerCase();
+  return JSON.stringify(data);
+};
+function validRecord(record) {
+  if (!relativeName(record.name)) return 'Record name must be @, a host name, or a wildcard.';
+  if (!RR_TYPES.includes(record.type)) return 'Record type is not supported by this form.';
+  if (record.ttl != null && !(Number.isInteger(record.ttl) && record.ttl >= 1 && record.ttl <= 604800)) return 'Record TTL must be empty or 1–604800 seconds.';
+  if (record.type === 'a' && (!L.v.ip(record.address) || record.address.includes(':'))) return 'A records need an IPv4 address.';
+  if (record.type === 'aaaa' && (!L.v.ip(record.address) || !record.address.includes(':'))) return 'AAAA records need an IPv6 address.';
+  if (['cname', 'ptr', 'srv'].includes(record.type) && !targetName(record.target)) return `${rrLabel(record.type)} records need a valid target name.`;
+  if (record.type === 'mx' && !targetName(record.exchange)) return 'MX records need a valid exchange name.';
+  if (record.type === 'txt' && (new TextEncoder().encode(record.value).length > 255 || /[\x00-\x1f\x7f]/.test(record.value))) return 'TXT values must be at most 255 plain-text bytes.';
+  if (record.type === 'mx' && !uint(record.priority, 65535)) return 'MX priority must be 0–65535.';
+  if (record.type === 'srv' && (!uint(record.priority, 65535) || !uint(record.weight, 65535) || !uint(record.port, 65535))) return 'SRV priority, weight, and port must be 0–65535.';
+  if (record.type === 'caa' && (!uint(record.flags, 255) || !/^[a-z0-9]{1,15}$/i.test(record.tag) || new TextEncoder().encode(record.value).length > 255 || /[\x00-\x1f\x7f]/.test(record.value))) return 'CAA flags, tag, or value is invalid.';
+  if (record.type === 'tlsa' && (!uint(record.usage, 3) || !uint(record.selector, 1) || !uint(record.matching_type, 2) || !/^(?:[0-9a-f]{2})+$/i.test(record.certificate_association_data) || record.certificate_association_data.length > 4096)) return 'TLSA fields or certificate data are invalid.';
+  return '';
+}
+function zoneProblems(zone, zones, ownIndex) {
+  const out = [], name = String(zone.name || '').trim().replace(/\.$/, '').toLowerCase(), managed = zone.managed;
+  if (!L.v.domain(name)) out.push('Zone name must be a valid DNS name.');
+  if (name === 'local' || name.endsWith('.local')) out.push('.local belongs to mDNS. Use another private zone.');
+  if (zones.some((item, index) => index !== ownIndex && String(item.name || '').replace(/\.$/, '').toLowerCase() === name)) out.push('Another zone already uses this name.');
+  if (String(managed.description || '').length > 200 || /[\x00-\x1f\x7f]/.test(managed.description || '')) out.push('Description must be at most 200 plain characters.');
+  if (!(Number.isInteger(managed.default_ttl) && managed.default_ttl >= 1 && managed.default_ttl <= 604800)) out.push('Default TTL must be 1–604800 seconds.');
+  if (!Array.isArray(managed.records) || managed.records.length > 1024) out.push('A zone may contain at most 1024 records.');
+  for (const record of managed.records || []) { const error = validRecord(record); if (error) out.push(error); }
+  const names = new Map();
+  const identities = new Set();
+  for (const record of managed.records || []) { const key = record.name.toLowerCase(); const state = names.get(key) || { cname: false, count: 0 }; state.cname ||= record.type === 'cname'; state.count++; names.set(key, state); const identity = recordIdentity(record); if (identities.has(identity)) out.push('Duplicate records are not allowed.'); identities.add(identity); }
+  for (const state of names.values()) if (state.cname && state.count > 1) out.push('A CNAME name cannot have other records.');
+  return [...new Set(out)];
+}
+const recordFields = record => {
+  const input = (key, label, placeholder = '', attrs = {}) => { const { numeric, ...html } = attrs; return f.field(L.t(label), h('input', { class: 'input mono-in', value: record[key] ?? '', placeholder, oninput: event => { record[key] = numeric ? Number(event.target.value) : event.target.value; }, ...html })); };
+  if (record.type === 'a' || record.type === 'aaaa') return [input('address', 'Address', record.type === 'a' ? '192.168.1.10' : 'fd00::10')];
+  if (record.type === 'cname' || record.type === 'ptr') return [input('target', 'Target', 'server.home.arpa.')];
+  if (record.type === 'txt') return [input('value', 'Value', 'Text value')];
+  if (record.type === 'mx') return [input('priority', 'Priority', '', { type: 'number', min: 0, max: 65535, numeric: true }), input('exchange', 'Exchange', 'mail.home.arpa.')];
+  if (record.type === 'srv') return [input('priority', 'Priority', '', { type: 'number', min: 0, max: 65535, numeric: true }), input('weight', 'Weight', '', { type: 'number', min: 0, max: 65535, numeric: true }), input('port', 'Port', '', { type: 'number', min: 0, max: 65535, numeric: true }), input('target', 'Target', 'server.home.arpa.')];
+  if (record.type === 'caa') return [input('flags', 'Flags', '', { type: 'number', min: 0, max: 255, numeric: true }), input('tag', 'Tag', 'issue'), input('value', 'Value', 'letsencrypt.org')];
+  return [input('usage', 'Usage', '', { type: 'number', min: 0, max: 3, numeric: true }), input('selector', 'Selector', '', { type: 'number', min: 0, max: 1, numeric: true }), input('matching_type', 'Matching type', '', { type: 'number', min: 0, max: 2, numeric: true }), input('certificate_association_data', 'Certificate data', 'hexadecimal data')];
+};
+function openZoneEditor(zones, index) {
+  const editing = index != null;
+  const zone = editing ? L.clone(zones[index]) : { name: '', managed: { description: '', default_ttl: 300, records: [] } };
+  const managed = zone.managed;
+  const body = h('div', { class: 'stack' });
+  const error = h('div', { class: 'err' });
+  const records = h('div', { class: 'rr-list' });
+  const drawRecords = () => {
+    records.replaceChildren(...managed.records.map((record, recordIndex) => {
+      const ttl = h('input', { class: 'input mono-in', type: 'number', min: 1, max: 604800, placeholder: String(managed.default_ttl), value: record.ttl ?? '', oninput: event => { record.ttl = event.target.value === '' ? null : Number(event.target.value); } });
+      return h('div', { class: 'rr-row' },
+        h('div', { class: 'rr-head' },
+          f.field(L.t('Name'), h('input', { class: 'input mono-in', value: record.name, placeholder: '@ or host', oninput: event => { record.name = event.target.value.trim(); } })),
+          f.field(L.t('Type'), h('select', { class: 'select mono-in', onchange: event => { managed.records[recordIndex] = { ...newRecord(event.target.value), name: record.name, ttl: record.ttl }; drawRecords(); } }, RR_TYPES.map(type => h('option', { value: type, selected: record.type === type }, rrLabel(type))))),
+          f.field('TTL', ttl), h('button', { type: 'button', class: 'btn sm flat danger', onclick: () => { managed.records.splice(recordIndex, 1); drawRecords(); } }, L.ic('trash'), L.t('Delete'))),
+        h('div', { class: 'rr-data' }, ...recordFields(record)));
+    }));
+    if (!managed.records.length) records.append(L.empty(L.t('No records yet'), L.t('Add a host record such as router → 192.168.1.1.')));
+  };
+  const origin = h('input', { class: 'input mono-in', value: zone.name, placeholder: 'home.arpa', oninput: event => { zone.name = event.target.value.trim(); } });
+  const description = h('input', { class: 'input', value: managed.description || '', placeholder: L.t('Optional note for administrators'), maxlength: 200, oninput: event => { managed.description = event.target.value; } });
+  const defaultTtl = h('input', { class: 'input mono-in', type: 'number', min: 1, max: 604800, value: managed.default_ttl, oninput: event => { managed.default_ttl = Number(event.target.value); } });
+  drawRecords();
+  body.append(h('div', { class: 'fgrid' }, f.field(L.t('Zone name'), origin, L.t('Use a private name such as home.arpa. Avoid .local; it belongs to mDNS.')), f.field(L.t('Description'), description), f.field(L.t('Default TTL'), defaultTtl, L.t('Used when a record has no custom TTL.'))),
+    h('div', { class: 'row' }, h('b', {}, L.t('Records')), h('span', { class: 'sp' }), h('span', { class: 'mono muted' }, `${managed.records.length} / 1024`), h('button', { type: 'button', class: 'btn sm', disabled: managed.records.length >= 1024, onclick: () => { managed.records.push(newRecord()); drawRecords(); } }, L.ic('plus'), L.t('Add record'))), records, error);
+  L.modal({ title: L.t(editing ? 'Edit local zone' : 'Add local zone'), wide: true, body, actions: [
+    { label: L.t('Cancel') },
+    { label: L.t('Save'), kind: 'primary', onClick: () => {
+      const problems = zoneProblems(zone, zones, index);
+      if (problems.length) { error.textContent = problems.join(' '); return false; }
+      zone.name = zone.name.trim().replace(/\.$/, '').toLowerCase();
+      managed.description = String(managed.description || '').trim();
+      managed.records = managed.records.map(recordData);
+      if (editing) zones[index] = zone; else zones.push(zone);
+      L.touch(); L.rerender();
+    } }
+  ] });
+}
+function openQuickHost(zones) {
+  const managedZones = zones.map((zone, index) => ({ zone, index })).filter(item => item.zone.managed);
+  if (!managedZones.length) { openZoneEditor(zones, null); return; }
+  const draft = { zone: managedZones[0].index, name: '', address: '' }, error = h('div', { class: 'err' });
+  const body = h('div', { class: 'stack' }, f.field(L.t('Zone'), h('select', { class: 'select mono-in', onchange: event => { draft.zone = Number(event.target.value); } }, managedZones.map(item => h('option', { value: item.index }, item.zone.name)))), f.field(L.t('Host name'), h('input', { class: 'input mono-in', placeholder: 'router', oninput: event => { draft.name = event.target.value.trim(); } })), f.field(L.t('IP address'), h('input', { class: 'input mono-in', placeholder: '192.168.1.1', oninput: event => { draft.address = event.target.value.trim(); } })), error);
+  L.modal({ title: L.t('Quick hostname'), body, actions: [{ label: L.t('Cancel') }, { label: L.t('Add'), kind: 'primary', onClick: () => {
+    const zone = zones[draft.zone], type = draft.address.includes(':') ? 'aaaa' : 'a', record = { ...newRecord(type), name: draft.name, address: draft.address };
+    const candidate = L.clone(zone); candidate.managed.records.push(recordData(record));
+    const problem = validRecord(record) || zoneProblems(candidate, zones, draft.zone)[0]; if (problem || !L.v.ip(draft.address)) { error.textContent = problem || L.t('Enter a relative host name and a valid IP address.'); return false; }
+    zone.managed.records.push(recordData(record)); L.touch(); L.rerender();
+  } }] });
+}
+function localDnsTab() {
+  const config = L.D(); config.zones ??= [];
+  const zones = config.zones;
+  const remove = async (zone, index) => {
+    if (!await L.confirm({ title: L.t('Delete local zone'), text: L.t('Remove {zone} and all records from the draft configuration?', { zone: zone.name }), label: L.t('Delete'), danger: true })) return;
+    zones.splice(index, 1); L.touch(); L.rerender();
+  };
+  return h('div', { class: 'stack' },
+    h('div', { class: 'note' }, L.ic('info'), h('p', {}, L.t('Local zones answer on your network without sending these names upstream. Changes stay in the draft until you apply the configuration.'))),
+    h('div', { class: 'sec-title' }, h('h2', {}, L.t('Local zones')), h('div', { class: 'row' }, h('button', { class: 'btn', onclick: () => openQuickHost(zones) }, L.ic('plus'), L.t('Quick hostname')), h('button', { class: 'btn primary', onclick: () => openZoneEditor(zones, null) }, L.ic('plus'), L.t('Add zone')))),
+    zones.length ? h('div', { class: 'zone-list' }, zones.map((zone, index) => {
+      const managed = zone.managed, origin = zone.name || L.t('Unnamed zone');
+      return h('div', { class: 'card zone-card' }, h('div', { class: 'card-b' },
+        h('div', { class: 'row' }, h('div', { class: 'sp' }, h('h3', {}, origin), managed?.description ? h('p', { class: 'hint' }, managed.description) : null), h('span', { class: 'pill ' + (managed ? 'ok' : 'off') }, managed ? L.t('{n} records', { n: managed.records.length }) : L.t('Advanced'))),
+        managed ? h('div', { class: 'zone-meta' }, h('span', {}, L.t('Default TTL')), h('code', {}, `${managed.default_ttl}s`), h('span', {}, L.t('Names stay local'))) : h('p', { class: 'hint' }, L.t('This zone uses advanced file, view, signing, update, or transfer settings. Edit it in TOML.')),
+        h('div', { class: 'row zone-actions' }, managed ? h('button', { class: 'btn sm', onclick: () => openZoneEditor(zones, index) }, L.ic('settings'), L.t('Edit')) : null, managed ? h('button', { class: 'btn sm danger', onclick: () => remove(zone, index) }, L.ic('trash'), L.t('Delete')) : null)));
+    })) : h('div', { class: 'card' }, L.empty(L.t('No local zones'), L.t('Add one to give devices stable names such as router.home.arpa.'))),
+    h('div', { class: 'note warn' }, L.ic('alert'), h('p', {}, L.t('Clients must use Lumen as their DNS server. Local records do not change router, DHCP, or device settings by themselves.'))));
+}
+
 L.views.dns = sub => {
-  const tab = sub || 'listeners'; const body = { listeners: listenersTab, resolver: resolverTab, upstreams: upstreamsTab, limits: limitsTab }[tab] || listenersTab;
-  return [L.pageHead('DNS settings', 'Everything the daemon reads from its TOML, as a form. Nothing goes live until you apply.'), L.tabs([['listeners', 'Listeners'], ['resolver', 'Resolver'], ['upstreams', 'Upstreams'], ['limits', 'Limits']], tab, id => L.go('dns', id)), body()];
+  const tab = sub || 'listeners'; const body = { listeners: listenersTab, resolver: resolverTab, local: localDnsTab, upstreams: upstreamsTab, limits: limitsTab }[tab] || listenersTab;
+  return [L.pageHead('DNS settings', 'Everything the daemon reads from its TOML, as a form. Nothing goes live until you apply.'), L.tabs([['listeners', 'Listeners'], ['resolver', 'Resolver'], ['local', L.t('Local DNS')], ['upstreams', 'Upstreams'], ['limits', 'Limits']], tab, id => L.go('dns', id)), body()];
 };
 })();

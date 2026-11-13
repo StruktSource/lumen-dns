@@ -109,6 +109,8 @@ svg.i{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke
 code,.code{font-family:var(--mono);font-size:12.5px;background:var(--surface-2);padding:1px 5px}
 pre.code{padding:14px;overflow:auto;max-height:52vh;line-height:1.55;border:1px solid var(--rule);margin:0;white-space:pre}
 .sec-title{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin:26px 0 12px}.sec-title h2{margin:0;font-size:20px;letter-spacing:-.05em}.sec-title:first-child{margin-top:0}
+.zone-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:16px}.zone-card h3{margin:0;font-size:18px;letter-spacing:-.035em}.zone-card p{margin:4px 0 0}.zone-meta{display:grid;grid-template-columns:1fr auto;gap:8px 14px;margin:16px 0;padding-top:14px;border-top:1px solid var(--rule);font-size:13px;color:var(--text-2)}.zone-actions{justify-content:flex-end;margin-top:14px}.rr-list{display:grid;gap:10px}.rr-row{border:1px solid var(--rule);padding:12px;background:var(--surface-2)}.rr-head{display:grid;grid-template-columns:minmax(120px,1fr) 110px 110px auto;align-items:end;gap:10px}.rr-data{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:10px}.rr-list .empty{padding:26px 18px}.rr-list .empty h3{font-size:18px}
+@media(max-width:760px){.rr-head{grid-template-columns:1fr 100px}.rr-head .field:nth-child(3){grid-column:1/-1}.rr-data{grid-template-columns:1fr}}
 
 /* ---------- kpi + charts ---------- */
 .kpi{padding:16px 18px;display:grid;gap:6px;background:var(--surface);border:1px solid var(--rule);position:relative;overflow:hidden}

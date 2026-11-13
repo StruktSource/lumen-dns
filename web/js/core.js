@@ -120,6 +120,8 @@ L.providerUpstreams = providers => {
 const NULL_STRINGS = [['metrics'], ['listen', 'certificate'], ['listen', 'private_key'], ['web', 'certificate'], ['web', 'private_key'], ['filtering', 'default_profile'], ['resolver', 'root_hints'], ['resolver', 'trust_anchor'], ['resolver', 'upstream_ca']];
 L.normalizeConfig = cfg => {
   const c = L.clone(cfg);
+  c.zones ??= [];
+  for (const zone of c.zones) if (zone.managed && zone.managed.description == null) zone.managed.description = '';
   for (const path of NULL_STRINGS) { let o = c; for (const k of path.slice(0, -1)) o = o && o[k]; const last = path.at(-1); if (o && o[last] == null) o[last] = ''; }
   for (const l of c.filtering.lists) for (const k of ['category', 'url', 'path', 'text']) if (l[k] == null) l[k] = '';
   const a = c.filtering.action; if (a.kind === 'address') { a.ipv4 ??= ''; a.ipv6 ??= ''; } if (a.kind === 'cname') a.target ??= '';
@@ -132,6 +134,7 @@ L.toServer = cfg => {
   for (const l of c.filtering.lists) for (const k of ['category', 'url', 'path', 'text']) blank(l, k);
   const a = c.filtering.action; if (a.kind === 'address') { blank(a, 'ipv4'); blank(a, 'ipv6'); } else { delete a.ipv4; delete a.ipv6; } if (a.kind !== 'cname') delete a.target;
   for (const sel of c.resolver.providers) { if (sel.protocol !== 'auto') { delete sel.transport_priority; delete sel.encryption; } else delete sel.encryption; }
+  for (const zone of c.zones || []) blank(zone.managed, 'description');
   if (c.resolver.mode !== 'forward') c.resolver.strategy = null;
   if (c.resolver.mode === 'forward') { c.resolver.warm.enabled = false; c.resolver.prefetch.enabled = false; c.resolver.fallback.enabled = false; c.resolver.hedge_ms = 0; }
   return { config: c };
@@ -248,6 +251,23 @@ L.validate = cfg => {
   if (r.mode === 'recursive' && (r.attempts + (r.dnssec ? 1 : 0)) * r.upstream_timeout_ms > (f.enabled ? f.recursive_timeout_ms : cfg.limits.query_timeout_ms)) bad('resolver.attempts', 'walk attempts plus DNSSEC recovery must fit the recursive deadline');
   if (!(r.hedge_ms === 0 || (r.hedge_ms >= 100 && r.hedge_ms <= 5000))) bad('resolver.hedge_ms', 'must be 0 or 100–5000'); if (r.hedge_ms && r.mode !== 'recursive') bad('resolver.hedge_ms', 'recursive mode only');
   if (r.warm.zones.length > 64) bad('resolver.warm.zones', 'at most 64 zones');
+  if (!Array.isArray(cfg.zones) || cfg.zones.length > 64) bad('zones', 'at most 64 zones');
+  const zoneNames = new Set();
+  for (const [i, zone] of (cfg.zones || []).entries()) {
+    const name = String(zone.name || '').replace(/\.$/, '').toLowerCase();
+    if (!L.v.domain(name)) bad(`zones[${i}].name`, 'invalid DNS zone name');
+    if (zoneNames.has(name)) bad(`zones[${i}].name`, 'duplicate zone name');
+    zoneNames.add(name);
+    if (!zone.managed) continue; // Advanced TOML zones are checked by the daemon.
+    if (name === 'local' || name.endsWith('.local')) bad(`zones[${i}].name`, '.local belongs to mDNS');
+    const managed = zone.managed;
+    if (!(Number.isInteger(managed.default_ttl) && managed.default_ttl >= 1 && managed.default_ttl <= 604800)) bad(`zones[${i}].managed.default_ttl`, 'must be 1–604800 seconds');
+    if (!Array.isArray(managed.records) || managed.records.length > 1024) bad(`zones[${i}].managed.records`, 'at most 1024 records');
+    for (const [j, record] of (managed.records || []).entries()) {
+      if (!['a', 'aaaa', 'cname', 'txt', 'mx', 'srv', 'ptr', 'caa', 'tlsa'].includes(record.type)) bad(`zones[${i}].managed.records[${j}].type`, 'unsupported record type');
+      if (record.ttl != null && !(Number.isInteger(record.ttl) && record.ttl >= 1 && record.ttl <= 604800)) bad(`zones[${i}].managed.records[${j}].ttl`, 'must be empty or 1–604800 seconds');
+    }
+  }
   if (cfg.metrics && !/^(127\.|\[::1\])/.test(cfg.metrics)) bad('metrics', 'must be loopback');
   const F = cfg.filtering, ids = n => new Set(F[n].map(x => x.id));
   if (F.default_profile && !ids('profiles').has(F.default_profile)) bad('filtering.default_profile', 'unknown profile');
