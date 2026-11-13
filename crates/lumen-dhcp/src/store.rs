@@ -45,8 +45,19 @@ impl Store {
              CREATE TABLE IF NOT EXISTS prefixes6 (
                  prefix TEXT PRIMARY KEY, client BLOB NOT NULL, iaid INTEGER NOT NULL,
                  expires INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS reconf_keys (client BLOB PRIMARY KEY, key BLOB NOT NULL);
              CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);",
         )?;
+        // Databases made before temporary addresses existed have no such column.
+        let has_column = connection
+            .prepare("SELECT 1 FROM pragma_table_info('leases6') WHERE name = 'temporary'")?
+            .exists([])?;
+        if !has_column {
+            connection.execute(
+                "ALTER TABLE leases6 ADD COLUMN temporary INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -122,7 +133,7 @@ impl Store {
     pub fn load6(&self, now: u64) -> rusqlite::Result<Vec<Lease6>> {
         let connection = self.connection();
         let mut statement = connection.prepare(
-            "SELECT ip, client, iaid, hostname, expires FROM leases6 WHERE expires > ?1",
+            "SELECT ip, client, iaid, hostname, expires, temporary FROM leases6 WHERE expires > ?1",
         )?;
         let rows = statement.query_map(params![clamp_secs(now)], |row| {
             Ok((
@@ -131,11 +142,12 @@ impl Store {
                 row.get::<_, u32>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, bool>(5)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (ip, client, iaid, hostname, expires) = row?;
+            let (ip, client, iaid, hostname, expires, temporary) = row?;
             if let Ok(ip) = ip.parse::<Ipv6Addr>() {
                 out.push(Lease6 {
                     ip,
@@ -144,10 +156,43 @@ impl Store {
                     hostname,
                     expires: u64::try_from(expires).unwrap_or(0),
                     offered: false,
+                    temporary,
                 });
             }
         }
         Ok(out)
+    }
+
+    /// The keys of clients that agreed to be reconfigured.
+    ///
+    /// # Errors
+    /// The database cannot be read.
+    pub fn load_reconf_keys(&self) -> rusqlite::Result<Vec<(Vec<u8>, [u8; 16])>> {
+        let connection = self.connection();
+        let mut statement = connection.prepare("SELECT client, key FROM reconf_keys")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (client, key) = row?;
+            if let Ok(key) = <[u8; 16]>::try_from(key.as_slice()) {
+                out.push((client, key));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Keep the Reconfigure key of a client.
+    ///
+    /// # Errors
+    /// The database cannot be written.
+    pub fn put_reconf_key(&self, client: &[u8], key: &[u8; 16]) -> rusqlite::Result<()> {
+        self.connection().execute(
+            "INSERT OR REPLACE INTO reconf_keys (client, key) VALUES (?1, ?2)",
+            params![client, key.as_slice()],
+        )?;
+        Ok(())
     }
 
     /// Live delegated prefixes.
@@ -234,14 +279,15 @@ impl Store {
     /// The database cannot be written.
     pub fn put6(&self, lease: &Lease6) -> rusqlite::Result<()> {
         self.connection().execute(
-            "INSERT OR REPLACE INTO leases6 (ip, client, iaid, hostname, expires)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO leases6 (ip, client, iaid, hostname, expires, temporary)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 lease.ip.to_string(),
                 lease.client,
                 lease.iaid,
                 lease.hostname,
-                clamp_secs(lease.expires)
+                clamp_secs(lease.expires),
+                lease.temporary
             ],
         )?;
         Ok(())
@@ -294,6 +340,7 @@ mod tests {
             hostname: None,
             expires: 1000,
             offered: false,
+            temporary: true,
         };
         store.put4(&v4).unwrap();
         store.put6(&v6).unwrap();

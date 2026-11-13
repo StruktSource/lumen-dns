@@ -1,12 +1,16 @@
 //! Stateful `DHCPv6` (RFC 8415) decisions for one scope: one `IA_NA` address per client and `IAID`.
 
 use crate::v4::host_label;
+use dhcproto::Encodable;
 use dhcproto::v6::{
-    DhcpOption, DhcpOptions, IAAddr, IANA, IAPD, IAPrefix, Message, MessageType, OptionCode,
-    Status, StatusCode,
+    Authentication, DhcpOption, DhcpOptions, IAAddr, IANA, IAPD, IAPrefix, IATA, Message,
+    MessageType, OptionCode, Status, StatusCode,
 };
+use hmac::{Hmac, Mac};
 use ipnet::Ipv6Net;
 use lumen_config::{DhcpScope6, parse_hex};
+use md5::Md5;
+use rand_core::{OsRng, RngCore};
 use std::{collections::HashMap, net::Ipv6Addr};
 
 /// How long an advertised address is held for the client it was advertised to.
@@ -28,6 +32,8 @@ pub struct Lease6 {
     pub expires: u64,
     /// An advertisement is held briefly and is neither stored nor published.
     pub offered: bool,
+    /// A temporary address (`IA_TA`): never renewed, never published in DNS.
+    pub temporary: bool,
 }
 
 /// A delegated prefix (`IA_PD`) or an offer of one.
@@ -49,6 +55,11 @@ pub enum Change6 {
     End(Ipv6Addr),
     BindPrefix(Delegation6),
     EndPrefix(Ipv6Net),
+    /// A client agreed to be reconfigured; this is the key to sign its Reconfigure messages with.
+    ReconfigureKey {
+        client: Vec<u8>,
+        key: [u8; 16],
+    },
 }
 
 /// The answer to one client message.
@@ -70,6 +81,8 @@ pub struct Engine6 {
     prefix_reserved: HashMap<Vec<u8>, Ipv6Net>,
     /// See `v4::Engine::set_reserve`.
     reserve: Option<u8>,
+    /// Per-client keys for the Reconfigure Key protocol.
+    reconf_keys: HashMap<Vec<u8>, [u8; 16]>,
 }
 
 /// What the prefix part of a message did.
@@ -90,6 +103,17 @@ fn client_name(request: &Message) -> Option<String> {
         }
         _ => None,
     })
+}
+
+/// Drop any `Authentication` option (`DhcpOptions::insert` adds rather than replaces).
+fn without_authentication(message: &mut Message) {
+    let mut kept = DhcpOptions::new();
+    for option in message.opts().iter() {
+        if !matches!(option, DhcpOption::Authentication(_)) {
+            kept.insert(option.clone());
+        }
+    }
+    message.set_opts(kept);
 }
 
 fn status(code: Status, message: &str) -> DhcpOption {
@@ -148,6 +172,7 @@ impl Engine6 {
             prefix_owner,
             prefix_reserved,
             reserve: None,
+            reconf_keys: HashMap::new(),
         }
     }
 
@@ -357,11 +382,9 @@ impl Engine6 {
         if let Some((ip, _)) = self.reservations.get(client) {
             return self.usable(*ip, client, now).then_some(*ip);
         }
-        if let Some(lease) = self
-            .leases
-            .values()
-            .find(|lease| lease.client == client && lease.iaid == iaid && lease.expires > now)
-            && self.usable(lease.ip, client, now)
+        if let Some(lease) = self.leases.values().find(|lease| {
+            lease.client == client && lease.iaid == iaid && lease.expires > now && !lease.temporary
+        }) && self.usable(lease.ip, client, now)
         {
             return Some(lease.ip);
         }
@@ -455,6 +478,7 @@ impl Engine6 {
             hostname,
             expires: now + u64::from(self.scope.valid_secs),
             offered: false,
+            temporary: false,
         };
         self.leases.insert(ip, lease.clone());
         lease
@@ -478,8 +502,133 @@ impl Engine6 {
                 hostname: None,
                 expires: now + OFFER_HOLD_SECS,
                 offered: true,
+                temporary: false,
             },
         );
+    }
+
+    /// An address a client may use for outgoing connections only. Each one is picked at random
+    /// from the free addresses, so it does not tie one client's connections together. It is
+    /// never renewed and never gets a DNS name.
+    fn pick_temporary(&self, client: &[u8], now: u64) -> Option<Ipv6Addr> {
+        // A device with a reservation takes only that address.
+        if self.reservations.contains_key(client) {
+            return None;
+        }
+        let (start, end) = self.range();
+        let size = end - start + 1;
+        let mut seed = [0u8; 16];
+        OsRng.fill_bytes(&mut seed);
+        let first = u128::from_be_bytes(seed) % size;
+        for step in 0..size {
+            let candidate = Ipv6Addr::from(start + (first + step) % size);
+            if self.usable(candidate, client, now) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn temporary_option(&self, iaid: u32, address: Option<Ipv6Addr>) -> DhcpOption {
+        let mut ia = IATA {
+            id: iaid,
+            opts: DhcpOptions::new(),
+        };
+        match address {
+            Some(addr) => ia.opts.insert(DhcpOption::IAAddr(IAAddr {
+                addr,
+                preferred_life: self.scope.preferred_secs,
+                valid_life: self.scope.valid_secs,
+                opts: DhcpOptions::new(),
+            })),
+            None => ia
+                .opts
+                .insert(status(Status::NoAddrsAvail, "no addresses available")),
+        }
+        DhcpOption::IATA(ia)
+    }
+
+    /// Answer the `IA_TA` parts of a message. Returns true when an address was given.
+    #[allow(clippy::too_many_arguments)]
+    fn temporaries(
+        &mut self,
+        kind: MessageType,
+        request: &Message,
+        client: &[u8],
+        rapid: bool,
+        now: u64,
+        reply: &mut Message,
+        changes: &mut Vec<Change6>,
+    ) -> bool {
+        let mut granted = false;
+        for option in request.opts().iter() {
+            let DhcpOption::IATA(ia) = option else {
+                continue;
+            };
+            let named: Vec<Ipv6Addr> = ia
+                .opts
+                .iter()
+                .filter_map(|inner| match inner {
+                    DhcpOption::IAAddr(address) => Some(address.addr),
+                    _ => None,
+                })
+                .collect();
+            match kind {
+                MessageType::Release => {
+                    for ip in named {
+                        let held = self.leases.get(&ip).is_some_and(|lease| {
+                            lease.client == client && lease.iaid == ia.id && lease.temporary
+                        });
+                        if held {
+                            self.leases.remove(&ip);
+                            changes.push(Change6::End(ip));
+                        }
+                    }
+                }
+                MessageType::Solicit | MessageType::Request => {
+                    // A Request names the address that was advertised; keep it when it is still
+                    // ours to give.
+                    let offered = named.into_iter().find(|ip| {
+                        self.leases.get(ip).is_some_and(|lease| {
+                            lease.client == client
+                                && lease.iaid == ia.id
+                                && lease.temporary
+                                && lease.expires > now
+                        })
+                    });
+                    let Some(ip) = offered.or_else(|| self.pick_temporary(client, now)) else {
+                        reply.opts_mut().insert(self.temporary_option(ia.id, None));
+                        continue;
+                    };
+                    granted = true;
+                    let binding = kind == MessageType::Request || rapid;
+                    let lease = Lease6 {
+                        ip,
+                        client: client.to_vec(),
+                        iaid: ia.id,
+                        hostname: None,
+                        expires: now
+                            + if binding {
+                                u64::from(self.scope.valid_secs)
+                            } else {
+                                OFFER_HOLD_SECS
+                            },
+                        offered: !binding,
+                        temporary: true,
+                    };
+                    self.leases.insert(ip, lease.clone());
+                    if binding {
+                        changes.push(Change6::Bind(lease));
+                    }
+                    reply
+                        .opts_mut()
+                        .insert(self.temporary_option(ia.id, Some(ip)));
+                }
+                // Temporary addresses are not renewed: the client asks again when they run out.
+                _ => {}
+            }
+        }
+        granted
     }
 
     /// The `IA_NA` options of a message, as (iaid, addresses the client names).
@@ -524,6 +673,13 @@ impl Engine6 {
                 _ => None,
             })
             .collect()
+    }
+
+    fn has_temporary_request(request: &Message) -> bool {
+        request
+            .opts()
+            .iter()
+            .any(|option| matches!(option, DhcpOption::IATA(_)))
     }
 
     fn has_prefix_request(request: &Message) -> bool {
@@ -702,9 +858,125 @@ impl Engine6 {
         outcome
     }
 
+    /// Restore the keys of clients that agreed to be reconfigured.
+    pub fn restore_reconf_keys(&mut self, keys: Vec<(Vec<u8>, [u8; 16])>) {
+        if self.scope.reconfigure {
+            self.reconf_keys.extend(keys);
+        }
+    }
+
+    /// The client that holds `ip` as a bound, permanent address, if it can be reconfigured.
+    #[must_use]
+    pub fn reconfigurable_client(&self, ip: Ipv6Addr, now: u64) -> Option<Vec<u8>> {
+        self.leases
+            .get(&ip)
+            .filter(|lease| !lease.offered && !lease.temporary && lease.expires > now)
+            .map(|lease| lease.client.clone())
+            .filter(|client| self.reconf_keys.contains_key(client))
+    }
+
+    /// Build a signed Reconfigure message for `client`: it asks the client to send a Renew (or,
+    /// with `info_only`, an Information-request). `None` when the client never agreed.
+    #[must_use]
+    pub fn reconfigure_message(&self, client: &[u8], info_only: bool, now: u64) -> Option<Message> {
+        let key = self.reconf_keys.get(client)?;
+        let mut message = Message::new(MessageType::Reconfigure);
+        let mut seed = [0u8; 3];
+        OsRng.fill_bytes(&mut seed);
+        message.set_xid(seed);
+        let options = message.opts_mut();
+        options.insert(DhcpOption::ClientId(client.to_vec()));
+        options.insert(DhcpOption::ServerId(self.server_id.clone()));
+        options.insert(DhcpOption::ReconfMsg(if info_only {
+            MessageType::InformationRequest
+        } else {
+            MessageType::Renew
+        }));
+        let sign = |digest: &[u8], message: &mut Message| {
+            let mut info = vec![2u8];
+            info.extend_from_slice(digest);
+            // `insert` adds; the signed copy must replace the zeroed one.
+            without_authentication(message);
+            message
+                .opts_mut()
+                .insert(DhcpOption::Authentication(Authentication {
+                    proto: 3,
+                    algo: 1,
+                    rdm: 0,
+                    replay_detection: now,
+                    info,
+                }));
+        };
+        // The digest covers the whole message with the digest field zeroed.
+        sign(&[0u8; 16], &mut message);
+        let bytes = message.to_vec().ok()?;
+        let mut mac = <Hmac<Md5> as Mac>::new_from_slice(key).ok()?;
+        mac.update(&bytes);
+        sign(&mac.finalize().into_bytes(), &mut message);
+        Some(message)
+    }
+
+    /// Tell a client that agreed to Reconfigure to accept it, and give it its key.
+    fn offer_reconfigure(&mut self, request: &Message, reply: &mut Reply6) {
+        let kind = request.msg_type();
+        if !self.scope.reconfigure
+            || request.opts().get(OptionCode::ReconfAccept).is_none()
+            || !matches!(
+                kind,
+                MessageType::Solicit
+                    | MessageType::Request
+                    | MessageType::Renew
+                    | MessageType::Rebind
+                    | MessageType::InformationRequest
+            )
+        {
+            return;
+        }
+        let Some(DhcpOption::ClientId(client)) = request.opts().get(OptionCode::ClientId).cloned()
+        else {
+            return;
+        };
+        let reply_kind = reply.message.msg_type();
+        if !matches!(reply_kind, MessageType::Advertise | MessageType::Reply) {
+            return;
+        }
+        reply.message.opts_mut().insert(DhcpOption::ReconfAccept);
+        // The key goes only in a Reply, never in an Advertise that another server may win.
+        if reply_kind != MessageType::Reply {
+            return;
+        }
+        let key = *self.reconf_keys.entry(client.clone()).or_insert_with(|| {
+            let mut key = [0u8; 16];
+            OsRng.fill_bytes(&mut key);
+            reply.changes.push(Change6::ReconfigureKey {
+                client: client.clone(),
+                key,
+            });
+            key
+        });
+        let mut info = vec![1u8];
+        info.extend_from_slice(&key);
+        reply
+            .message
+            .opts_mut()
+            .insert(DhcpOption::Authentication(Authentication {
+                proto: 3,
+                algo: 1,
+                rdm: 0,
+                replay_detection: 0,
+                info,
+            }));
+    }
+
     /// Decide what to answer. `None` means stay silent.
-    #[allow(clippy::too_many_lines)]
     pub fn handle(&mut self, request: &Message, now: u64) -> Option<Reply6> {
+        let mut reply = self.answer_request(request, now)?;
+        self.offer_reconfigure(request, &mut reply);
+        Some(reply)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn answer_request(&mut self, request: &Message, now: u64) -> Option<Reply6> {
         let kind = request.msg_type();
         let client = match request.opts().get(OptionCode::ClientId) {
             Some(DhcpOption::ClientId(id)) if !id.is_empty() && id.len() <= 130 => id.clone(),
@@ -746,7 +1018,10 @@ impl Engine6 {
 
         match kind {
             MessageType::Solicit => {
-                if asked.is_empty() && !Self::has_prefix_request(request) {
+                if asked.is_empty()
+                    && !Self::has_prefix_request(request)
+                    && !Self::has_temporary_request(request)
+                {
                     return None;
                 }
                 let rapid = request.opts().get(OptionCode::RapidCommit).is_some();
@@ -793,6 +1068,8 @@ impl Engine6 {
                 let pd =
                     self.prefixes(kind, request, &client, rapid, now, &mut reply, &mut changes);
                 any |= pd.granted;
+                any |=
+                    self.temporaries(kind, request, &client, rapid, now, &mut reply, &mut changes);
                 if rapid && any {
                     reply.opts_mut().insert(DhcpOption::RapidCommit);
                 }
@@ -815,7 +1092,10 @@ impl Engine6 {
                         // Only an address this client already holds can be extended.
                         wanted.iter().copied().find(|ip| {
                             self.leases.get(ip).is_some_and(|lease| {
-                                lease.client == client && lease.iaid == iaid && lease.expires > now
+                                lease.client == client
+                                    && lease.iaid == iaid
+                                    && lease.expires > now
+                                    && !lease.temporary
                             })
                         })
                     } else {
@@ -854,6 +1134,17 @@ impl Engine6 {
                 let pd =
                     self.prefixes(kind, request, &client, false, now, &mut reply, &mut changes);
                 granted |= pd.granted;
+                if kind == MessageType::Request {
+                    granted |= self.temporaries(
+                        kind,
+                        request,
+                        &client,
+                        false,
+                        now,
+                        &mut reply,
+                        &mut changes,
+                    );
+                }
                 // A rebind to a server that knows nothing about the client gets no answer, so
                 // another server can take it.
                 if kind == MessageType::Rebind && !granted {
@@ -901,6 +1192,7 @@ impl Engine6 {
                 }
                 let mut reply = self.answer(MessageType::Reply, request, &client);
                 self.prefixes(kind, request, &client, false, now, &mut reply, &mut changes);
+                self.temporaries(kind, request, &client, false, now, &mut reply, &mut changes);
                 reply.opts_mut().insert(status(Status::Success, "released"));
                 Some(Reply6 {
                     message: reply,
@@ -937,6 +1229,7 @@ mod tests {
             preferred_secs: 1000,
             valid_secs: 2000,
             delegation: None,
+            reconfigure: false,
             reservations: Vec::new(),
         }
     }
@@ -1411,6 +1704,7 @@ mod tests {
             hostname: None,
             expires: 500,
             offered: false,
+            temporary: false,
         };
         assert!(engine.adopt(lease.clone(), 0));
         let mut other = lease.clone();
@@ -1421,5 +1715,282 @@ mod tests {
         assert!(!engine.adopt(foreign, 0));
         engine.forget(lease.ip);
         assert!(engine.bound().is_empty());
+    }
+
+    fn temp_message(
+        kind: MessageType,
+        duid: u8,
+        iaid: u32,
+        addr: Option<&str>,
+        server: bool,
+    ) -> Message {
+        let mut message = Message::new_with_id(kind, [5, 5, 5]);
+        let options = message.opts_mut();
+        options.insert(DhcpOption::ClientId(vec![0, 1, 0, 1, duid]));
+        if server {
+            options.insert(DhcpOption::ServerId(SERVER.to_vec()));
+        }
+        let mut ia = IATA {
+            id: iaid,
+            opts: DhcpOptions::new(),
+        };
+        if let Some(addr) = addr {
+            ia.opts.insert(DhcpOption::IAAddr(IAAddr {
+                addr: addr.parse().unwrap(),
+                preferred_life: 0,
+                valid_life: 0,
+                opts: DhcpOptions::new(),
+            }));
+        }
+        options.insert(DhcpOption::IATA(ia));
+        message
+    }
+
+    fn temp_granted(reply: &Reply6) -> Option<Ipv6Addr> {
+        reply.message.opts().iter().find_map(|option| match option {
+            DhcpOption::IATA(ia) => ia.opts.iter().find_map(|inner| match inner {
+                DhcpOption::IAAddr(a) => Some(a.addr),
+                _ => None,
+            }),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn temporary_addresses_are_random_unnamed_and_not_renewed() {
+        let scope = scope();
+        let mut engine = Engine6::new(&scope, SERVER.to_vec(), Vec::new(), 0);
+        let advert = engine
+            .handle(&temp_message(MessageType::Solicit, 1, 3, None, false), 10)
+            .unwrap();
+        assert_eq!(advert.message.msg_type(), MessageType::Advertise);
+        let ip = temp_granted(&advert).unwrap();
+        assert!(scope.prefix.contains(&ip));
+        assert!(engine.bound().is_empty(), "an advertisement is not a lease");
+
+        let done = engine
+            .handle(
+                &temp_message(MessageType::Request, 1, 3, Some(&ip.to_string()), true),
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            temp_granted(&done),
+            Some(ip),
+            "the advertised address is kept"
+        );
+        let bound = engine.bound();
+        assert_eq!(bound.len(), 1);
+        assert!(bound[0].temporary && bound[0].hostname.is_none());
+        assert_eq!(bound[0].expires, 10 + 2000);
+
+        // Renew does nothing for a temporary address, and a permanent request does not take it.
+        assert!(
+            engine
+                .handle(
+                    &temp_message(MessageType::Renew, 1, 3, Some(&ip.to_string()), true),
+                    20
+                )
+                .unwrap()
+                .changes
+                .is_empty()
+        );
+        let permanent = solicit_and_request(&mut engine, 1, 30);
+        assert_ne!(permanent, ip);
+        assert_eq!(engine.bound().len(), 2);
+
+        // Different asks give different addresses over time (random picks, 256 candidates).
+        let mut seen = std::collections::HashSet::new();
+        for duid in 10..30u8 {
+            let reply = engine
+                .handle(
+                    &temp_message(MessageType::Solicit, duid, 1, None, false),
+                    40,
+                )
+                .unwrap();
+            seen.insert(temp_granted(&reply).unwrap());
+        }
+        assert!(seen.len() > 1);
+
+        let released = engine
+            .handle(
+                &temp_message(MessageType::Release, 1, 3, Some(&ip.to_string()), true),
+                50,
+            )
+            .unwrap();
+        assert_eq!(released.changes, vec![Change6::End(ip)]);
+    }
+
+    #[test]
+    fn a_reserved_device_and_a_full_range_get_no_temporary_address() {
+        let mut scope = scope();
+        scope.reservations.push(lumen_config::Reservation6 {
+            duid: "0001000109".into(),
+            ip: "fd00:1::2a".parse().unwrap(),
+            hostname: None,
+        });
+        scope.range_end = scope.range_start;
+        let mut engine = Engine6::new(&scope, SERVER.to_vec(), Vec::new(), 0);
+        let reserved = engine
+            .handle(&temp_message(MessageType::Solicit, 9, 1, None, false), 0)
+            .unwrap();
+        assert_eq!(temp_granted(&reserved), None);
+        // One address in the range: the first client takes it, the second finds none.
+        let first = engine
+            .handle(&temp_message(MessageType::Request, 1, 1, None, true), 0)
+            .unwrap();
+        assert!(temp_granted(&first).is_some());
+        let second = engine
+            .handle(&temp_message(MessageType::Solicit, 2, 1, None, false), 1)
+            .unwrap();
+        assert_eq!(temp_granted(&second), None);
+    }
+
+    fn auth_of(message: &Message) -> Option<Authentication> {
+        message.opts().iter().find_map(|option| match option {
+            DhcpOption::Authentication(a) => Some(a.clone()),
+            _ => None,
+        })
+    }
+
+    fn accepting(kind: MessageType, duid: u8, server: bool) -> Message {
+        let mut message = client(kind, duid, 1, server, None);
+        message.opts_mut().insert(DhcpOption::ReconfAccept);
+        message
+    }
+
+    #[test]
+    fn a_client_that_accepts_gets_a_key_and_can_be_reconfigured_with_a_valid_signature() {
+        let mut scope = scope();
+        scope.reconfigure = true;
+        let mut engine = Engine6::new(&scope, SERVER.to_vec(), Vec::new(), 0);
+        // An Advertise only says "accept"; the key comes in the Reply.
+        let advert = engine
+            .handle(&accepting(MessageType::Solicit, 1, false), 0)
+            .unwrap();
+        assert!(
+            advert
+                .message
+                .opts()
+                .get(OptionCode::ReconfAccept)
+                .is_some()
+        );
+        assert!(auth_of(&advert.message).is_none());
+        let ip = granted(&advert).unwrap();
+        let reply = engine
+            .handle(
+                &{
+                    let mut m = accepting(MessageType::Request, 1, true);
+                    m = {
+                        let mut with_addr =
+                            client(MessageType::Request, 1, 1, true, Some(&ip.to_string()));
+                        with_addr.opts_mut().insert(DhcpOption::ReconfAccept);
+                        drop(m);
+                        with_addr
+                    };
+                    m
+                },
+                0,
+            )
+            .unwrap();
+        let auth = auth_of(&reply.message).expect("a reconfigure key");
+        assert_eq!(
+            (auth.proto, auth.algo, auth.rdm, auth.info[0]),
+            (3, 1, 0, 1)
+        );
+        let key: [u8; 16] = auth.info[1..].try_into().unwrap();
+        assert!(matches!(
+            reply.changes.as_slice(),
+            [Change6::Bind(_), Change6::ReconfigureKey { .. }]
+        ));
+        // The key stays the same for the same client.
+        let again = engine
+            .handle(
+                &{
+                    let mut m = client(MessageType::Renew, 1, 1, true, Some(&ip.to_string()));
+                    m.opts_mut().insert(DhcpOption::ReconfAccept);
+                    m
+                },
+                5,
+            )
+            .unwrap();
+        assert_eq!(auth_of(&again.message).unwrap().info[1..], key);
+        assert!(
+            !again
+                .changes
+                .iter()
+                .any(|c| matches!(c, Change6::ReconfigureKey { .. }))
+        );
+
+        assert_eq!(
+            engine.reconfigurable_client(ip, 6),
+            Some(vec![0, 1, 0, 1, 1])
+        );
+        let message = engine
+            .reconfigure_message(&[0, 1, 0, 1, 1], false, 6)
+            .unwrap();
+        assert_eq!(message.msg_type(), MessageType::Reconfigure);
+        assert!(matches!(
+            message.opts().get(OptionCode::ReconfMsg),
+            Some(DhcpOption::ReconfMsg(MessageType::Renew))
+        ));
+        // The client verifies the digest: the message with the digest zeroed, signed with the key.
+        let sent = auth_of(&message).unwrap();
+        assert_eq!((sent.proto, sent.info[0], sent.info.len()), (3, 2, 17));
+        assert_eq!(
+            message
+                .opts()
+                .iter()
+                .filter(|o| matches!(o, DhcpOption::Authentication(_)))
+                .count(),
+            1
+        );
+        let mut zeroed = message.clone();
+        let mut copy = sent.clone();
+        copy.info = vec![2; 1].into_iter().chain([0u8; 16]).collect();
+        without_authentication(&mut zeroed);
+        zeroed.opts_mut().insert(DhcpOption::Authentication(copy));
+        let mut mac = <Hmac<Md5> as Mac>::new_from_slice(&key).unwrap();
+        mac.update(&zeroed.to_vec().unwrap());
+        assert_eq!(mac.finalize().into_bytes().as_slice(), &sent.info[1..]);
+
+        let info = engine
+            .reconfigure_message(&[0, 1, 0, 1, 1], true, 6)
+            .unwrap();
+        assert!(matches!(
+            info.opts().get(OptionCode::ReconfMsg),
+            Some(DhcpOption::ReconfMsg(MessageType::InformationRequest))
+        ));
+        assert!(
+            engine.reconfigure_message(&[9, 9], false, 6).is_none(),
+            "unknown client"
+        );
+    }
+
+    #[test]
+    fn reconfigure_is_off_unless_the_scope_enables_it_and_the_client_asks() {
+        let mut off = Engine6::new(&scope(), SERVER.to_vec(), Vec::new(), 0);
+        let reply = off
+            .handle(&accepting(MessageType::Solicit, 1, false), 0)
+            .unwrap();
+        assert!(reply.message.opts().get(OptionCode::ReconfAccept).is_none());
+        let mut scope = scope();
+        scope.reconfigure = true;
+        let mut on = Engine6::new(&scope, SERVER.to_vec(), Vec::new(), 0);
+        let plain = on
+            .handle(&client(MessageType::Solicit, 1, 1, false, None), 0)
+            .unwrap();
+        assert!(
+            plain.message.opts().get(OptionCode::ReconfAccept).is_none(),
+            "the client did not ask"
+        );
+        // Keys that were saved come back.
+        on.restore_reconf_keys(vec![(vec![0, 1, 0, 1, 7], [3; 16])]);
+        assert!(on.reconfigure_message(&[0, 1, 0, 1, 7], false, 0).is_some());
+        off.restore_reconf_keys(vec![(vec![0, 1, 0, 1, 7], [3; 16])]);
+        assert!(
+            off.reconfigure_message(&[0, 1, 0, 1, 7], false, 0)
+                .is_none()
+        );
     }
 }

@@ -294,6 +294,10 @@ pub struct DhcpScope6 {
     pub reservations: Vec<Reservation6>,
     /// Prefixes handed to routers (`IA_PD`). Off unless set.
     pub delegation: Option<PrefixDelegation>,
+    /// Let clients that ask for it be told to renew (Reconfigure, RFC 8415 section 18.4).
+    /// Off by default.
+    #[serde(default)]
+    pub reconfigure: bool,
 }
 
 /// A pool of prefixes a router can ask for (prefix delegation, RFC 8415 `IA_PD`).
@@ -2195,6 +2199,7 @@ mod tests {
             preferred_secs: 3600,
             valid_secs: 7200,
             delegation: None,
+            reconfigure: false,
             reservations: vec![Reservation6 {
                 duid: "00010001aabbccdd".into(),
                 ip: "fd00:1::10".parse().unwrap(),

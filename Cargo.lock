@@ -515,6 +515,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -959,6 +960,15 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -1470,9 +1480,11 @@ name = "lumen-dhcp"
 version = "0.7.0"
 dependencies = [
  "dhcproto",
+ "hmac",
  "ipnet",
  "lumen-config",
  "lumen-resolver",
+ "md-5",
  "nix",
  "rand_core 0.6.4",
  "ring",
@@ -1576,6 +1588,16 @@ dependencies = [
  "lumen-filter",
  "lumen-store",
  "tokio",
+]
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
 ]
 
 [[package]]

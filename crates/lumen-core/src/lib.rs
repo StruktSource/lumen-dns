@@ -512,6 +512,13 @@ impl Drop for ActiveQuery<'_> {
 }
 
 impl lumen_web::Host for Service {
+    fn dhcp_reconfigure(&self, ip: std::net::IpAddr, info_only: bool) -> Result<(), String> {
+        self.dhcp
+            .get()
+            .ok_or_else(|| "the DHCP server is not running".to_owned())?
+            .reconfigure(ip, info_only)
+    }
+
     fn dhcp(&self) -> Option<lumen_web::DhcpInfo> {
         let snapshot = self.dhcp.get()?.snapshot();
         Some(lumen_web::DhcpInfo {
@@ -534,6 +541,8 @@ impl lumen_web::Host for Service {
                     family: l.family,
                     ip: l.ip,
                     prefix_len: l.prefix_len,
+                    temporary: l.temporary,
+                    reconfigurable: l.reconfigurable,
                     client: l.client,
                     hostname: l.hostname,
                     expires: l.expires,

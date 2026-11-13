@@ -49,6 +49,7 @@ fn config(lease_file: std::path::PathBuf) -> Dhcp {
             preferred_secs: 1800,
             valid_secs: 3600,
             delegation: None,
+            reconfigure: false,
             reservations: Vec::new(),
         }],
         ..Dhcp::default()
@@ -598,5 +599,68 @@ async fn a_partner_with_the_wrong_secret_is_not_trusted() {
     assert!(
         standby.failover.unwrap().active,
         "a stranger does not keep the standby quiet"
+    );
+}
+
+#[tokio::test]
+async fn a_client_that_accepted_is_told_to_renew_with_a_signed_reconfigure() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path().join("leases.db"));
+    config.scopes.clear();
+    // The device's address is the loopback address, so the message can reach the test client.
+    config.scopes6[0].prefix = "::1/128".parse().unwrap();
+    config.scopes6[0].range_start = "::1".parse().unwrap();
+    config.scopes6[0].range_end = "::1".parse().unwrap();
+    config.scopes6[0].interface = None;
+    config.scopes6[0].reconfigure = true;
+    let client = UdpSocket::bind("[::1]:0").await.unwrap();
+    config.client_port6 = client.local_addr().unwrap().port();
+    let server = lumen_dhcp::start(&config, Arc::new(Hosts::new(Some("home.lan"))))
+        .await
+        .unwrap();
+    let address = server.bound6.unwrap();
+
+    let mut solicit = v6_message(v6::MessageType::Solicit, None, None);
+    solicit.opts_mut().insert(v6::DhcpOption::ReconfAccept);
+    let advert = ask6(&client, address, &solicit).await;
+    let ip = lease6(&advert).unwrap();
+    let Some(v6::DhcpOption::ServerId(server_id)) =
+        advert.opts().get(v6::OptionCode::ServerId).cloned()
+    else {
+        panic!("no server id");
+    };
+    // Before the client agreed there is nothing to send.
+    assert!(server.handle().reconfigure(ip.into(), false).is_err());
+    let mut request = v6_message(v6::MessageType::Request, Some(ip), Some(server_id));
+    request.opts_mut().insert(v6::DhcpOption::ReconfAccept);
+    let reply = ask6(&client, address, &request).await;
+    assert!(
+        reply
+            .opts()
+            .iter()
+            .any(|o| matches!(o, v6::DhcpOption::Authentication(a) if a.info.first() == Some(&1)))
+    );
+
+    let snapshot = server.handle().snapshot();
+    assert!(snapshot.leases.iter().any(|l| l.reconfigurable));
+    server.handle().reconfigure(ip.into(), false).unwrap();
+    let mut buffer = [0u8; 1500];
+    let (length, from) = timeout(Duration::from_secs(3), client.recv_from(&mut buffer))
+        .await
+        .expect("a Reconfigure arrived")
+        .unwrap();
+    assert_eq!(from, address, "it comes from the server port");
+    let message = v6::Message::decode(&mut Decoder::new(&buffer[..length])).unwrap();
+    assert_eq!(message.msg_type(), v6::MessageType::Reconfigure);
+    assert!(matches!(
+        message.opts().get(v6::OptionCode::ReconfMsg),
+        Some(v6::DhcpOption::ReconfMsg(v6::MessageType::Renew))
+    ));
+    // IPv4 leases cannot be reconfigured.
+    assert!(
+        server
+            .handle()
+            .reconfigure("192.168.50.100".parse().unwrap(), false)
+            .is_err()
     );
 }

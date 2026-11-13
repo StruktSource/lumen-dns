@@ -54,6 +54,8 @@ pub enum Wire {
         iaid: u32,
         hostname: Option<String>,
         expires: u64,
+        #[serde(default)]
+        temporary: bool,
     },
     End6 {
         ip: Ipv6Addr,

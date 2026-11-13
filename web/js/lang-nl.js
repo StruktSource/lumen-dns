@@ -799,5 +799,8 @@ L.i18n.add('nl', {
 "Failover: this is the {role} server and it is answering clients.": "Failover: dit is de {role} server en hij beantwoordt clients.",
 "Failover: this is the {role} server and it is standing by.": "Failover: dit is de {role} server en hij staat stand-by.",
 "primary": "primaire",
-"secondary": "secundaire"
+"secondary": "secundaire",
+"Temporary": "Tijdelijk",
+"Ask to renew": "Vragen te vernieuwen",
+"{ip} was asked to renew.": "{ip} is gevraagd te vernieuwen."
 });

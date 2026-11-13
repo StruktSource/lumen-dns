@@ -59,6 +59,10 @@ pub struct LeaseInfo {
     pub ip: IpAddr,
     /// Set for a delegated prefix: its length.
     pub prefix_len: Option<u8>,
+    /// A temporary address (`IA_TA`).
+    pub temporary: bool,
+    /// The client agreed to be told to renew, so [`Handle::reconfigure`] works for it.
+    pub reconfigurable: bool,
     /// Hardware address (`aa:bb:..`) for IPv4 clients with no identifier, else the identifier in hex.
     pub client: String,
     pub hostname: Option<String>,
@@ -97,12 +101,47 @@ pub struct Handle {
     engines6: Vec<Engine6>,
     failover: Option<Arc<Failover>>,
     role: Option<FailoverRole>,
+    socket6: Option<Arc<UdpSocket>>,
+    client_port6: u16,
 }
 
 impl Handle {
+    /// Ask the device that holds `ip` to renew now (or, with `info_only`, to ask for its
+    /// configuration again), with a signed Reconfigure message (RFC 8415 section 18.4).
+    ///
+    /// # Errors
+    /// The address is not a leased address of a client that agreed to be reconfigured, or the
+    /// message could not be sent.
+    pub fn reconfigure(&self, ip: IpAddr, info_only: bool) -> Result<(), String> {
+        let IpAddr::V6(ip) = ip else {
+            return Err("only DHCPv6 clients can be reconfigured".into());
+        };
+        let socket = self
+            .socket6
+            .as_ref()
+            .ok_or("the DHCPv6 server is not running")?;
+        let moment = now();
+        for engine in &self.engines6 {
+            let engine = locked(engine);
+            let Some(client) = engine.reconfigurable_client(ip, moment) else {
+                continue;
+            };
+            let message = engine
+                .reconfigure_message(&client, info_only, moment)
+                .ok_or("that device did not agree to be reconfigured")?;
+            let bytes = message.to_vec().map_err(|error| error.to_string())?;
+            return socket
+                .try_send_to(&bytes, SocketAddr::new(ip.into(), self.client_port6))
+                .map(|_| ())
+                .map_err(|error| format!("could not send: {error}"));
+        }
+        Err("no device that agreed to be reconfigured holds that address".into())
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         let mut out = Snapshot::default();
+        let moment = now();
         for engine in &self.engines4 {
             let engine = locked(engine);
             let scope = engine.scope();
@@ -121,6 +160,8 @@ impl Handle {
                 family: 4,
                 ip: lease.ip.into(),
                 prefix_len: None,
+                temporary: false,
+                reconfigurable: false,
                 client: hex(&lease.client),
                 hostname: lease.hostname,
                 expires: lease.expires,
@@ -143,6 +184,8 @@ impl Handle {
                 family: 6,
                 ip: lease.ip.into(),
                 prefix_len: None,
+                temporary: lease.temporary,
+                reconfigurable: engine.reconfigurable_client(lease.ip, moment).is_some(),
                 client: hex(&lease.client),
                 hostname: lease.hostname,
                 expires: lease.expires,
@@ -152,6 +195,8 @@ impl Handle {
                     family: 6,
                     ip: item.prefix.network().into(),
                     prefix_len: Some(item.prefix.prefix_len()),
+                    temporary: false,
+                    reconfigurable: false,
                     client: hex(&item.client),
                     hostname: None,
                     expires: item.expires,
@@ -260,6 +305,7 @@ impl Shared {
                         iaid: lease.iaid,
                         hostname: lease.hostname,
                         expires: lease.expires,
+                        temporary: lease.temporary,
                     });
                 }
             }
@@ -280,6 +326,11 @@ impl Shared {
                         iaid: item.iaid,
                         expires: item.expires,
                     });
+                }
+            }
+            Change6::ReconfigureKey { client, key } => {
+                if let Err(error) = self.store.put_reconf_key(&client, &key) {
+                    eprintln!("dhcp: cannot save a reconfigure key ({error})");
                 }
             }
             Change6::EndPrefix(prefix) => {
@@ -336,6 +387,7 @@ impl Engines {
                 iaid: lease.iaid,
                 hostname: lease.hostname,
                 expires: lease.expires,
+                temporary: lease.temporary,
             }));
             out.extend(
                 engine
@@ -390,6 +442,7 @@ impl Engines {
                 iaid,
                 hostname,
                 expires,
+                temporary,
             } => {
                 let lease = v6::Lease6 {
                     ip,
@@ -398,6 +451,7 @@ impl Engines {
                     hostname,
                     expires,
                     offered: false,
+                    temporary,
                 };
                 for engine in &self.v6 {
                     if locked(engine).adopt(lease.clone(), moment) {
@@ -628,7 +682,7 @@ fn scope_for(scopes: &[Scope6], scope_id: u32, link: Option<Ipv6Addr>) -> Option
         .or_else(|| (scopes.len() == 1 && scope_id == 0).then(|| &scopes[0]))
 }
 
-async fn serve6(socket: UdpSocket, scopes: Vec<Scope6>, shared: Arc<Shared>) {
+async fn serve6(socket: Arc<UdpSocket>, scopes: Vec<Scope6>, shared: Arc<Shared>) {
     let mut buffer = [0u8; 1500];
     loop {
         let Ok((length, source)) = socket.recv_from(&mut buffer).await else {
@@ -749,6 +803,7 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
     let restored4 = store.load4(moment).map_err(io::Error::other)?;
     let restored6 = store.load6(moment).map_err(io::Error::other)?;
     let restored_prefixes = store.load_prefixes(moment).map_err(io::Error::other)?;
+    let restored_keys = store.load_reconf_keys().map_err(io::Error::other)?;
     let duid = store.server_duid(new_duid).map_err(io::Error::other)?;
     let link = config.failover.as_ref().map(Failover::new);
     let shared = Arc::new(Shared {
@@ -765,6 +820,7 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
     let mut sockets4 = Vec::new();
     let mut bound4 = Vec::new();
     let mut bound6 = None;
+    let mut socket6_shared = None;
 
     for scope in &config.scopes {
         let mine: Vec<_> = restored4
@@ -805,6 +861,7 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
         }
         let mut engine = v6::Engine6::new(scope, duid.clone(), mine, moment);
         engine.restore_prefixes(restored_prefixes.clone(), moment);
+        engine.restore_reconf_keys(restored_keys.clone());
         let engine = Arc::new(Mutex::new(engine));
         indexes.extend(index);
         scopes6.push(Scope6 {
@@ -845,8 +902,9 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
         // Multicast is joined only when listening on every address; a fixed address is for
         // tests and relays.
         let join = config.listen6.ip().is_unspecified();
-        let socket = socket6(config.listen6, &indexes, join)?;
+        let socket = Arc::new(socket6(config.listen6, &indexes, join)?);
         bound6 = Some(socket.local_addr()?);
+        socket6_shared = Some(socket.clone());
         tasks.push(tokio::spawn(serve6(socket, scopes6, shared.clone())));
     }
 
@@ -855,6 +913,8 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
         engines6,
         failover: link,
         role: config.failover.as_ref().map(|settings| settings.role),
+        socket6: socket6_shared,
+        client_port6: config.client_port6,
     };
     tasks.push(tokio::spawn(expire(engines, shared)));
     Ok(Running {

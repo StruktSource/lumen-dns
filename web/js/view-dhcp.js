@@ -13,6 +13,11 @@ const summary = d => {
   return h('div', { class: 'grid g3' }, tile('Networks', L.fmt.n(d.scopes.length)), tile('Leases', L.fmt.n(active)), tile('Free addresses', L.fmt.n(Math.max(0, capacity - active))));
 };
 
+const renew = async l => {
+  try { await L.api('POST', '/api/dhcp/reconfigure', { ip: l.ip }); L.toast(L.t('{ip} was asked to renew.', { ip: l.ip })); }
+  catch (e) { L.toast(e.message, 'bad'); }
+};
+
 L.views.dhcp = () => {
   const d = L.S.dhcp;
   const head = L.pageHead('DHCP', 'Addresses handed out on your network, and the DNS names they become.',
@@ -28,8 +33,8 @@ L.views.dhcp = () => {
           h('td', { class: 'mono-c' }, s.range), h('td', {}, L.fmt.n(s.active) + ' / ' + L.fmt.n(s.capacity)))))))),
     h('div', { class: 'card', style: 'margin-top:16px' },
       h('div', { class: 'card-h' }, h('input', { class: 'input', style: 'width:280px', placeholder: 'Search leases', 'aria-label': 'Search leases', value: q, oninput: e => { q = e.target.value; L.paintMain(); const i = L.$('input[aria-label="Search leases"]'); i.focus(); i.setSelectionRange(q.length, q.length); } }), h('span', { class: 'mono muted' }, L.fmt.n(d.leases.length))),
-      leases.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Address', 'Name', 'Device', 'Expires'].map(x => h('th', {}, x)))),
-        h('tbody', {}, leases.map(l => h('tr', {}, h('td', { class: 'mono-c' }, l.prefix_len ? l.ip + '/' + l.prefix_len : l.ip), h('td', {}, l.hostname ? h('strong', {}, l.hostname) : h('span', { class: 'muted' }, '—')), h('td', { class: 'mono-c' }, l.client), h('td', { class: 'mono-c' }, L.fmt.time(l.expires * 1000)))))))
+      leases.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Address', 'Name', 'Device', 'Expires', ''].map(x => h('th', {}, x)))),
+        h('tbody', {}, leases.map(l => h('tr', {}, h('td', { class: 'mono-c' }, l.prefix_len ? l.ip + '/' + l.prefix_len : l.ip, l.temporary ? [' ', h('span', { class: 'chip' }, 'Temporary')] : null), h('td', {}, l.hostname ? h('strong', {}, l.hostname) : h('span', { class: 'muted' }, '—')), h('td', { class: 'mono-c' }, l.client), h('td', { class: 'mono-c' }, L.fmt.time(l.expires * 1000)), h('td', { class: 'act' }, l.reconfigurable ? h('button', { class: 'btn sm flat', onclick: () => renew(l) }, 'Ask to renew') : null))))))
         : L.empty('No leases yet', q ? 'Nothing matches your search.' : 'Devices that ask for an address will show up here.'))];
 };
 })();

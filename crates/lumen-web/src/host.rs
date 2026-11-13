@@ -22,6 +22,10 @@ pub struct DhcpLeaseInfo {
     pub ip: IpAddr,
     /// Set for a delegated prefix: its length.
     pub prefix_len: Option<u8>,
+    /// A temporary address (`IA_TA`).
+    pub temporary: bool,
+    /// The device agreed to be told to renew.
+    pub reconfigurable: bool,
     pub client: String,
     pub hostname: Option<String>,
     /// Unix seconds.
@@ -126,5 +130,12 @@ pub trait Host: Send + Sync + 'static {
     /// The DHCP server's scopes and leases, when it is running.
     fn dhcp(&self) -> Option<DhcpInfo> {
         None
+    }
+    /// Ask the device that holds `ip` to renew now (`DHCPv6` Reconfigure).
+    ///
+    /// # Errors
+    /// Says why it could not be done.
+    fn dhcp_reconfigure(&self, _ip: IpAddr, _info_only: bool) -> Result<(), String> {
+        Err("the DHCP server is not running".into())
     }
 }

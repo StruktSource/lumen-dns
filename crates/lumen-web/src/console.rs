@@ -492,6 +492,7 @@ impl Console {
             ("PUT", ["devices"]) => self.put_device(&mut store, &ctx),
             ("DELETE", ["devices", id]) => self.delete_device(&mut store, &ctx, id),
             ("GET", ["dhcp"]) => self.dhcp(&store),
+            ("POST", ["dhcp", "reconfigure"]) => self.dhcp_reconfigure(&mut store, &ctx),
             ("GET", ["config"]) => config_json(&store),
             ("POST", ["config", "preview"]) => preview_config(&store, request),
             ("PUT", ["config"]) => self.put_config(&mut store, &ctx),
@@ -1784,7 +1785,8 @@ impl Console {
             .iter()
             .map(|l| {
                 json!({
-                    "family": l.family, "ip": l.ip.to_string(), "prefix_len": l.prefix_len, "client": l.client,
+                    "family": l.family, "ip": l.ip.to_string(), "prefix_len": l.prefix_len, "temporary": l.temporary,
+                    "reconfigurable": l.reconfigurable, "client": l.client,
                     "hostname": l.hostname, "expires": l.expires,
                 })
             })
@@ -1796,6 +1798,32 @@ impl Console {
                 "failover": info.failover.as_ref().map(|(role, active)| json!({ "role": role, "active": active })),
             }),
         )
+    }
+
+    /// Ask a device to renew now. Only for devices that agreed to it, and only for administrators.
+    fn dhcp_reconfigure(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
+        if !enabled_modules(store).contains(&"dhcp") {
+            return error(StatusCode::NOT_FOUND, "the DHCP module is off");
+        }
+        let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
+            return bad("invalid JSON");
+        };
+        let Some(ip) = body
+            .get("ip")
+            .and_then(Value::as_str)
+            .and_then(|ip| ip.parse::<IpAddr>().ok())
+        else {
+            return bad("ip must be an IP address");
+        };
+        let info_only = body
+            .get("info_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if let Err(message) = self.host.dhcp_reconfigure(ip, info_only) {
+            return bad(&message);
+        }
+        Self::actor(store, ctx, "dhcp.reconfigure", &ip.to_string());
+        reply(StatusCode::OK, &json!({ "sent": true }))
     }
 
     /// Switch one optional module on or off. Modules are off until an administrator turns them on.
@@ -4437,6 +4465,37 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(page["running"], json!(false));
         assert_eq!(page["leases"], json!([]));
+    }
+
+    #[test]
+    fn asking_a_device_to_renew_needs_the_module_a_valid_address_and_a_running_server() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let post = |payload: &str| {
+            call(
+                &f,
+                Method::POST,
+                "/api/dhcp/reconfigure",
+                session,
+                payload,
+                "127.0.0.1",
+            )
+            .status()
+        };
+        assert_eq!(post(r#"{"ip":"fd00::5"}"#), StatusCode::NOT_FOUND);
+        call(
+            &f,
+            Method::PUT,
+            "/api/modules",
+            session,
+            r#"{"id":"dhcp","enabled":true}"#,
+            "127.0.0.1",
+        );
+        assert_eq!(post("nope"), StatusCode::BAD_REQUEST);
+        assert_eq!(post(r#"{"ip":"not an address"}"#), StatusCode::BAD_REQUEST);
+        // The test host has no DHCP server, so the request is refused with a reason.
+        assert_eq!(post(r#"{"ip":"fd00::5"}"#), StatusCode::BAD_REQUEST);
     }
 
     #[test]
