@@ -111,9 +111,13 @@ fn socket_v4(iface: &Iface, listen: SocketAddr, join: bool) -> io::Result<UdpSoc
     #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
     socket.set_reuse_port(true)?;
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    socket.bind_device(Some(iface.name.as_bytes()))?;
+    if join {
+        socket.bind_device(Some(iface.name.as_bytes()))?;
+    }
     #[cfg(target_os = "macos")]
-    socket.bind_device_by_index_v4(std::num::NonZeroU32::new(iface.index))?;
+    if join {
+        socket.bind_device_by_index_v4(std::num::NonZeroU32::new(iface.index))?;
+    }
     socket.bind(&listen.into())?;
     if join {
         let local = iface

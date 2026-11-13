@@ -10,23 +10,16 @@ use lumen_resolver::Hosts;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::UdpSocket, time::timeout};
 
-fn free_udp(v6: bool) -> u16 {
-    let socket = if v6 {
-        std::net::UdpSocket::bind("[::1]:0")
-    } else {
-        std::net::UdpSocket::bind("127.0.0.1:0")
-    }
-    .unwrap();
-    socket.local_addr().unwrap().port()
-}
-
 fn config(lease_file: std::path::PathBuf) -> Dhcp {
     Dhcp {
         enabled: true,
         domain: Some("home.lan".into()),
         lease_file: Some(lease_file),
-        listen4: SocketAddr::from(([127, 0, 0, 1], free_udp(false))),
-        listen6: SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], free_udp(true))),
+        // Let each server socket claim its own ephemeral port. A bind-and-drop free-port probe
+        // races parallel tests, especially on Windows where reuse can send a packet to the
+        // wrong socket.
+        listen4: SocketAddr::from(([127, 0, 0, 1], 0)),
+        listen6: SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 0)),
         scopes: vec![DhcpScope {
             interface: None,
             subnet: "192.168.50.0/24".parse().unwrap(),
