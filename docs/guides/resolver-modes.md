@@ -33,7 +33,7 @@ id = "cloudflare-unfiltered"
 protocol = "auto"
 encryption = "required"
 address_family = "ipv4"
-transport_priority = ["quic", "https", "tls"]
+transport_priority = ["quic", "https", "h3", "tls"]
 ```
 
 `config/forward.example.toml` is a ready-made example.
@@ -53,7 +53,7 @@ server_name = "cloudflare-dns.com"
 Rules for upstreams:
 
 - The address is a fixed IP and port. Lumen does no bootstrap lookup to find it.
-- Encrypted protocols (`tls`, `https`, `quic`) require `server_name`, and Lumen always verifies the certificate chain and name. A private CA bundle (`upstream_ca`) changes which roots are trusted but never skips name checks.
+- Encrypted protocols (`tls`, `https`, `h3`, `quic`) require `server_name`, and Lumen always verifies the certificate chain and name. A private CA bundle (`upstream_ca`) changes which roots are trusted but never skips name checks.
 - `udp` also enables TCP fallback to the same address and port.
 - You can use up to 8 bundled providers and up to 8 custom upstreams, and choose how they are used. See [Upstream providers](upstream-providers.md#use-several-providers).
 
@@ -61,7 +61,7 @@ Full field list: [Configuration: resolver](../reference/configuration.md#resolve
 
 ### Encrypted transport failover
 
-With `protocol = "auto"`, Lumen builds an encrypted-only list for a provider, in the order you set (default: QUIC, then HTTPS, then TLS). It moves to the next transport **only** after a connection, transport, or timeout error. An upstream SERVFAIL can move to the next configured provider, but a usable DNS answer (including NXDOMAIN) or local DNSSEC failure is final. It never falls back to plain text. Each automatic transport gets the remaining provider budget divided by the number of transports left; early failures donate unused time to later transports. All tiers share one provider deadline, including silent handshakes and DNSSEC work. The outer client deadline still applies.
+With `protocol = "auto"`, Lumen builds an encrypted-only list for a provider, in the order you set (default: QUIC, then HTTPS, then HTTP/3, then TLS). It moves to the next transport **only** after a connection, transport, or timeout error. An upstream SERVFAIL can move to the next configured provider, but a usable DNS answer (including NXDOMAIN) or local DNSSEC failure is final. It never falls back to plain text. Each automatic transport gets the remaining provider budget divided by the number of transports left; early failures donate unused time to later transports. All tiers share one provider deadline, including silent handshakes and DNSSEC work. The outer client deadline still applies.
 
 ## Which should I choose?
 
@@ -113,6 +113,8 @@ Several bounded mechanisms make uncached lookups faster without weakening DNSSEC
 | **Shared recursion** | Always on | Identical in-flight queries (same name, type, and DNSSEC flag) wait for one recursion instead of each walking the tree. At most 4096 groups at once. |
 | **Startup priming** (`[resolver.warm]`) | Off in code, **on** in the shipped configs | After listeners are bound, fetches delegations and keys for the root and a list of common zones once, two at a time. It queries only the zone names you list, never client data. |
 | **Expiry refresh** (`[resolver.prefetch]`) | Off | Re-resolves names that were requested repeatedly, just after their answer expires, within concurrency and per-minute limits. |
+| **Serve stale** (`[resolver.serve_stale]`) | Off | Returns an eligible expired unsigned answer at once and starts one background refresh. |
+| **Persistent response cache** (`[resolver.persistent_cache]`) | Off | Saves bounded response data across restarts in a separate local SQLite file. Works in both resolver modes. |
 | **Hedged recursion** (`hedge_ms`) | Off | Starts one extra recursion for a lookup that is still unanswered after the delay. The first usable answer wins. |
 
 The numbers behind these are in [Performance](../project/performance.md): shared recursion clearly helped bursts of identical queries, while the single cold-query gain and hedging were **not** statistically significant, so hedging is not recommended.
@@ -123,7 +125,7 @@ How expiry refresh stays safe:
 - Nothing is refreshed before its authoritative TTL has elapsed, so answers are never served longer than allowed. Answers with a TTL under 10 seconds are not refreshed.
 - Filtering runs before refresh, and every filter refresh or rollback clears all pending refresh candidates, so a newly blocked name is never refreshed under the old policy.
 
-**Evaluated and not built:** serve-stale answers (RFC 8767) and saving delegations across restarts. Hickory drops expired entries and keeps its caches private, so both would need a second Lumen-owned cache with its own expiry, revalidation, and memory bounds. Priming recovers most of the restart cost without that.
+Serve-stale and persistence use a second Lumen-owned response cache because Hickory keeps its caches private. Both are off by default. Stale replies keep their own age bound and small response TTL, never include expired DNSSEC-authenticated data, and trigger one background refresh without making the client wait. Persistence stores names and answers, so enable it only when local disk disclosure is acceptable. It never stores the client that asked. See the [cache configuration](../reference/configuration.md#caches).
 
 ## Related
 
@@ -143,6 +145,8 @@ answer, authenticated negative answer, or DNSSEC failure is final. The extra SOA
 to recover a proven unsigned ancestor has one shared attempt-sized budget, rather than one
 unbounded wait per ancestor. The outer query deadline remains the final cap. This is a bounded
 failure-recovery change, not a claim that public cold-query speed is now proven.
+
+Forward mode has the same recovery for names below a provably unsigned zone (see [DNSSEC and trust](../reference/dnssec-and-trust.md#edge-case-parent-and-child-on-the-same-servers)). It uses a second, small forwarder without validation that is built only when `resolver.dnssec` is on, and it shares one `upstream_timeout_ms` budget between the ancestor walk and the retry.
 
 Set `diagnostics = true` for aggregate recursive-attempt timing and outcome metrics. They have
 fixed labels and contain no query names, authority IPs, or client data. Hickory does not expose

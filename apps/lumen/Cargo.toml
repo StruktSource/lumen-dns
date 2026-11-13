@@ -10,6 +10,7 @@ repository.workspace = true
 lumen-api = { path = "../../crates/lumen-api" }
 lumen-core = { path = "../../crates/lumen-core" }
 lumen-config = { path = "../../crates/lumen-config" }
+lumen-resolver = { path = "../../crates/lumen-resolver" }
 lumen-store = { path = "../../crates/lumen-store" }
 tokio.workspace = true
 

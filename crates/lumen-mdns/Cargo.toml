@@ -1,0 +1,22 @@
+[package]
+name = "lumen-mdns"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lumen-config = { path = "../lumen-config" }
+lumen-resolver = { path = "../lumen-resolver" }
+# `mdns` makes the parser accept the cache-flush bit that nearly every mDNS record carries.
+hickory-proto = { workspace = true, features = ["mdns"] }
+async-trait = "0.1"
+tokio.workspace = true
+socket2 = { version = "0.6", features = ["all"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", default-features = false, features = ["net"] }
+
+[lints]
+workspace = true

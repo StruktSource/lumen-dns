@@ -45,7 +45,10 @@ All metrics use stable `lumen_dns_` names (and `lumen_filter_` for filtering) wi
 | `lumen_dns_timeouts_total` | counter | Queries that hit a deadline |
 | `lumen_dns_failures_total` | counter | Failed resolutions |
 | `lumen_dns_active_queries` | gauge | Queries in progress now |
-| `lumen_dns_transport_queries_total{transport}` | counter | Queries per transport |
+| `lumen_dns_transport_queries_total{transport}` | counter | Queries per transport (`udp`, `tcp`, `tls`, `https`, `quic`, `http3`, `other`) |
+| `lumen_dns_certificate_not_after_timestamp_seconds` | gauge | Expiry (Unix time) of the served DNS TLS certificate. Present only with an encrypted listener |
+| `lumen_dns_certificate_reloads_total` | counter | Renewed certificate pairs swapped in without restart |
+| `lumen_dns_certificate_reload_failures_total` | counter | Changed files rejected (unreadable, malformed, or key mismatch) |
 | `lumen_dns_query_duration_seconds` | histogram | End-to-end query latency (includes cache hits) |
 | `lumen_dns_fallback_attempts_total` | counter | Timeout fallbacks started |
 | `lumen_dns_fallback_successes_total` | counter | Fallbacks that answered |
@@ -57,6 +60,10 @@ All metrics use stable `lumen_dns_` names (and `lumen_filter_` for filtering) wi
 | `lumen_dns_recursive_hedged_total` | counter | Hedged extra recursions started |
 | `lumen_dns_warm_queries_total` | counter | Startup priming queries |
 | `lumen_dns_warm_failures_total` | counter | Failed priming queries |
+| `lumen_dns_trust_anchor_checks_total` | counter | Root DNSKEY checks for RFC 5011 rollover |
+| `lumen_dns_trust_anchor_changes_total` | counter | Checks that changed the trusted keys |
+| `lumen_dns_trust_anchor_failures_total` | counter | Failed checks or key sets no trusted key signed |
+| `lumen_dns_trust_anchor_restart_pending` | gauge | `1` when a restart will load changed trust anchors |
 | `lumen_dns_prefetch_refreshes_total` | counter | Expiry refreshes done |
 | `lumen_dns_prefetch_failures_total` | counter | Failed refreshes |
 | `lumen_dns_prefetch_skipped_total` | counter | Refreshes skipped |
@@ -67,7 +74,9 @@ All metrics use stable `lumen_dns_` names (and `lumen_filter_` for filtering) wi
 - The two recursion histograms have 11 fixed buckets from 1 ms to 5 s.
 - With `resolver.diagnostics = true`, four extra counters show recursive walk attempts,
   timeout retries, timeouts, and other failures, plus
-  `lumen_dns_recursive_attempt_duration_seconds`. These series have fixed cardinality and no
+  `lumen_dns_recursive_attempt_duration_seconds`. A fifth,
+  `lumen_dns_forward_insecure_recoveries_total`, counts forward-mode lookups answered without
+  validation because an ancestor zone is provably unsigned. These series have fixed cardinality and no
   query names, authority addresses, or client labels. They are hidden while diagnostics are off.
 - The client histogram includes cache hits, so its sub-millisecond bucket roughly tracks your cache hit ratio. Priming and refresh traffic is excluded because it is counted in the background histogram.
 

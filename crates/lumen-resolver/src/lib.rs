@@ -3,10 +3,11 @@
 
 use accel::Accel;
 use async_trait::async_trait;
+use cache::ResponseCache;
 use hickory_server::{
     dnssec::NxProofKind,
     net::{
-        NetError,
+        DnsError, NetError,
         runtime::{TokioRuntimeProvider, TokioTime},
         xfer::Protocol,
     },
@@ -27,9 +28,10 @@ use hickory_server::{
         recursor::{DnssecConfig, DnssecPolicy, Recursor, RecursorOptions},
     },
     server::{Request, RequestHandler, RequestInfo, ResponseHandler, ResponseInfo},
+    store::in_memory::InMemoryZoneHandler,
     zone_handler::{
-        AuthLookup, AxfrPolicy, Catalog, LookupControlFlow, LookupError, LookupOptions,
-        MessageResponse, Nsec3QueryInfo, ZoneHandler, ZoneType,
+        AuthLookup, AxfrPolicy, Catalog, DnssecZoneHandler, LookupControlFlow, LookupError,
+        LookupOptions, MessageResponse, Nsec3QueryInfo, ZoneHandler, ZoneType,
     },
 };
 use lumen_config::{Config, ForwardStrategy, Mode, UpstreamProtocol, read_bounded};
@@ -47,13 +49,76 @@ use std::{
 use tokio::time::timeout;
 
 mod accel;
+mod bridge;
+mod cache;
+mod challenge;
 mod forward;
+mod hosts;
+mod notify;
+mod rollover;
+mod signing;
+pub use bridge::{Bridge, BridgeAnswer};
+pub use challenge::Challenges;
+pub use hosts::Hosts;
+pub use signing::zone_key;
+mod zones;
 
 pub use hickory_server::net::xfer::Protocol as Transport;
+
+/// Messages that are not ordinary queries but are served by operator zones.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ZoneMessage {
+    /// RFC 2136 dynamic update (opcode 5).
+    Update,
+    /// AXFR or IXFR zone transfer request.
+    Transfer,
+}
+
+/// Classify a raw packet without fully parsing it. Ordinary queries return `None`.
+#[must_use]
+pub fn zone_message_kind(packet: &[u8]) -> Option<ZoneMessage> {
+    if packet.len() < 12 || packet[2] & 0x80 != 0 {
+        return None;
+    }
+    match (packet[2] >> 3) & 0x0f {
+        5 => return Some(ZoneMessage::Update),
+        0 => {}
+        _ => return None,
+    }
+    if u16::from_be_bytes([packet[4], packet[5]]) != 1 {
+        return None;
+    }
+    let mut offset = 12;
+    loop {
+        let length = usize::from(*packet.get(offset)?);
+        offset += 1;
+        if length == 0 {
+            break;
+        }
+        if length > 63 {
+            return None;
+        }
+        offset += length;
+    }
+    let kind = u16::from_be_bytes([*packet.get(offset)?, *packet.get(offset + 1)?]);
+    matches!(kind, 251 | 252).then_some(ZoneMessage::Transfer)
+}
 
 /// One shared resolver and cache set for all enabled client transports.
 pub struct Resolver {
     catalog: Catalog,
+    cache: Option<Arc<ResponseCache>>,
+    /// Origins of operator zones and conditional forwarders. They bypass the response caches and
+    /// the built-in local-zone answers, because their answers depend on the client and change.
+    custom: Vec<LowerName>,
+    rollover: Option<rollover::Tracker>,
+    signed: Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
+    notifications: Vec<(Name, Vec<SocketAddr>)>,
+    challenges: Arc<Challenges>,
+    hosts: Arc<Hosts>,
+    /// A multicast DNS bridge, set once after startup when `[mdns]` is on.
+    bridge: std::sync::OnceLock<Arc<dyn Bridge>>,
+    resigners: Resigners,
     metrics: Arc<Metrics>,
     background: Option<Background>,
     local_zones: bool,
@@ -84,6 +149,7 @@ pub struct Metrics {
     recursive_retries: AtomicU64,
     recursive_timeouts: AtomicU64,
     recursive_failures: AtomicU64,
+    forward_insecure_recoveries: AtomicU64,
     attempt_latency: [AtomicU64; 11],
     attempt_latency_sum_micros: AtomicU64,
     attempts: AtomicU64,
@@ -101,6 +167,10 @@ pub struct Metrics {
     latency_sum_micros: AtomicU64,
     background_latency: [AtomicU64; 11],
     background_latency_sum_micros: AtomicU64,
+    anchor_checks: AtomicU64,
+    anchor_changes: AtomicU64,
+    anchor_failures: AtomicU64,
+    anchor_restart_pending: AtomicBool,
 }
 
 impl Metrics {
@@ -200,6 +270,21 @@ impl Metrics {
                 "Startup priming queries without an answer.",
                 &self.warm_failures,
             ),
+            (
+                "trust_anchor_checks_total",
+                "Root DNSKEY checks for RFC 5011 trust-anchor rollover.",
+                &self.anchor_checks,
+            ),
+            (
+                "trust_anchor_changes_total",
+                "Checks that changed the set of trusted keys.",
+                &self.anchor_changes,
+            ),
+            (
+                "trust_anchor_failures_total",
+                "Checks that failed or whose key set no trusted key signed.",
+                &self.anchor_failures,
+            ),
         ] {
             let _ = writeln!(
                 text,
@@ -207,6 +292,11 @@ impl Metrics {
                 value.load(Ordering::Relaxed)
             );
         }
+        let _ = writeln!(
+            text,
+            "# HELP lumen_dns_trust_anchor_restart_pending 1 when the trusted keys changed and a restart will load them.\n# TYPE lumen_dns_trust_anchor_restart_pending gauge\nlumen_dns_trust_anchor_restart_pending {}",
+            u8::from(self.anchor_restart_pending.load(Ordering::Relaxed))
+        );
         self.render_diagnostics(&mut text);
         render_histogram(
             &mut text,
@@ -239,6 +329,11 @@ impl Metrics {
                 "recursive_retries_total",
                 "Recursive walks retried after a timeout.",
                 &self.recursive_retries,
+            ),
+            (
+                "forward_insecure_recoveries_total",
+                "Forward lookups answered without validation because an ancestor zone is provably unsigned.",
+                &self.forward_insecure_recoveries,
             ),
             (
                 "recursive_attempt_timeouts_total",
@@ -430,12 +525,61 @@ fn empty_zone_response(query: &Query, zone: &Name) -> Message {
     response
 }
 
+/// Signature renewal tasks for signed operator zones. Dropping the resolver stops them.
+#[derive(Default)]
+struct Resigners(std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>);
+
+impl Resigners {
+    fn start(&self, zones: &[Arc<InMemoryZoneHandler<TokioRuntimeProvider>>]) {
+        let Ok(mut tasks) = self.0.lock() else {
+            return;
+        };
+        if !tasks.is_empty() {
+            return;
+        }
+        for zone in zones {
+            let zone = Arc::clone(zone);
+            tasks.push(tokio::spawn(async move {
+                // Signatures last days; renewing daily leaves a long margin for failures.
+                loop {
+                    tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+                    if DnssecZoneHandler::secure_zone(&*zone).await.is_err() {
+                        eprintln!("zone signature renewal failed; keeping current signatures");
+                    }
+                }
+            }));
+        }
+    }
+}
+
+impl Drop for Resigners {
+    fn drop(&mut self) {
+        if let Ok(tasks) = self.0.lock() {
+            for task in tasks.iter() {
+                task.abort();
+            }
+        }
+    }
+}
+
 impl Resolver {
     /// Build the selected mode and trust anchors before opening listeners.
     ///
     /// # Errors
     /// Invalid hints, anchors, TLS settings, or resolver configuration fail startup.
     pub fn new(config: &Config) -> Result<Self, String> {
+        Self::build(config, true)
+    }
+
+    /// Validate everything [`Self::new`] would load without creating or opening any journal.
+    ///
+    /// # Errors
+    /// The same errors as [`Self::new`].
+    pub fn check(config: &Config) -> Result<(), String> {
+        Self::build(config, false).map(|_| ())
+    }
+
+    fn build(config: &Config, persist: bool) -> Result<Self, String> {
         let settings = &config.resolver;
         let metrics = Arc::new(Metrics::default());
         metrics
@@ -456,6 +600,13 @@ impl Resolver {
                 Ok::<_, String>(Arc::new(anchors))
             })
             .transpose()?;
+        let (anchors, rollover) = match &settings.trust_anchor_state {
+            Some(path) => {
+                let (tracker, loaded) = rollover::startup(path, anchors.as_deref(), persist)?;
+                (Some(Arc::new(loaded)), Some(tracker))
+            }
+            None => (anchors, None),
+        };
         let mut options = ResolverOpts::default();
         options.validate = settings.dnssec;
         options.cache_size = u64::from(settings.cache_entries);
@@ -470,7 +621,10 @@ impl Resolver {
         options.positive_max_ttl = Some(Duration::from_secs(u64::from(settings.positive_ttl_secs)));
         options.negative_max_ttl = Some(Duration::from_secs(u64::from(settings.negative_ttl_secs)));
         let (handler, background) = match settings.mode {
-            Mode::Forward => (forward_zone(settings, &options, anchors.as_ref())?, None),
+            Mode::Forward => (
+                forward_zone(settings, &options, anchors.as_ref(), Arc::clone(&metrics))?,
+                None,
+            ),
             Mode::Recursive => {
                 let (handler, background) =
                     recursive_zone(settings, &options, anchors, Arc::clone(&metrics))?;
@@ -479,8 +633,25 @@ impl Resolver {
         };
         let mut catalog = Catalog::new();
         catalog.upsert(Name::root().into(), vec![handler]);
+        let built = zones::build(config, &options, persist)?;
+        let (custom_handlers, signed, notifications) = (built.handlers, built.resign, built.notify);
+        let custom: Vec<LowerName> = custom_handlers
+            .iter()
+            .map(|handler| handler.origin().clone())
+            .collect();
+        zones::install(&mut catalog, custom_handlers);
+        let cache = ResponseCache::new(settings)?.map(Arc::new);
         Ok(Self {
             catalog,
+            cache,
+            custom,
+            rollover,
+            signed,
+            notifications,
+            challenges: Arc::default(),
+            hosts: Arc::new(Hosts::new(config.dhcp.domain.as_deref())),
+            bridge: std::sync::OnceLock::new(),
+            resigners: Resigners::default(),
             metrics,
             background,
             local_zones: settings.local_zones,
@@ -490,6 +661,10 @@ impl Resolver {
     /// Begin optional priming and refresh. Call once, after every listener is bound;
     /// dropping the resolver stops them. Does nothing when both are disabled.
     pub fn start_background(&self) {
+        self.resigners.start(&self.signed);
+        for (zone, targets) in &self.notifications {
+            tokio::spawn(notify::send(zone.clone(), targets.clone()));
+        }
         if let Some(background) = &self.background {
             (background.start)();
         }
@@ -500,6 +675,23 @@ impl Resolver {
         if let Some(background) = &self.background {
             background.accel.clear_prefetch();
         }
+    }
+
+    /// Install the multicast DNS bridge. Only the first call has an effect.
+    pub fn set_bridge(&self, bridge: Arc<dyn Bridge>) {
+        let _ = self.bridge.set(bridge);
+    }
+
+    /// The names DHCP leases publish, answered by this resolver.
+    #[must_use]
+    pub fn hosts(&self) -> Arc<Hosts> {
+        Arc::clone(&self.hosts)
+    }
+
+    /// Where an ACME client publishes DNS-01 challenge values for this resolver to answer.
+    #[must_use]
+    pub fn challenges(&self) -> Arc<Challenges> {
+        Arc::clone(&self.challenges)
     }
 
     /// Resolver-owned aggregate metrics.
@@ -513,19 +705,151 @@ impl Resolver {
     /// # Errors
     /// Returns a non-sensitive error if response serialization fails.
     pub async fn answer(
-        &self,
+        self: &Arc<Self>,
         query: &Query,
         peer: SocketAddr,
         protocol: Transport,
         maximum: usize,
     ) -> Result<Vec<u8>, String> {
+        if let Some(response) = self.hosts.answer(query) {
+            return response
+                .to_vec()
+                .map_err(|_| "cannot encode host response".into());
+        }
+        if let Some(bridge) = self.bridge.get()
+            && let Some(question) = query.message.queries.first()
+            && let Some(answer) = bridge.answer(question.name(), question.query_type()).await
+        {
+            let mut response = response_base(query, true);
+            response.metadata.response_code = answer.rcode;
+            response.answers = answer.answers;
+            response.authorities = answer.authorities;
+            response.additionals = answer.additionals;
+            return response
+                .to_vec()
+                .map_err(|_| "cannot encode bridge response".into());
+        }
+        if let Some(response) = self.challenges.answer(query) {
+            return response
+                .to_vec()
+                .map_err(|_| "cannot encode challenge response".into());
+        }
+        let custom = self.is_custom(query);
         if self.local_zones
+            && !custom
             && let Some(response) = local_zone_response(query)
         {
             return response
                 .to_vec()
                 .map_err(|_| "cannot encode local response".into());
         }
+        if !custom
+            && let Some(cache) = &self.cache
+            && let Some(hit) = cache.lookup(query, maximum)
+        {
+            if hit.stale && cache.begin_refresh(&hit.key) {
+                let (resolver, query, key) = (Arc::clone(self), query.clone(), hit.key.clone());
+                tokio::spawn(async move {
+                    if let Ok(response) = resolver
+                        .answer_uncached(&query, peer, Protocol::Tcp, usize::from(u16::MAX))
+                        .await
+                        && let Some(cache) = &resolver.cache
+                    {
+                        cache.store(&query, &response);
+                    }
+                    if let Some(cache) = &resolver.cache {
+                        cache.end_refresh(&key);
+                    }
+                });
+            }
+            return Ok(hit.bytes);
+        }
+        let response = self.answer_uncached(query, peer, protocol, maximum).await?;
+        if !custom && let Some(cache) = &self.cache {
+            cache.store(query, &response);
+        }
+        Ok(response)
+    }
+
+    /// True when the question falls under an operator zone or conditional forwarder.
+    fn is_custom(&self, query: &Query) -> bool {
+        query.message.queries.first().is_some_and(|question| {
+            let name = LowerName::from(question.name());
+            self.custom.iter().any(|origin| origin.zone_of(&name))
+        })
+    }
+
+    /// Answer an RFC 2136 update or a zone transfer. Always returns a response: operator zones
+    /// decide, everything else is `REFUSED`. Transfers are accepted only over plain TCP, and a
+    /// transfer that does not fit one 64 KiB message is refused instead of being cut short.
+    pub async fn zone_message(
+        &self,
+        packet: &[u8],
+        peer: SocketAddr,
+        protocol: Transport,
+        kind: ZoneMessage,
+    ) -> Vec<u8> {
+        let refused = |packet: &[u8]| {
+            let mut bytes = lumen_proto::malformed_response(packet);
+            bytes[2] = 0x80 | (packet[2] & 0x79);
+            bytes[3] = 5;
+            bytes
+        };
+        if kind == ZoneMessage::Transfer && protocol != Protocol::Tcp {
+            return refused(packet);
+        }
+        let Ok(request) = Request::from_bytes(packet.to_vec(), peer, protocol) else {
+            return lumen_proto::malformed_response(packet);
+        };
+        let in_zone = request.request_info().is_ok_and(|info| {
+            let name = info.query.name();
+            self.custom.iter().any(|origin| origin.zone_of(name))
+        });
+        if !in_zone {
+            return refused(packet);
+        }
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        self.catalog
+            .handle_request::<_, TokioTime>(
+                &request,
+                Capture {
+                    bytes: Arc::clone(&bytes),
+                    maximum: usize::from(u16::MAX),
+                },
+            )
+            .await;
+        let result = bytes.lock().map(|mut guard| std::mem::take(&mut *guard));
+        match result {
+            // A set TC bit means the transfer did not fit: fail closed, never send a partial zone.
+            Ok(result) if result.len() >= 12 && result[2] & 0x02 == 0 => result,
+            _ => {
+                let mut bytes = lumen_proto::malformed_response(packet);
+                bytes[2] = 0x80 | (packet[2] & 0x79);
+                bytes[3] = 2;
+                bytes
+            }
+        }
+    }
+
+    /// Return a cached response after the outer query deadline cancelled live resolution.
+    #[must_use]
+    pub fn cached_answer(&self, query: &Query, maximum: usize) -> Option<Vec<u8>> {
+        if self.is_custom(query) {
+            return None;
+        }
+        self.cache
+            .as_ref()
+            .and_then(|cache| cache.lookup(query, maximum))
+            .map(|hit| hit.bytes)
+    }
+
+    async fn answer_uncached(
+        &self,
+        query: &Query,
+        peer: SocketAddr,
+        protocol: Transport,
+        maximum: usize,
+    ) -> Result<Vec<u8>, String> {
         let raw = query.message.to_vec().map_err(|_| "cannot encode query")?;
         let request =
             Request::from_bytes(raw, peer, protocol).map_err(|_| "cannot decode request")?;
@@ -558,7 +882,35 @@ fn forward_zone(
     settings: &lumen_config::Resolver,
     options: &ResolverOpts,
     anchors: Option<&Arc<TrustAnchors>>,
+    metrics: Arc<Metrics>,
 ) -> Result<Arc<dyn ZoneHandler>, String> {
+    let pool = forward_pool(settings, options, anchors)?;
+    // A small second pool without validation, used only below zones already proven unsigned.
+    let plain = if settings.dnssec {
+        let mut plain_options = options.clone();
+        plain_options.validate = false;
+        plain_options.cache_size = (plain_options.cache_size / 8).max(64);
+        Some(forward_pool(settings, &plain_options, None)?)
+    } else {
+        None
+    };
+    Ok(Arc::new(ResolutionZone {
+        origin: Name::root().into(),
+        backend: Backend::Forward(Box::new(ForwardBackend {
+            pool,
+            plain,
+            budget: Duration::from_millis(u64::from(settings.upstream_timeout_ms)),
+            metrics: Some(metrics),
+        })),
+    }))
+}
+
+/// The forwarders of every provider and custom upstream, and how a query picks among them.
+fn forward_pool(
+    settings: &lumen_config::Resolver,
+    options: &ResolverOpts,
+    anchors: Option<&Arc<TrustAnchors>>,
+) -> Result<forward::ForwardPool<TokioRuntimeProvider>, String> {
     // Without a strategy the older behavior stays: one forwarder over every address.
     let (strategy, groups) = match settings.strategy {
         Some(strategy) => (
@@ -584,12 +936,7 @@ fn forward_zone(
         start += size;
     }
     let penalty = Duration::from_millis(u64::from(settings.upstream_timeout_ms));
-    Ok(Arc::new(ResolutionZone {
-        origin: Name::root().into(),
-        backend: Backend::Forward(Box::new(forward::ForwardPool::new(
-            members, strategy, penalty,
-        ))),
-    }))
+    Ok(forward::ForwardPool::new(members, strategy, penalty))
 }
 
 /// Sizes of the groups that `count` upstreams form, one group per provider and then one per
@@ -710,6 +1057,11 @@ fn name_server_config(
         UpstreamProtocol::Tcp => NameServerConfig::tcp(upstream.address.ip()),
         UpstreamProtocol::Tls => NameServerConfig::tls(upstream.address.ip(), name),
         UpstreamProtocol::Https => NameServerConfig::https(
+            upstream.address.ip(),
+            name,
+            upstream.doh_path.as_deref().map(Arc::from),
+        ),
+        UpstreamProtocol::H3 => NameServerConfig::h3(
             upstream.address.ip(),
             name,
             upstream.doh_path.as_deref().map(Arc::from),
@@ -872,7 +1224,29 @@ enum Backend<P: hickory_server::net::runtime::RuntimeProvider> {
         accel: Arc<Accel>,
         policy: RecursivePolicy,
     },
-    Forward(Box<forward::ForwardPool<P>>),
+    Forward(Box<ForwardBackend<P>>),
+}
+
+/// Forward mode: the pool that answers queries and, when local validation is on, a second pool
+/// without validation for names below a zone that is provably unsigned.
+pub(crate) struct ForwardBackend<P: hickory_server::net::runtime::RuntimeProvider> {
+    pub(crate) pool: forward::ForwardPool<P>,
+    plain: Option<forward::ForwardPool<P>>,
+    /// One budget for the ancestor walk and the retry together.
+    budget: Duration,
+    metrics: Option<Arc<Metrics>>,
+}
+
+impl<P: hickory_server::net::runtime::RuntimeProvider> ForwardBackend<P> {
+    /// A forwarder with no recovery, for conditional forwarders.
+    pub(crate) fn plain(pool: forward::ForwardPool<P>) -> Self {
+        Self {
+            pool,
+            plain: None,
+            budget: Duration::ZERO,
+            metrics: None,
+        }
+    }
 }
 #[derive(Clone, Copy)]
 struct RecursivePolicy {
@@ -907,7 +1281,7 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
     fn can_validate_dnssec(&self) -> bool {
         match &self.backend {
             Backend::Recursive { recursor, .. } => recursor.is_validating(),
-            Backend::Forward(pool) => pool.validates(),
+            Backend::Forward(backend) => backend.pool.validates(),
         }
     }
     fn origin(&self) -> &LowerName {
@@ -1044,11 +1418,20 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
                     }
                 }
             },
-            Backend::Forward(pool) => pool
-                .lookup(Name::from(name), rtype)
-                .await
-                .map(AuthLookup::from)
-                .map_err(LookupError::from),
+            Backend::Forward(backend) => {
+                match backend.pool.lookup(Name::from(name), rtype).await {
+                    Ok(lookup) => Ok(AuthLookup::from(lookup)),
+                    // A failed validation is final unless a zone above the name is provably
+                    // unsigned, which makes validating anything below it meaningless.
+                    Err(NetError::Dns(DnsError::DnssecBogus)) => {
+                        match forward_insecure_retry(backend, name, rtype).await {
+                            Some(lookup) => Ok(AuthLookup::from(lookup)),
+                            None => Err(LookupError::from(NetError::Dns(DnsError::DnssecBogus))),
+                        }
+                    }
+                    Err(error) => Err(LookupError::from(error)),
+                }
+            }
         };
         LookupControlFlow::Continue(result)
     }
@@ -1144,6 +1527,68 @@ async fn recursive_lookup<P: hickory_server::net::runtime::RuntimeProvider>(
     };
     accel.metrics.observe(lookup_started.elapsed(), false);
     result
+}
+
+/// Forward mode's counterpart of `insecure_retry`: after a DNSSEC failure, walk the ancestors
+/// from the top-level domain down with validating lookups. The first one that validates as
+/// provably insecure (a zone with no DS record, proven) means nothing below it can be secure, so
+/// the lookup is repeated once without validation. A secure ancestor sends the walk one level
+/// down; a bogus or unanswered one ends it, and the failure stands. The walk and the retry share
+/// one budget and are cancelled with the query.
+async fn forward_insecure_retry<P: hickory_server::net::runtime::RuntimeProvider>(
+    backend: &ForwardBackend<P>,
+    name: &LowerName,
+    rtype: RecordType,
+) -> Option<hickory_server::resolver::lookup::Lookup> {
+    let plain = backend.plain.as_ref()?;
+    let mut chain = Vec::new();
+    let mut current = Name::from(name.clone()).base_name();
+    while !current.is_root() {
+        chain.push(current.clone());
+        current = current.base_name();
+    }
+    chain.reverse(); // from the top-level domain downwards
+    let deadline = Instant::now() + backend.budget;
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+    for ancestor in chain {
+        // Which name server answers can vary, so the apex is looked at twice (SOA, then NS).
+        let mut verdict = None;
+        for probe in [RecordType::SOA, RecordType::NS] {
+            let left = remaining();
+            if left.is_zero() {
+                return None;
+            }
+            let result = timeout(left, backend.pool.lookup(ancestor.clone(), probe))
+                .await
+                .ok()?;
+            verdict = match &result {
+                Ok(lookup) => Some(DnssecSummary::from_records(lookup.answers().iter())),
+                Err(NetError::Dns(DnsError::DnssecBogus)) => Some(DnssecSummary::Bogus),
+                // Not answered: there is nothing to base a decision on.
+                Err(_) => return None,
+            };
+            if !matches!(verdict, Some(DnssecSummary::Bogus)) {
+                break;
+            }
+        }
+        match verdict? {
+            DnssecSummary::Insecure => {
+                let lookup = timeout(remaining(), plain.lookup(Name::from(name.clone()), rtype))
+                    .await
+                    .ok()?
+                    .ok()?;
+                if let Some(metrics) = &backend.metrics {
+                    metrics
+                        .forward_insecure_recoveries
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                return Some(lookup);
+            }
+            DnssecSummary::Secure => {} // a signed zone: look one level down
+            DnssecSummary::Bogus => return None,
+        }
+    }
+    None
 }
 
 /// Some operators answer DS queries for a child zone from the child itself, which strict
@@ -1242,8 +1687,11 @@ async fn recover_bogus<P: hickory_server::net::runtime::RuntimeProvider>(
 fn lowercase_names(message: &mut Message) {
     for record in &mut message.answers {
         record.name = record.name.to_lowercase();
-        if let RData::CNAME(target) = &mut record.data {
-            target.0 = target.0.to_lowercase();
+        match &mut record.data {
+            RData::CNAME(target) => target.0 = target.0.to_lowercase(),
+            RData::HTTPS(https) => https.0.target_name = https.0.target_name.to_lowercase(),
+            RData::SVCB(svcb) => svcb.target_name = svcb.target_name.to_lowercase(),
+            _ => {}
         }
     }
 }

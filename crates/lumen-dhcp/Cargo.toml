@@ -1,0 +1,32 @@
+[package]
+name = "lumen-dhcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+lumen-config = { path = "../lumen-config" }
+lumen-resolver = { path = "../lumen-resolver" }
+dhcproto = "0.15"
+tokio.workspace = true
+rusqlite.workspace = true
+socket2 = { version = "0.6", features = ["all"] }
+ipnet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ring = "0.17"
+# HMAC-MD5 is what the DHCPv6 Reconfigure Key protocol (RFC 8415 section 20.4) requires.
+hmac = "0.12"
+md-5 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", default-features = false, features = ["net"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

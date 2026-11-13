@@ -2,6 +2,57 @@
 
 All notable user-facing changes are listed here. Lumen is still pre-release.
 
+## [Unreleased]
+
+## [0.7.0] - 2026-11-12
+
+### Added
+
+- **Easy local DNS manager.** Administrators can create, edit, and delete typed local zones and records under **DNS → Local DNS**, with `A`, `AAAA`, `CNAME`, `TXT`, `PTR`, `MX`, `SRV`, `CAA`, and `TLSA` fields. `home.arpa` is recommended; `.local` is rejected because it belongs to mDNS. Managed records are bounded, validated, stored in config revisions, and applied through the normal staged restart and rollback path. Advanced file, split, dynamic, transferred, and signed zones stay visible but read-only. See [Your own DNS zones](docs/guides/authoritative-dns.md#easy-local-dns-manager).
+- **DHCP server for IPv4 and IPv6 (module, off by default).** `[dhcp]` hands out addresses with reservations, bounded ranges, and leases kept in a `0600` SQLite file. IPv4 follows RFC 2131 (relays included); IPv6 is stateful `IA_NA` (RFC 8415) with Rapid Commit. Leased names with a host name are published in Lumen's DNS, forward and reverse, and withdrawn when the lease ends. The web console gains an optional **DHCP** module with networks and leases. Also: DHCPv6 relay agents (including chains), prefix delegation (`IA_PD`) with reservations, network boot options (`next_server`, `boot_file`), and a Lumen-to-Lumen hot-standby failover with a signed link. Binding each IPv4 scope to its network works on Linux and macOS, and is written but untested on Windows and BSD. Temporary addresses (`IA_TA`, random, never renewed or published) DHCPv6 Reconfigure and IPv4 `DHCPFORCERENEW` (both opt-in per scope, with an **Ask to renew** button in the console) are included. Not included: ISC-compatible failover, per-client boot options. See [DHCP server](docs/guides/dhcp.md).
+- **Automatic certificates (ACME), opt-in.** `[acme]` obtains and renews the certificate for the encrypted listeners from an ACME CA such as Let's Encrypt, using the HTTP-01 challenge on a port that is open only while an order runs, or the DNS-01 challenge (`challenge = "dns-01"`), which Lumen answers itself and which allows wildcard names. Renewed files load through certificate reload, so nothing restarts. Tested against Pebble. See [Automatic certificates](docs/guides/certificates.md).
+- **DoH3 upstreams.** An explicit upstream can use `protocol = "h3"` (DNS over HTTP/3, QUIC with ALPN `h3`, optional `doh_path`). Certificates and names are verified like the other encrypted transports. The automatic provider list uses it too (see below).
+- **DNSSEC signing for your own zones, opt-in.** `[zones.dnssec]` signs a plain zone with one Ed25519 or ECDSA P-256 key and NSEC, renews signatures daily, and serves them to clients that ask for DNSSEC data. `lumen --zone-key FILE --zone NAME` creates the key (mode `0600`) and prints the `DNSKEY` and `DS` records. Not built: key rollover, NSEC3, signing for dynamic or split-horizon zones. See [Your own DNS zones](docs/guides/authoritative-dns.md#dnssec-signing).
+- **Automatic trust-anchor rollover (RFC 5011), opt-in.** `resolver.trust_anchor_state` keeps trust-anchor state in a `0600` file. Lumen checks the signed root DNSKEY set daily, trusts a new key after 30 days, drops revoked keys, and exports `lumen_dns_trust_anchor_*` metrics. Changes load at the next restart. See [DNSSEC and trust](docs/reference/dnssec-and-trust.md#automatic-rollover-rfc-5011).
+- **DNS over HTTP/3 (DoH3).** `listen.doh3` serves `/dns-query` over QUIC with ALPN `h3`, with the same methods, media type, status codes, limits, certificate, and `allow_clients` rules as DoH over HTTP/2. Metrics gain an `http3` transport label (the former `other` label moves to a new index but keeps its name).
+- **DNSCrypt v2 server (opt-in).** `[dnscrypt]` serves signed, automatically rotating certificates and encrypted queries over UDP and TCP, with `X25519-XChaCha20Poly1305` and `X25519-XSalsa20Poly1305`. The long-term provider key lives in a `0600` file, UDP replies are never larger than the query, and Lumen logs a `sdns://` stamp at startup. Not included: DNSCrypt upstreams and Anonymized DNSCrypt.
+- **Your own DNS zones (opt-in).** `[[zones]]` serves authoritative records from zone files or inline text, with split-horizon `views` by client network, DNS-SD as ordinary records, and `[[forwarders]]` for conditional forwarding of a domain to specific resolvers. These names bypass the response caches. See [Your own DNS zones](docs/guides/authoritative-dns.md).
+- **Dynamic updates (RFC 2136) and zone transfers.** A zone with a `journal` accepts TSIG-signed updates scoped per key to names and record types, saved to a SQLite journal. `transfer_keys` allow AXFR and IXFR over TCP, TSIG-signed, bounded to one DNS message. Dynamic zones answer IXFR with the differences from their last 32 updates (kept in memory), and with the whole zone otherwise. `notify` lists secondaries that get a NOTIFY (RFC 1996) at startup and after each accepted update. The vendored `hickory-server` now uses `rusqlite` 0.41 and treats IXFR like AXFR under the same policy (see `vendor/README.md`).
+- **Certificate renewal without restart.** Renewed PEM files for DoT, DoH, DoH3, and DoQ are checked every 30 seconds, verified, and swapped in; bad files keep the old pair serving. New metrics export expiry and reload counts. The web console's HTTPS certificate still needs a restart.
+- **Serve-stale (RFC 8767), opt-in.** `[resolver.serve_stale]` answers from an expired entry for up to `max_age_secs` while one background refresh runs. Replies carry a short TTL, and expired DNSSEC-authenticated data is never served. Stale data is also used when live resolution times out.
+- **Persistent DNS cache, opt-in.** `[resolver.persistent_cache]` saves bounded responses in a separate mode `0600` SQLite file so restarts start warm. It stores names and answers, never clients. A corrupt file is moved aside and rebuilt.
+- **Regular-expression filter rules.** `regex_allow` and `regex_block`, global or per profile, whole-name, linear-time, and size-limited. `filter-explain` shows the matching pattern.
+- **CNAME-based blocking.** Filter rules now also check CNAME targets in upstream answers and replace the answer with the block action.
+- **SafeSearch, per profile, opt-in.** `safe_search = true` rewrites Google, Bing, and YouTube names to their restricted endpoints.
+
+### Added (continued)
+
+- **IPv6 Router Advertisements (opt-in).** `[[dhcp.router_advertisements]]` sends RFC 4861 advertisements on an interface: prefixes with on-link and autonomous flags and lifetimes, the M and O flags that point devices to DHCPv6, DNS servers and search domains (RFC 8106), an MTU, and routes (RFC 4191). It sends a quick first burst and then random-interval advertisements, answers Router Solicitations (rate-limited), and withdraws itself as a default router when it stops. By default it says it is **not** a default router (Lumen does not route). Needs a raw socket (root or `CAP_NET_RAW`); Linux, macOS and the BSDs. Checked on a real Linux link: the kernel built a SLAAC address, default route and MTU from it, and `rdisc6` read every option back. The console's DHCP module lists each interface. See [Router Advertisements](docs/guides/dhcp.md#router-advertisements-ipv6).
+- **IPv4 FORCERENEW (opt-in).** `forcerenew = true` on an IPv4 scope gives clients that announce support (option 145) a nonce (RFC 6704), and **Ask to renew** then sends an authenticated `DHCPFORCERENEW` (RFC 3203) so the device renews at once. Many clients do not support it; those are never given a nonce.
+
+- **EDNS(0) padding (RFC 7830, RFC 8467), always on for encrypted transports.** Queries Lumen sends to DoT, DoH, DoH3, and DoQ upstreams are padded to a multiple of 128 bytes, so an observer of the encrypted link cannot tell names apart by length. Lumen's own DoT, DoH, DoH3, and DoQ listeners pad answers to a multiple of 468 bytes when the client sent a Padding option. Plain UDP and TCP are never padded. There is no setting. EDNS Client Subnet (ECS) is deliberately **not** sent: it would pass part of the client's address to authoritative servers. The padding change to `hickory-net` is listed in `vendor/README.md`. See [Encrypted DNS](docs/guides/encrypted-dns.md#padding).
+
+- **Multicast DNS bridge (opt-in).** `[mdns]` adds a *discovery proxy* that answers DNS questions under a domain you choose from what devices announce (`printer.<domain>` is `printer.local`, service browsing included, with targets rewritten) and a *reflector* that repeats mDNS between the listed interfaces, with loop suppression, rate limits, and on-link checks. IPv4 and IPv6, Linux and macOS. Verified against a real responder on a real interface as well as in tests. See [Multicast DNS bridge](docs/guides/mdns.md).
+
+- **NSEC3 and zone key rollover for signed zones.** `[zones.dnssec] denial = "nsec3"` proves absence with hashed names (SHA-1, zero extra iterations, optional salt and opt-out, per RFC 9276). `next_key_file` (and `next_algorithm`) starts a double-signature rollover: both keys are published and every record set is signed twice until you drop the old key, so the parent's `DS` can move without a gap. Operator-driven, not timer-driven. See [Your own DNS zones](docs/guides/authoritative-dns.md#key-rollover).
+
+- **DoH3 in the automatic provider list.** `transport_priority` accepts `h3`, and `protocol = "h3"` selects it explicitly. Freifunk Munich, dns.sb, Quad9, UncensoredDNS, Cloudflare and Google have an `h3` entry (their own DoH endpoints advertise HTTP/3); the others are not documented. Automatic order is QUIC, HTTPS, HTTP/3, TLS, since HTTP/3 shares QUIC's UDP path. Catalog status is `not_tested`.
+
+- **Child-safety categories in Quick install.** A **Child safety** group installs one list per category (`adult`, `gambling`, `social`, `drugs`, `piracy`, `torrent`, `tiktok`, `youtube`, `facebook`). Each list carries its category, so it applies only to profiles that select it; installing creates or extends a `child-safe` profile. The adult and gambling lists moved here from Extras, so new installs no longer apply them to everyone. Existing installs are unchanged. See [Filtering](docs/guides/filtering.md#child-safety-categories).
+
+### Fixed
+
+- **Forward mode with local DNSSEC validation no longer returns `SERVFAIL` below zones that are provably unsigned** (Issue #35, for example `clients4.google.com` and `clients.l.google.com`). After a validation failure Lumen checks the ancestors from the top down; if one is proven insecure it repeats the lookup once without validation, with the authenticated-data flag cleared. A secure or bogus ancestor, or a signed zone with a bad signature, still fails. One shared `upstream_timeout_ms` budget covers the check and the retry, and `lumen_dns_forward_insecure_recoveries_total` counts it (with `resolver.diagnostics`). Tested with local fixtures only; see [DNSSEC and trust](docs/reference/dnssec-and-trust.md).
+
+### Changed
+
+- HTTPS and SVCB target names are lowercased like CNAME targets, keeping the other record data intact.
+- Runtime pins (Helm, Compose, Podman guide) point at 0.7.0.
+
+### Not included
+
+Automatic (timer-driven) zone key rollover, TLS-ALPN-01 ACME challenges, native ECH, DNSCrypt upstreams, and Anonymized DNSCrypt are **not** available in this release.
+
 ## [0.6.0] - 2026-11-09
 
 ### Added

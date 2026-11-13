@@ -13,6 +13,14 @@ hickory-server.workspace = true
 tokio.workspace = true
 rustls.workspace = true
 async-trait = "0.1"
+rusqlite.workspace = true
+ipnet = "2"
+futures-executor = "0.3"
+base64 = "0.23"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+time = { version = "0.3", default-features = false }
+tempfile = "3"

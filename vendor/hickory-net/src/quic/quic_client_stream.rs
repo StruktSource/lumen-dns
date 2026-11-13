@@ -67,7 +67,10 @@ impl QuicClientStream {
         //  QUIC stream for each query. The server then uses the same stream to provide all the response messages for that query.
         let mut stream = QuicStream::new(send_stream, recv_stream);
 
-        stream.send(message.into_parts().0).await?;
+        // LUMEN PATCH: pad the query (RFC 7830, RFC 8467).
+        let mut query = message.into_parts().0;
+        crate::xfer::padding::pad_message(&mut query, crate::xfer::padding::QUERY_BLOCK);
+        stream.send(query).await?;
 
         // The client MUST send the DNS query over the selected stream,
         // and MUST indicate through the STREAM FIN mechanism that no further data will be sent on that stream.

@@ -91,6 +91,8 @@ pub struct DnsMultiplexer<S> {
     stream_handle: BufDnsStreamHandle,
     active_requests: HashMap<u16, ActiveRequest>,
     max_active_requests: usize,
+    // LUMEN PATCH: pad queries to a multiple of this many bytes (0 = off).
+    padding_block: usize,
     #[cfg(feature = "__dnssec")]
     signer: Option<TSigner>,
     is_shutdown: bool,
@@ -115,10 +117,18 @@ impl<S: DnsClientStream> DnsMultiplexer<S> {
             stream_handle,
             active_requests: HashMap::default(),
             max_active_requests: 32,
+            padding_block: 0,
             #[cfg(feature = "__dnssec")]
             signer: None,
             is_shutdown: false,
         }
+    }
+
+    /// LUMEN PATCH: pad every query to a multiple of `block` bytes with EDNS(0) padding
+    /// (RFC 7830). Used for DNS over TLS, where query length would otherwise show.
+    pub fn with_padding(mut self, block: usize) -> Self {
+        self.padding_block = block;
+        self
     }
 
     /// Change the default timeout of the DnsMultiplexer stream.
@@ -216,6 +226,7 @@ impl<S: DnsClientStream> DnsRequestSender for DnsMultiplexer<S> {
 
         let (mut request, _) = request.into_parts();
         request.metadata.id = query_id;
+        super::padding::pad_message(&mut request, self.padding_block);
 
         #[cfg(feature = "__dnssec")]
         let mut verifier = None;

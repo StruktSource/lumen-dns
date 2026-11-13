@@ -9,7 +9,10 @@ const sv = (tag, a = {}, ...k) => { const e = document.createElementNS(NS, tag);
 L.MODULES = [
   { id: 'traffic-map', page: 'trafficmap', name: 'Traffic map', icon: 'map',
     text: 'An interactive tree of your DNS traffic: Lumen at the top, then every top-level domain, then the domains and services under it. See at a glance where queries go and what gets blocked.',
-    needs: 'Needs query history. Turn it on under Activity.' }];
+    needs: 'Needs query history. Turn it on under Activity.' },
+  { id: 'dhcp', page: 'dhcp', name: 'DHCP', icon: 'server',
+    text: 'The DHCP server for IPv4 and IPv6 built into Lumen. Devices that get an address also get a DNS name, so you can reach them by name. See your networks and every lease at a glance.',
+    needs: 'Needs dhcp.enabled in the configuration. Lumen never hands out addresses on its own.' }];
 
 L.loadModules = async () => { L.S.modules = await L.api('GET', '/api/modules'); L.S.modulesAt = Date.now(); };
 L.moduleOn = id => !!L.S.modules?.enabled?.includes(id);
@@ -25,6 +28,13 @@ const toggle = async (m, on) => {
 
 /* A small drawing of what the module looks like, so the card says more than a sentence. */
 const preview = id => {
+  if (id === 'dhcp') {
+    const s = sv('svg', { class: 'mod-art', viewBox: '0 0 240 120', 'aria-hidden': 'true' });
+    s.append(sv('path', { class: 'mod-edge', d: 'M120 34V52M120 52H48V76M120 52V76M120 52H192V76', fill: 'none', pathLength: '1' }));
+    s.append(sv('rect', { class: 'mod-n root', x: 92, y: 14, width: 56, height: 20 }));
+    [48, 120, 192].forEach(x => s.append(sv('rect', { class: 'mod-n leaf', x: x - 22, y: 76, width: 44, height: 16 })));
+    return s;
+  }
   if (id !== 'traffic-map') return null;
   const s = sv('svg', { class: 'mod-art', viewBox: '0 0 240 120', 'aria-hidden': 'true' });
   const edge = d => s.append(sv('path', { class: 'mod-edge', d, fill: 'none', pathLength: '1' }));

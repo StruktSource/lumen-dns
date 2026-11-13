@@ -94,6 +94,7 @@ async fn precedence_suffix_boundaries_and_decision_evidence() {
         rules: Rules {
             allow: vec!["safe.ads.example".into()],
             block: vec!["=exact.example".into()],
+            ..Rules::default()
         },
         lists: vec![list("ads", "ads.example\ntracking.example", None)],
         ..Config::default()
@@ -114,11 +115,78 @@ async fn precedence_suffix_boundaries_and_decision_evidence() {
 }
 
 #[tokio::test]
+async fn bounded_regex_rules_are_full_name_only_and_keep_allow_precedence() {
+    let config = Config {
+        rules: Rules {
+            regex_allow: vec![r"safe\..*\.tracker\.example".into()],
+            regex_block: vec![r".*\.tracker\.example".into()],
+            ..Rules::default()
+        },
+        ..Config::default()
+    };
+    let filter = Filter::load(config).await.unwrap();
+    let blocked = filter.explain("ads.tracker.example", ip(), 0);
+    assert!(blocked.blocked);
+    assert_eq!(blocked.rule.as_deref(), Some(r"/.*\.tracker\.example/"));
+    assert!(!filter.explain("safe.ads.tracker.example", ip(), 0).blocked);
+    assert!(!filter.explain("xads.tracker.example.net", ip(), 0).blocked);
+
+    for pattern in ["(".into(), "a".repeat(1025)] {
+        let invalid = Config {
+            rules: Rules {
+                regex_block: vec![pattern],
+                ..Rules::default()
+            },
+            ..Config::default()
+        };
+        assert!(Filter::load(invalid).await.is_err());
+    }
+    let too_many = Config {
+        rules: Rules {
+            regex_block: (0..=crate::rules::MAX_REGEX_RULES)
+                .map(|n| format!("blocked{n}\\.example"))
+                .collect(),
+            ..Rules::default()
+        },
+        ..Config::default()
+    };
+    assert!(Filter::load(too_many).await.is_err());
+}
+
+#[tokio::test]
+async fn safe_search_is_explicit_and_profile_scoped() {
+    let filter = Filter::load(Config {
+        profiles: vec![Profile {
+            id: "family".into(),
+            safe_search: true,
+            ..Profile::default()
+        }],
+        default_profile: Some("family".into()),
+        ..Config::default()
+    })
+    .await
+    .unwrap();
+    let decision = filter.explain("www.google.com", ip(), 0);
+    assert!(decision.blocked);
+    assert_eq!(decision.category.as_deref(), Some("safe_search"));
+    assert_eq!(
+        decision.action,
+        Some(Action::Cname {
+            target: "forcesafesearch.google.com".into()
+        })
+    );
+    assert!(!filter.explain("search.example", ip(), 0).blocked);
+    let off = Filter::load(Config::default()).await.unwrap();
+    assert!(!off.explain("www.google.com", ip(), 0).blocked);
+}
+
+#[tokio::test]
 async fn device_group_subnet_default_category_and_override() {
     let config = Config {
         rules: Rules {
             allow: vec!["global.example".into()],
             block: vec!["ads.example".into()],
+            ..Rules::default()
         },
         lists: vec![
             list("adult", "adult.example", Some("adult")),
@@ -131,6 +199,7 @@ async fn device_group_subnet_default_category_and_override() {
                 rules: Rules {
                     allow: vec!["ads.example".into()],
                     block: vec!["global.example".into()],
+                    ..Rules::default()
                 },
                 ..Profile::default()
             },
@@ -719,6 +788,7 @@ async fn lists_beyond_the_old_limit_use_eight_bytes_per_rule_and_keep_precedence
         rules: Rules {
             allow: vec!["a10.big.example".into()],
             block: Vec::new(),
+            ..Rules::default()
         },
         lists: vec![list("one", &first, None), list("two", &second, None)],
         ..Config::default()

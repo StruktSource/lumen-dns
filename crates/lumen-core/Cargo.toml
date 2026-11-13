@@ -12,6 +12,8 @@ lumen-config = { path = "../lumen-config" }
 lumen-proto = { path = "../lumen-proto" }
 lumen-resolver = { path = "../lumen-resolver" }
 lumen-web = { path = "../lumen-web" }
+lumen-dhcp = { path = "../lumen-dhcp" }
+lumen-mdns = { path = "../lumen-mdns" }
 tokio.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
@@ -21,13 +23,24 @@ bytes = "1"
 socket2 = "0.6"
 base64 = "0.23"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+crypto_box = { version = "0.9", features = ["chacha20", "salsa20"] }
+x509-parser = "0.18"
+instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls"] }
+serde_json.workspace = true
 
 [dev-dependencies]
 lumen-store = { path = "../lumen-store" }
 rcgen = "0.14"
+time = { version = "0.3", default-features = false }
 hickory-server.workspace = true
 hickory-proto.workspace = true
 tempfile = "3"
+dhcproto = "0.15"
+data-encoding = "2"
 
 [lints]
 workspace = true

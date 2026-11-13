@@ -21,16 +21,16 @@ id = "cloudflare-unfiltered"
 protocol = "auto"
 encryption = "required"
 address_family = "ipv4"
-transport_priority = ["quic", "https", "tls"]
+transport_priority = ["quic", "https", "h3", "tls"]
 ```
 
 | Field | Meaning |
 | :--- | :--- |
 | `id` | The stable ID from the table below. |
-| `protocol` | A specific transport (`udp`, `tcp`, `tls`, `https`, `quic`), or `auto` for an encrypted-only list. |
+| `protocol` | A specific transport (`udp`, `tcp`, `tls`, `https`, `h3`, `quic`), or `auto` for an encrypted-only list. |
 | `address_family` | `any` (default), `ipv4`, or `ipv6`. |
 | `encryption` | Auto mode only. Defaults to, and only accepts, `required`. There is no plaintext policy. |
-| `transport_priority` | Auto mode only. An ordered, unique subset of `quic`, `https`, `tls`. Default order: QUIC, HTTPS, TLS. |
+| `transport_priority` | Auto mode only. An ordered, unique subset of `quic`, `https`, `h3`, `tls`. Default order: QUIC, HTTPS, HTTP/3, TLS. |
 
 ## Use several providers
 
@@ -80,6 +80,10 @@ Each provider is its own forwarder with its own timeout. Lumen moves to the next
 - `race` is the fastest but the least private. `round_robin` and `failover` send each lookup to one provider, `race` sends it to all.
 
 Certificate chain and hostname checks always stay on, and selection never probes public services at startup.
+
+## DNS over HTTP/3 (`h3`)
+
+Providers whose own DoH endpoint advertises HTTP/3 (`alt-svc: h3=":443"`) have an `h3` transport: **Freifunk Munich, dns.sb, Quad9, UncensoredDNS, Cloudflare and Google**. For the others it is `not_documented` and never used. `auto` tries HTTP/3 after HTTP/2 by default, because it travels over UDP like DoQ, and some networks block UDP on port 443. Put it first with `transport_priority = ["h3", "https", "tls"]` if you want it preferred. It uses the same URL, certificate name, and rules as DoH. The catalog marks these `not_tested`: they were chosen from the providers' own advertisements, and Lumen's own tests of the HTTP/3 upstream path use a local server. Check yours with `lumen --config … --check` and a query before relying on it.
 
 ## Included providers
 

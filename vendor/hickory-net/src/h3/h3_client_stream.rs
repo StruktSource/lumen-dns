@@ -191,6 +191,8 @@ impl DnsRequestSender for H3ClientStream {
 
         // per the RFC, a zero id allows for the HTTP packet to be cached better
         request.metadata.id = 0;
+        // LUMEN PATCH: pad the query (RFC 7830, RFC 8467).
+        crate::xfer::padding::pad_message(&mut request, crate::xfer::padding::QUERY_BLOCK);
 
         let bytes = match request.to_vec() {
             Ok(bytes) => bytes,

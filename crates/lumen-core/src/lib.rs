@@ -1,13 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Service lifecycle, resource admission, and aggregate metrics.
 
+mod acme;
+mod certs;
+mod dnscrypt;
+mod padding;
 mod transport;
+pub use certs::Reload;
 pub use lumen_filter::{Filter, activity, configure_download_cache};
 pub use lumen_resolver::Transport;
 pub use transport::{ConsoleOptions, RunningServer};
 
 use lumen_config::Config;
-use lumen_proto::{Query, Rcode, is_response, malformed_response};
+use lumen_proto::{
+    Query, Rcode,
+    hickory_proto::{op::Message, rr::RData},
+    is_response, malformed_response,
+};
 use lumen_resolver::Resolver;
 use std::fmt::Write;
 use std::{
@@ -34,13 +43,44 @@ pub struct Metrics {
     pub timeouts: AtomicU64,
     pub failures: AtomicU64,
     pub active: AtomicU64,
-    transports: [AtomicU64; 6],
+    transports: [AtomicU64; 7],
     latency_buckets: [AtomicU64; 8],
     latency_micros: AtomicU64,
     rcodes: [AtomicU64; 5],
+    cert_not_after: std::sync::atomic::AtomicI64,
+    cert_reloads: AtomicU64,
+    cert_reload_failures: AtomicU64,
 }
 
 impl Metrics {
+    fn render_certificates(&self, text: &mut String) {
+        let not_after = self.cert_not_after.load(Ordering::Relaxed);
+        if not_after != 0 {
+            let _ = writeln!(
+                text,
+                "# HELP lumen_dns_certificate_not_after_timestamp_seconds Expiry of the served DNS TLS certificate (Unix time).\n# TYPE lumen_dns_certificate_not_after_timestamp_seconds gauge\nlumen_dns_certificate_not_after_timestamp_seconds {not_after}"
+            );
+        }
+        for (name, help, value) in [
+            (
+                "certificate_reloads_total",
+                "TLS certificate pairs replaced without restart.",
+                &self.cert_reloads,
+            ),
+            (
+                "certificate_reload_failures_total",
+                "Changed TLS files rejected because they were not a valid matching pair.",
+                &self.cert_reload_failures,
+            ),
+        ] {
+            let _ = writeln!(
+                text,
+                "# HELP lumen_dns_{name} {help}\n# TYPE lumen_dns_{name} counter\nlumen_dns_{name} {}",
+                value.load(Ordering::Relaxed)
+            );
+        }
+    }
+
     /// Stable Prometheus text exposition. All labels have bounded cardinality.
     #[must_use]
     pub fn render(&self) -> String {
@@ -89,6 +129,7 @@ impl Metrics {
                 value.load(Ordering::Relaxed)
             );
         }
+        self.render_certificates(&mut text);
         text.push_str("# HELP lumen_dns_transport_queries_total Admitted DNS queries by bounded transport.\n# TYPE lumen_dns_transport_queries_total counter\n");
         for (name, value) in [
             ("udp", &self.transports[0]),
@@ -96,7 +137,8 @@ impl Metrics {
             ("tls", &self.transports[2]),
             ("https", &self.transports[3]),
             ("quic", &self.transports[4]),
-            ("other", &self.transports[5]),
+            ("http3", &self.transports[5]),
+            ("other", &self.transports[6]),
         ] {
             let _ = writeln!(
                 text,
@@ -133,7 +175,8 @@ impl Metrics {
             Transport::Tls => 2,
             Transport::Https => 3,
             Transport::Quic => 4,
-            _ => 5,
+            Transport::H3 => 5,
+            _ => 6,
         };
         self.transports[transport].fetch_add(1, Ordering::Relaxed);
         let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -203,16 +246,48 @@ struct Service {
     history: Mutex<std::collections::VecDeque<lumen_web::QueryRecord>>,
     unsaved: Mutex<Vec<lumen_web::QueryRecord>>,
     config: Arc<Config>,
-    resolver: Resolver,
+    resolver: Arc<Resolver>,
     /// Swapped as a whole when lists or rules change, so listeners never restart for that.
     filter: RwLock<Arc<lumen_filter::Filter>>,
     queries: Arc<Semaphore>,
     connections: Arc<Semaphore>,
     clients: Mutex<ClientRates>,
     metrics: Arc<Metrics>,
+    /// Set once, after the DHCP server (if any) has started.
+    dhcp: std::sync::OnceLock<lumen_dhcp::Handle>,
 }
 
 impl Service {
+    /// Replace an upstream answer whose CNAME chain reaches a blocked name.
+    fn block_cname(
+        filter: &lumen_filter::Filter,
+        query: &Query,
+        response: &[u8],
+        peer: SocketAddr,
+        now: u64,
+        maximum: usize,
+    ) -> Option<Vec<u8>> {
+        let message = Message::from_vec(response).ok()?;
+        for record in &message.answers {
+            let RData::CNAME(target) = &record.data else {
+                continue;
+            };
+            let decision = filter.decide_cname_dns(&target.0, peer.ip().to_canonical(), now);
+            let Some(action) = &decision.action else {
+                continue;
+            };
+            if filter.decision_log() {
+                eprintln!(
+                    "filter client={} cname_target={:?} {decision}",
+                    peer.ip().to_canonical(),
+                    target.0.to_ascii()
+                );
+            }
+            return Some(lumen_filter::response(query, action, maximum));
+        }
+        None
+    }
+
     /// The filter that is live right now.
     fn filter(&self) -> Arc<lumen_filter::Filter> {
         Arc::clone(&self.filter.read().expect("filter lock"))
@@ -235,7 +310,47 @@ impl Service {
         )
     }
 
+    /// RFC 2136 updates and zone transfers: counted and bounded like queries, never filtered.
+    async fn zone_message(
+        &self,
+        packet: &[u8],
+        peer: SocketAddr,
+        protocol: Transport,
+        kind: lumen_resolver::ZoneMessage,
+        started: Instant,
+    ) -> Option<Vec<u8>> {
+        let Ok(_permit) = self.queries.try_acquire() else {
+            self.metrics.refused.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        let response = self
+            .resolver
+            .zone_message(packet, peer, protocol, kind)
+            .await;
+        Some(self.record_response(response, protocol, started))
+    }
+
     async fn answer(
+        &self,
+        packet: &[u8],
+        peer: SocketAddr,
+        protocol: Transport,
+    ) -> Option<Vec<u8>> {
+        let response = self.answer_unpadded(packet, peer, protocol).await?;
+        // Encrypted transports honour a client's request for padding (RFC 7830).
+        Some(
+            if matches!(
+                protocol,
+                Transport::Tls | Transport::Https | Transport::Quic | Transport::H3
+            ) {
+                padding::pad_response(packet, response)
+            } else {
+                response
+            },
+        )
+    }
+
+    async fn answer_unpadded(
         &self,
         packet: &[u8],
         peer: SocketAddr,
@@ -254,6 +369,11 @@ impl Service {
             self.metrics.malformed.fetch_add(1, Ordering::Relaxed);
             return Some(self.record_response(malformed_response(packet), protocol, started));
         }
+        if let Some(kind) = lumen_resolver::zone_message_kind(packet) {
+            return self
+                .zone_message(packet, peer, protocol, kind, started)
+                .await;
+        }
         let Ok(query) = Query::parse(packet) else {
             self.metrics.malformed.fetch_add(1, Ordering::Relaxed);
             return Some(self.record_response(malformed_response(packet), protocol, started));
@@ -267,6 +387,12 @@ impl Service {
             .unwrap_or_default()
             .as_secs();
         let filter = self.filter();
+        let maximum = usize::from(self.config.limits.max_message_bytes);
+        let maximum = if protocol == Transport::Udp {
+            maximum.min(usize::from(query.message.max_payload().max(512)))
+        } else {
+            maximum
+        };
         let decision = filter.decide_dns(
             query.message.queries[0].name(),
             peer.ip().to_canonical(),
@@ -280,12 +406,6 @@ impl Service {
             );
         }
         if let Some(action) = &decision.action {
-            let maximum = usize::from(self.config.limits.max_message_bytes);
-            let maximum = if protocol == Transport::Udp {
-                maximum.min(usize::from(query.message.max_payload().max(512)))
-            } else {
-                maximum
-            };
             let response = lumen_filter::response(&query, action, maximum);
             self.log_query(&query, peer, true, &response, started);
             return Some(self.record_response(response, protocol, started));
@@ -302,15 +422,32 @@ impl Service {
             ),
         )
         .await;
-        let response = match result {
+        let mut response = match result {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => query.response(Rcode::ServFail),
             Err(_) => {
                 self.metrics.timeouts.fetch_add(1, Ordering::Relaxed);
-                query.response(Rcode::ServFail)
+                let maximum = if protocol == Transport::Udp {
+                    usize::from(self.config.limits.max_message_bytes)
+                        .min(usize::from(query.message.max_payload()))
+                        .min(1232)
+                } else {
+                    usize::from(self.config.limits.max_message_bytes)
+                };
+                self.resolver
+                    .cached_answer(&query, maximum)
+                    .unwrap_or_else(|| query.response(Rcode::ServFail))
             }
         };
-        self.log_query(&query, peer, false, &response, started);
+        let cname_blocked = if let Some(blocked) =
+            Self::block_cname(&filter, &query, &response, peer, now, maximum)
+        {
+            response = blocked;
+            true
+        } else {
+            false
+        };
+        self.log_query(&query, peer, cname_blocked, &response, started);
         Some(self.record_response(response, protocol, started))
     }
 
@@ -396,6 +533,60 @@ impl Drop for ActiveQuery<'_> {
 }
 
 impl lumen_web::Host for Service {
+    fn dhcp_reconfigure(&self, ip: std::net::IpAddr, info_only: bool) -> Result<(), String> {
+        self.dhcp
+            .get()
+            .ok_or_else(|| "the DHCP server is not running".to_owned())?
+            .reconfigure(ip, info_only)
+    }
+
+    fn dhcp(&self) -> Option<lumen_web::DhcpInfo> {
+        let snapshot = self.dhcp.get()?.snapshot();
+        Some(lumen_web::DhcpInfo {
+            scopes: snapshot
+                .scopes
+                .into_iter()
+                .map(|s| lumen_web::DhcpScopeInfo {
+                    family: s.family,
+                    interface: s.interface,
+                    network: s.network,
+                    range: s.range,
+                    active: s.active,
+                    capacity: s.capacity,
+                })
+                .collect(),
+            leases: snapshot
+                .leases
+                .into_iter()
+                .map(|l| lumen_web::DhcpLeaseInfo {
+                    family: l.family,
+                    ip: l.ip,
+                    prefix_len: l.prefix_len,
+                    temporary: l.temporary,
+                    reconfigurable: l.reconfigurable,
+                    client: l.client,
+                    hostname: l.hostname,
+                    expires: l.expires,
+                })
+                .collect(),
+            failover: snapshot.failover.map(|f| (f.role.to_owned(), f.active)),
+            advertisements: snapshot
+                .advertisements
+                .into_iter()
+                .map(|a| lumen_web::DhcpAdvertisementInfo {
+                    interface: a.interface,
+                    prefixes: a.prefixes,
+                    managed: a.managed,
+                    other_config: a.other_config,
+                    router_lifetime_secs: a.router_lifetime_secs,
+                    dns: a.dns.into_iter().map(std::net::IpAddr::V6).collect(),
+                    sent: a.sent,
+                    last_sent: a.last_sent,
+                })
+                .collect(),
+        })
+    }
+
     fn counters(&self) -> lumen_web::Counters {
         let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
         let m = &self.metrics;

@@ -36,6 +36,10 @@ pub mod dns_handle;
 pub use dns_handle::{DnsHandle, DnsStreamHandle};
 
 pub mod dns_multiplexer;
+
+// LUMEN PATCH: EDNS(0) padding for encrypted transports.
+/// EDNS(0) padding helper.
+pub mod padding;
 pub use dns_multiplexer::DnsMultiplexer;
 
 pub mod retry_dns_handle;

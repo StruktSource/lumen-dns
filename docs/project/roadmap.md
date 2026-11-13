@@ -2,7 +2,7 @@
 
 Where Lumen is today and where it is going. This page replaces the former separate *progress*, *TODO*, and *product plan* documents.
 
-_Last updated 2026-11-11 for version 0.6.0._
+_Last updated 2026-11-13 for version 0.7.0._
 
 > [!IMPORTANT]
 > Lumen is **pre-release**. A checked box means *implemented, documented, and covered by the checks in the [verification record](verification.md)*. It does **not** mean production-ready, and unrun platform checks or planned features are never marked as shipped.
@@ -23,13 +23,18 @@ _Last updated 2026-11-11 for version 0.6.0._
 - Forward mode with up to 8 ranked providers and a choice of ranked fallback, fastest first, round-robin, or race
 - Optional external console login through OpenID Connect providers (off by default)
 - Native packages for six platforms and container images for `linux/amd64` and `linux/arm64`
+- An admin-only local DNS manager with typed, bounded zones and records, safe staged apply, and advanced zones shown read-only
+
+**Completed in 0.7.0**
+
+- [x] **Easy local DNS manager (0.7.0):** The admin-only **DNS → Local DNS** page creates, edits, and deletes bounded typed zones and `A`, `AAAA`, `CNAME`, `TXT`, `PTR`, `MX`, `SRV`, `CAA`, and `TLSA` records. It includes a quick hostname-to-IP path, recommends `home.arpa`, rejects `.local`, explains client DNS setup, and shows advanced zones read-only. Changes stay in the normal draft, validate before apply, restart DNS and clear caches when applied, and roll back if startup fails. Config and resolver tests cover the typed bounds and generated authoritative zone data.
 
 **Still ahead**
 
-- Certificate automation and automatic trust-anchor rollover
-- Split DNS, local records, and conditional forwarding
+- [ ] **Device and room manager:** Add a simple web UI to name devices, assign them to virtual rooms or areas, and manage their DNS policies using the existing group and profile support. Group a device's IPv4 and multiple IPv6 addresses under one identity, including changing IPv6 privacy addresses where possible. Explore optional FRITZ!Box integration to discover devices and address associations; support manual linking and corrections when matching is uncertain. Consider router-managed IPv4 reservations where supported, with explicit user control. Show when a device or query cannot be identified reliably.
+- More encrypted DNS options: DNSCrypt upstreams, Anonymized DNSCrypt, and ECH support
 - High availability and cluster configuration replication
-- Extended DNS and DNSSEC conformance tests and long-running soak tests
+- Phase 7: high availability, threat feeds and enterprise policy, extended conformance and soak tests, and an external security review
 - Real-hardware validation for Proxmox, Unraid, Raspberry Pi, and dual-stack Kubernetes
 - Image signing, reproducible builds, and backup, restore, and upgrade tests
 - A customizable console UI through CSS themes
@@ -54,7 +59,7 @@ Principles that shape every decision:
 
 ### Foundation
 
-- [x] Rust workspace, Apache-2.0, SemVer (currently `0.6.0`)
+- [x] Rust workspace, Apache-2.0, SemVer (currently `0.7.0`)
 - [x] README, contributor guide, security policy, and code of conduct
 - [x] Architecture, threat model, privacy defaults, and protocol scope
 - [x] CI for Linux, macOS, Windows, lint, tests, and the minimum Rust version
@@ -130,15 +135,28 @@ Principles that shape every decision:
 - [ ] Real Proxmox, Unraid, Raspberry Pi, Podman ARM64, and dual-stack Kubernetes validation
 - [ ] Backup, restore, upgrade, and removal tests
 
-### Phase 5: Advanced DNS and availability
+### Phase 5: Advanced DNS
 
-- [x] Base DoH, DoT, and DoQ listeners (delivered in Phase 1)
-- [ ] Certificate automation and automatic trust-anchor rollover
-- [ ] Split DNS, local records, conditional forwarding, and safe local service discovery
-- [ ] High availability, multi-service use, cluster configuration replication, and a cache strategy
-- [ ] Optional DNS threat feeds and enterprise policy features that leave privacy defaults unchanged
-- [ ] Extended DNS and DNSSEC conformance and long-running soak tests
-- [ ] **External security review before stable release**
+- [x] Base DoH over HTTP/2, DoT, and DoQ listeners (delivered in Phase 1)
+- [x] RFC 8767 **serve-stale** with bounded stale age and one background refresh per name; unsigned data only (0.7.0). Existing prefetch is separate
+- [x] Optional **persistent DNS cache**: separate SQLite file, off by default, entry, byte and TTL caps, corrupt-file recovery, no client data (0.7.0)
+- [x] Certificate renewal without restart: renewed PEM pairs are verified and swapped in, with an expiry metric (0.7.0 line). Lumen still does not fetch certificates itself
+- [x] Built-in certificate automation: ACME issuance and daily renewal with the HTTP-01 and DNS-01 challenges (wildcards with DNS-01, answered by Lumen's own resolver), tested against Pebble. Not built: TLS-ALPN-01, External Account Binding, DNS-provider APIs, and managing the web console's certificate. Not yet run against Let's Encrypt
+- [x] Automatic trust-anchor rollover (RFC 5011): persistent state, 30-day hold-down, revocation, daily signed check. Opt-in with `trust_anchor_state`. Changes apply at the next restart; not yet run across a real root KSK rollover
+- [x] Authoritative DNS zones and operator-managed records from zone files or inline text, separate from Lumen's built-in empty local zones. Unsigned; see the DNSSEC signing item
+- [x] **Split-horizon views** by client network, **conditional forwarding**, and DNS-SD as ordinary records. mDNS bridging (discovery proxy and reflector, 0.7.0) is a separate opt-in module
+- [x] Multicast DNS bridge (0.7.0): a discovery proxy (`.local` devices answered under your own domain, service browsing included) and a reflector between interfaces. Opt-in, Linux and macOS. Open: publishing Lumen's own names over mDNS, DNS Push, and per-service reflection filters
+- [x] Dynamic DNS updates (RFC 2136) with TSIG authentication, per-key name and type scope, a SQLite journal, and bounded size
+- [x] Zone transfers over TCP with TSIG-keyed policy and a one-message size bound. Dynamic zones answer IXFR with the differences from the last 32 updates (in memory; a full transfer after a restart or for older serials), NOTIFY is sent to `notify` secondaries at startup and after accepted updates
+- [x] DNSSEC signing for plain operator zones (NSEC3 and double-signature key rollover added in 0.7.0): one combined key (Ed25519 or ECDSA P-256), NSEC, daily signature renewal, `lumen --zone-key` for key creation and the DS record. **Still open:** timer-driven rollover, separate KSK/ZSK, and signing for dynamic or split-horizon zones
+- [x] Native DoH over HTTP/3 listener (`listen.doh3`), same `/dns-query` contract as HTTP/2 DoH. Client-side DoH3 to an upstream is available as `protocol = "h3"` for explicit upstreams and, since 0.7.0, in the automatic provider list for providers that advertise HTTP/3 (untested against the live providers); Lumen does not advertise HTTP/3 itself
+- [x] DNSCrypt v2 **server** (UDP and TCP, both cipher suites, signed rotating certificates). Still open: DNSCrypt as an upstream transport, Anonymized DNSCrypt relays, and interop testing against `dnscrypt-proxy` releases
+- [ ] HTTPS and SVCB record interoperability, including preserving ECH configuration from authoritative answer to browser ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36)). Started: an end-to-end test proves an HTTPS record with `alpn` and `ech` from an operator zone arrives byte-identical, live and repeated. Forwarded answers (UDP, TCP, and from the cache) are proven the same way. Recursive answers (validation off and on) and DNSSEC-validated forwarded answers are proven the same way (0.7.0). Native ECH is the part still blocked
+- [ ] Optional native ECH for Lumen's own TLS connections and encrypted DNS listeners where the TLS stack supports it. **Checked 2026-11-12: blocked.** rustls 0.23 implements ECH for clients only, so Lumen's listeners cannot accept ECH, and Hickory 0.26.3 does not pass an ECH config to its upstream connections. Revisit when rustls adds server-side ECH or Hickory exposes client ECH ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36))
+- [x] Regular-expression blocking with explicit syntax, compile limits, linear-time matching, and explainable matches (0.7.0)
+- [x] CNAME-based tracker blocking that inspects upstream answer chains without bypassing DNSSEC or response bounds (0.7.0)
+- [x] SafeSearch with explicit opt-in, per-profile scope, documented providers (Google, Bing, YouTube), and no hidden logging (0.7.0). Wider child-safety categories shipped as per-list categories (0.7.0)
+- [x] Optional DHCP server module with bounded leases, reservations, DNS integration, and no default network authority (0.7.0): IPv4 and stateful IPv6, SQLite leases, names published to DNS, console module. Relay agents, prefix delegation, network boot options, and Lumen-to-Lumen failover are included. Temporary addresses, DHCPv6 Reconfigure and IPv4 FORCERENEW are included, and so are IPv6 Router Advertisements with DNS options (RFC 8106). Open: ISC-compatible failover, and real-hardware tests of the Windows and BSD socket paths
 
 ### Phase 6: Customization
 
@@ -159,9 +177,23 @@ Each item has to keep Lumen's defaults intact: private, bounded, and explicit op
 - [ ] More languages
 - [ ] Localize the documentation where practical. Technical terms such as DoH, DoT, and DNSSEC stay recognizable
 
+### Phase 7: Scale, assurance, and enterprise
+
+Moved out of Phase 5 on 2026-11-12 so Phase 5 stays focused on DNS features.
+
+- [ ] High availability, multi-service use, cluster configuration replication, and a cache strategy
+- [ ] Optional DNS threat feeds and enterprise policy features that leave privacy defaults unchanged
+- [ ] Extended DNS and DNSSEC conformance and long-running soak tests
+- [ ] **External security review before stable release**
+
 ## What is planned next
 
 Open items, from most to least urgent. This is a recommended order, not a dated commitment. Validation, testing, and release-hardening work lives in [Side projects](#side-projects) so it does not crowd the feature list.
+
+### Open GitHub issues
+
+- [x] [Issue #35: forward mode returns SERVFAIL for names under `l.google.com` when local DNSSEC validation is on](https://github.com/StruktSource/lumen-dns/issues/35). Fixed in 0.7.0 with bounded insecure-ancestor recovery for forward mode: signed-zone failures and bogus ancestors still return `SERVFAIL`, provider answers stay final, both DS reply shapes are covered by local tests. Public-network behavior is not claimed
+- [ ] [Issue #36: native ECH support and HTTPS/SVCB interoperability](https://github.com/StruktSource/lumen-dns/issues/36). First prove HTTPS/SVCB and ECH configuration survive filtering, caching, forwarding, recursion, and DNSSEC; then evaluate native ECH for Lumen's own encrypted transports
 
 ### High priority: do next
 
@@ -178,21 +210,24 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### Lower priority: later
 
-6. **Faster, lighter list downloads (partly done in 0.6.0).** Done: conditional requests (`ETag` / `Last-Modified`), compressed transfer, and a bounded disk cache in managed mode so a restart does not fetch fresh lists again. Still open: downloading several lists at once with a bound, and delta updates for very large lists.
-7. **Weighted random load balancing** across providers (spreading by recent speed rather than evenly), as some filter apps offer. Round-robin and fastest-first cover most of it today.
-
-8. **Trust-anchor rollover automation and certificate lifecycle tooling.**
-9. **Split DNS, local records, and conditional forwarding.**
+8. **Faster, lighter list downloads (partly done in 0.6.0).** Done: conditional requests (`ETag` / `Last-Modified`), compressed transfer, and a bounded disk cache in managed mode so a restart does not fetch fresh lists again. Still open: downloading several lists at once with a bound, and delta updates for very large lists.
+9. **Weighted random load balancing** across providers (spreading by recent speed rather than evenly), as some filter apps offer. Round-robin and fastest-first cover most of it today.
+10. **Serve-stale and persistent cache (done in 0.7.0).** Bounded RFC 8767 stale answers and a separate opt-in persistent DNS cache. Cache behavior under real restarts and long soaks is still unmeasured.
+11. **Authoritative and local DNS.** Add authoritative zones, operator-managed records, a split-horizon module, conditional forwarding, RFC 2136 updates, AXFR/IXFR, and DNSSEC zone signing.
+12. **Encrypted DNS and ECH.** Keep current DoH over HTTP/2; add native DoH over HTTP/3, DNSCrypt, HTTPS/SVCB and ECH-config delivery to browsers, and optional native ECH in Lumen's own TLS paths.
+13. **Filtering and family policy (mostly done in 0.7.0).** Regex rules, CNAME-based blocking, and opt-in SafeSearch profiles shipped. Wider child-safety categories shipped (0.7.0).
+14. **Optional DHCP server module (done in 0.7.0).** IPv4 and IPv6 with reservations, SQLite leases and DNS names. Open: ISC-compatible failover (a separate, large protocol; ISC DHCP is end-of-life). Integrate leases and reservations with device and local-DNS policy without making Lumen authoritative for the network by default.
+15. **Trust-anchor rollover automation and certificate lifecycle tooling.**
 
 ### Large efforts, before or after 1.0
 
-10. **Independent security review.** Required before a stable release.
-11. **High availability and cluster configuration replication.**
-12. **Optional DNS threat feeds and enterprise policy features.**
+16. **Independent security review.** Required before a stable release.
+17. **High availability and cluster configuration replication.**
+18. **Optional DNS threat feeds and enterprise policy features.**
 
 ### Not now
 
-13. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
+19. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
 
 ## Side projects
 

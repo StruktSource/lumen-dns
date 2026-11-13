@@ -317,12 +317,21 @@ async fn iterative_delegations_cache_and_depth_limit() {
             },
         })],
     );
-    let resolver = Resolver {
+    let resolver = Arc::new(Resolver {
         catalog,
+        cache: None,
+        custom: Vec::new(),
+        rollover: None,
+        signed: Vec::new(),
+        notifications: Vec::new(),
+        challenges: Arc::default(),
+        hosts: Arc::new(Hosts::new(None)),
+        bridge: std::sync::OnceLock::new(),
+        resigners: Resigners::default(),
         metrics: Arc::new(Metrics::default()),
         background: None,
         local_zones: true,
-    };
+    });
     let mut request = Message::query();
     request.metadata.recursion_desired = true;
     request.add_query(DnsQuery::query(
@@ -596,12 +605,21 @@ async fn recursion_timeout_invokes_fallback_once() {
             },
         })],
     );
-    let resolver = Resolver {
+    let resolver = Arc::new(Resolver {
         catalog,
+        cache: None,
+        custom: Vec::new(),
+        rollover: None,
+        signed: Vec::new(),
+        notifications: Vec::new(),
+        challenges: Arc::default(),
+        hosts: Arc::new(Hosts::new(None)),
+        bridge: std::sync::OnceLock::new(),
+        resigners: Resigners::default(),
         metrics: Arc::clone(&metrics),
         background: None,
         local_zones: true,
-    };
+    });
     let mut request = Message::query();
     request.metadata.recursion_desired = true;
     request.add_query(DnsQuery::query(
@@ -1083,7 +1101,10 @@ async fn slow_lookup_starts_one_hedge_and_fast_lookup_does_not() {
 fn answers_never_show_the_random_case_used_upstream() {
     use hickory_server::proto::rr::{
         RData, Record,
-        rdata::{A, CNAME},
+        rdata::{
+            A, CNAME, HTTPS, SVCB,
+            svcb::{EchConfigList, SvcParamKey, SvcParamValue},
+        },
     };
     use std::{net::Ipv4Addr, str::FromStr};
     let mut message = hickory_server::proto::op::Message::query();
@@ -1097,12 +1118,48 @@ fn answers_never_show_the_random_case_used_upstream() {
         60,
         RData::A(A(Ipv4Addr::new(192, 0, 2, 1))),
     ));
+    let ech = vec![0, 7, 0xfe, 0x0d, 1, 2, 3];
+    let service = SVCB::new(
+        1,
+        Name::from_str("SvC.ExAmPlE.NeT.").unwrap(),
+        vec![(
+            SvcParamKey::EchConfigList,
+            SvcParamValue::EchConfigList(EchConfigList(ech.clone())),
+        )],
+    );
+    message.answers.push(Record::from_rdata(
+        Name::from_str("HtTpS.ExAmPlE.cOm.").unwrap(),
+        60,
+        RData::HTTPS(HTTPS(service.clone())),
+    ));
+    message.answers.push(Record::from_rdata(
+        Name::from_str("SvCb.ExAmPlE.cOm.").unwrap(),
+        60,
+        RData::SVCB(service),
+    ));
     crate::lowercase_names(&mut message);
+    let message = hickory_server::proto::op::Message::from_vec(&message.to_vec().unwrap()).unwrap();
     assert_eq!(message.answers[0].name.to_ascii(), "www.example.com.");
     assert!(
         matches!(&message.answers[0].data, RData::CNAME(t) if t.0.to_ascii() == "target.example.net.")
     );
     assert_eq!(message.answers[1].name.to_ascii(), "target.example.net.");
+    for answer in &message.answers[2..] {
+        let svcb = match &answer.data {
+            RData::HTTPS(value) => &value.0,
+            RData::SVCB(value) => value,
+            other => panic!("unexpected service binding record: {other:?}"),
+        };
+        assert_eq!(
+            answer.name.to_ascii(),
+            answer.name.to_ascii().to_lowercase()
+        );
+        assert_eq!(svcb.target_name.to_ascii(), "svc.example.net.");
+        assert!(matches!(
+            &svcb.svc_params[0],
+            (SvcParamKey::EchConfigList, SvcParamValue::EchConfigList(value)) if value.0 == ech
+        ));
+    }
 }
 
 #[test]
@@ -1120,4 +1177,214 @@ fn automatic_transport_rejects_plaintext_even_without_config_expansion() {
         };
         assert!(forward_provider(&settings, &[upstream], ResolverOpts::default(), None).is_err());
     }
+}
+
+/// The `ech` parameter these tests carry: opaque bytes the resolver must never touch.
+const ECH_CONFIG: [u8; 7] = [0, 7, 0xfe, 0x0d, 1, 2, 3];
+
+fn https_record(name: &str) -> Record {
+    use hickory_server::proto::rr::rdata::{
+        HTTPS, SVCB,
+        svcb::{Alpn, EchConfigList, SvcParamKey, SvcParamValue},
+    };
+    record(
+        name,
+        RData::HTTPS(HTTPS(SVCB::new(
+            1,
+            Name::from_ascii("pool.example.").unwrap(),
+            vec![
+                (
+                    SvcParamKey::Alpn,
+                    SvcParamValue::Alpn(Alpn(vec!["h2".into(), "h3".into()])),
+                ),
+                (
+                    SvcParamKey::EchConfigList,
+                    SvcParamValue::EchConfigList(EchConfigList(ECH_CONFIG.to_vec())),
+                ),
+            ],
+        ))),
+    )
+}
+
+/// The `alpn` and `ech` of an HTTPS answer, or `None` when there is no such record.
+fn https_parameters(message: &Message) -> Option<(Vec<String>, Vec<u8>)> {
+    use hickory_server::proto::rr::rdata::svcb::{SvcParamKey, SvcParamValue};
+    message.answers.iter().find_map(|record| {
+        let RData::HTTPS(https) = &record.data else {
+            return None;
+        };
+        let mut alpn = Vec::new();
+        let mut ech = Vec::new();
+        for (key, value) in &https.0.svc_params {
+            match (key, value) {
+                (SvcParamKey::Alpn, SvcParamValue::Alpn(list)) => alpn.clone_from(&list.0),
+                (SvcParamKey::EchConfigList, SvcParamValue::EchConfigList(list)) => {
+                    ech.clone_from(&list.0);
+                }
+                _ => {}
+            }
+        }
+        Some((alpn, ech))
+    })
+}
+
+/// A signed root zone that also holds an HTTPS record with `alpn` and `ech`, served from one local
+/// socket that stands for the only root server. Returns the trust anchor line and the server task.
+async fn signed_root_with_https(
+    runtime_ip: &str,
+) -> (String, TestRuntime, tokio::task::JoinHandle<()>) {
+    use hickory_server::{
+        dnssec::NxProofKind,
+        proto::{
+            dnssec::{Algorithm, DnssecSigner, SigningKey, crypto::EcdsaSigningKey, rdata::DNSKEY},
+            serialize::txt::Parser,
+        },
+        server::Server,
+        store::in_memory::InMemoryZoneHandler,
+        zone_handler::{AxfrPolicy, Catalog, ZoneType},
+    };
+    let roots = Name::root();
+    let text =
+        ". 60 IN SOA ns. hostmaster. 1 60 60 60 60\n. 60 IN NS ns.\nns. 60 IN A 198.41.0.4\n";
+    let (_, records) = Parser::new(text, None, Some(roots.clone()))
+        .parse()
+        .unwrap();
+    let mut zone: InMemoryZoneHandler = InMemoryZoneHandler::new(
+        roots.clone(),
+        records,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        Some(NxProofKind::Nsec),
+    )
+    .unwrap();
+    zone.upsert_mut(https_record("svcb.example."), 1);
+    let der = EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP256SHA256).unwrap();
+    let key = EcdsaSigningKey::from_pkcs8(&der, Algorithm::ECDSAP256SHA256).unwrap();
+    let dnskey = DNSKEY::new(true, true, false, key.to_public_key().unwrap());
+    let anchor = format!(". 60 IN DNSKEY {dnskey}\n");
+    zone.add_zone_signing_key_mut(DnssecSigner::new(
+        dnskey,
+        Box::new(key),
+        roots.clone(),
+        Duration::from_secs(3600),
+    ))
+    .unwrap();
+    zone.secure_zone_mut().unwrap();
+    // Added after signing: this one carries no signature at all.
+    zone.upsert_mut(https_record("unsigned.example."), 1);
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mapping = HashMap::from([(runtime_ip.parse().unwrap(), socket.local_addr().unwrap())]);
+    let mut catalog = Catalog::new();
+    catalog.upsert(roots.into(), vec![Arc::new(zone)]);
+    let mut server = Server::new(catalog);
+    server.register_socket(socket);
+    let task = tokio::spawn(async move {
+        server.block_until_done().await.unwrap();
+    });
+    (
+        anchor,
+        TestRuntime {
+            inner: TokioRuntimeProvider::default(),
+            mapping: Arc::new(mapping),
+        },
+        task,
+    )
+}
+
+#[tokio::test]
+async fn recursive_https_answers_keep_alpn_and_ech_with_and_without_validation() {
+    let (anchor, provider, server) = signed_root_with_https("198.41.0.4").await;
+    let roots = ["198.41.0.4".parse().unwrap()];
+    let policy = RecursivePolicy {
+        attempts: 1,
+        attempt_timeout: Duration::from_secs(3),
+    };
+    let options = || RecursorOptions {
+        case_randomization: true,
+        ..RecursorOptions::default()
+    };
+    let metrics = Arc::new(Metrics::default());
+    let accel = Accel::new(Arc::clone(&metrics), Prefetch::default());
+    let target = |name: &str| LowerName::from(Name::from_ascii(name).unwrap());
+
+    // Validation off: the record arrives with its parameters untouched.
+    let plain = Recursor::new(
+        &roots,
+        DnssecPolicy::ValidationDisabled,
+        None,
+        options(),
+        provider.clone(),
+    )
+    .unwrap();
+    let name = target("svcb.example.");
+    let message = recursive_lookup(&plain, &accel, &name, RecordType::HTTPS, true, policy)
+        .await
+        .unwrap();
+    let message = recover_bogus(
+        &plain,
+        None,
+        &accel,
+        RecoveryTarget {
+            name: &name,
+            rtype: RecordType::HTTPS,
+            dnssec_ok: true,
+        },
+        message,
+        policy,
+    )
+    .await;
+    assert_eq!(
+        https_parameters(&message),
+        Some((vec!["h2".to_owned(), "h3".to_owned()], ECH_CONFIG.to_vec()))
+    );
+
+    // Validation on: the same record is proven secure, and the parameters are still intact.
+    let mut dnssec = DnssecConfig::default();
+    dnssec.trust_anchor = Some(Arc::new(anchor.parse::<TrustAnchors>().unwrap()));
+    let validating = Recursor::new(
+        &roots,
+        DnssecPolicy::ValidateWithStaticKey(dnssec),
+        None,
+        options(),
+        provider,
+    )
+    .unwrap();
+    let message = recursive_lookup(&validating, &accel, &name, RecordType::HTTPS, true, policy)
+        .await
+        .unwrap();
+    assert!(matches!(
+        DnssecSummary::from_records(message.answers.iter()),
+        DnssecSummary::Secure
+    ));
+    let message = recover_bogus(
+        &validating,
+        None,
+        &accel,
+        RecoveryTarget {
+            name: &name,
+            rtype: RecordType::HTTPS,
+            dnssec_ok: true,
+        },
+        message,
+        policy,
+    )
+    .await;
+    assert_eq!(
+        https_parameters(&message),
+        Some((vec!["h2".to_owned(), "h3".to_owned()], ECH_CONFIG.to_vec()))
+    );
+
+    // An HTTPS record added without a signature is bogus: validation must still refuse it, and
+    // must not hand out the record (and its ech) as if it were fine.
+    let name = target("unsigned.example.");
+    let refused =
+        recursive_lookup(&validating, &accel, &name, RecordType::HTTPS, true, policy).await;
+    match refused {
+        Err(_) => {}
+        Ok(message) => assert!(matches!(
+            DnssecSummary::from_records(message.answers.iter()),
+            DnssecSummary::Bogus
+        )),
+    }
+    server.abort();
 }

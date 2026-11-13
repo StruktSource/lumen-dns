@@ -1,26 +1,32 @@
-# Lumen 0.6.0
+# Lumen 0.7.0
 
-Lumen 0.6.0 adds console features, fixes setup forwarding selection, and bounds automatic encrypted transport failover.
+Lumen 0.7.0 adds optional stale answers, a persistent cache, stronger filtering, two new encrypted transports, and your own DNS zones. All new features are off by default.
 
 ## Highlights
 
-- **Live view.** Switch on *Live* in Activity to watch lookups arrive as they happen. The switch is remembered in your browser.
-- **Modules and a Traffic map.** Turn on optional modules under *Modules*. The Traffic map shows your DNS traffic as a tree you can drag and zoom: server, domain endings, then domains.
-- **A sidebar you can hide.** Press `[` or use the button in the sidebar header to get more room.
-- **Overview refreshes every 10 seconds, and you can change that.** An *Auto reload* slider under *System → Console* offers 1, 2, 5, 10, 30, 60 seconds or off, saved on the server for everyone.
-- **One Users page, and optional, experimental single sign-on.** *Users & access* and *My account* are now one **Users** menu point. Administrators can add a *Sign in with …* button for Authentik, Authelia, Pocket ID, Octelium, or any OpenID Connect provider under *Users → Sign-in*, and people can link their existing account. It is **experimental**: not yet tested against live provider installations. It is off by default and password sign-in always stays.
-- **Setup keeps your resolver choice.** Picking *Use another resolver* (Quad9) now results in forward mode instead of falling back to recursive.
+- **Serve-stale (RFC 8767).** Enable `[resolver.serve_stale]` to keep answering from an expired entry (up to a bounded age) while one background refresh runs. Expired DNSSEC-authenticated data is never served.
+- **Persistent DNS cache.** Enable `[resolver.persistent_cache]` to keep bounded responses across restarts in a separate SQLite file. It holds queried names and answers, never clients. Exclude it from backups.
+- **Regex rules, CNAME blocking, SafeSearch.** `regex_allow`/`regex_block` rules, filtering of CNAME targets in upstream answers, and per-profile `safe_search` for Google, Bing, and YouTube.
 
-## Resolver changes
+- **DoH over HTTP/3 and DNSCrypt v2.** `listen.doh3` serves `/dns-query` over QUIC. `[dnscrypt]` serves encrypted queries over UDP and TCP with rotating signed certificates.
+- **Your own DNS zones.** `[[zones]]` serves records from zone files, with split-horizon `views` and `[[forwarders]]` for conditional forwarding. See [Your own DNS zones](docs/guides/authoritative-dns.md).
+- **Easy local DNS manager.** Administrators can manage typed local zones and records in **DNS → Local DNS**. `home.arpa` is the recommended home zone; `.local` stays with mDNS. Changes are staged, validated, and applied with restart and rollback, while advanced zones remain read-only in the console.
+- **Dynamic updates and zone transfers.** TSIG-signed RFC 2136 updates scoped per key to names and types, saved to a SQLite journal, and TSIG-protected AXFR/IXFR over TCP. Dynamic zones answer IXFR with the differences from their last 32 updates (kept in memory), and with the whole zone otherwise. Listed secondaries get a NOTIFY at startup and after each accepted update.
+- **DNSSEC for your own zones and automatic root key rollover.** `[zones.dnssec]` signs a plain zone (Ed25519 or ECDSA P-256, NSEC), and `lumen --zone-key` creates the key and prints the `DS` record. `resolver.trust_anchor_state` follows RFC 5011 root key rollovers, applied at restart.
+- **Automatic certificates (ACME).** `[acme]` gets and renews the encrypted-DNS certificate from Let's Encrypt or another ACME CA (HTTP-01 or DNS-01, including wildcards), with no restart on renewal.
+- **DHCP server for IPv4 and IPv6 (off by default).** `[dhcp]` hands out addresses with reservations and bounded ranges, keeps leases in SQLite, and publishes every named lease as a DNS name, forward and reverse. Relay agents, prefix delegation, temporary addresses, Reconfigure, network boot options, and a hot-standby failover between two Lumen servers are included. The console gets an optional DHCP module. See [DHCP server](docs/guides/dhcp.md).
+- **EDNS padding on encrypted DNS.** Queries to encrypted upstreams are padded to 128-byte blocks, and answers on Lumen's encrypted listeners to 468-byte blocks when the client asks (RFC 7830, RFC 8467). EDNS Client Subnet is not sent. See [Encrypted DNS](docs/guides/encrypted-dns.md#padding).
+- **IPv6 Router Advertisements and IPv4 FORCERENEW (off by default).** `[[dhcp.router_advertisements]]` tells devices on a network which IPv6 prefix to use, whether to ask DHCPv6, and which DNS servers and search domains to use (RFC 4861, RFC 8106). It says it is not a default router unless you set that. `forcerenew = true` lets **Ask to renew** work for IPv4 devices that support it. See [DHCP server](docs/guides/dhcp.md#router-advertisements-ipv6).
+- **Multicast DNS bridge (off by default).** `[mdns]` answers DNS questions under your own domain from what `.local` devices announce, and can repeat mDNS between networks. See [Multicast DNS bridge](docs/guides/mdns.md).
+- **Certificate renewal without restart.** Renewed DoT, DoH, DoH3, and DoQ certificates are picked up within 30 seconds; a bad file keeps the old pair serving.
 
-- Bundled SQLite updated to address RUSTSEC-2026-0459 (`rusqlite 0.41.1`, `libsqlite3-sys 0.39.1`). Building from source now needs Rust 1.89 or newer.
+## Fixed
 
-- A silent first encrypted transport no longer consumes the provider's whole deadline. Each transport gets its share of remaining time; only transport failures/timeouts advance transports. DNSSEC failures and usable answers stay final; upstream SERVFAIL may still advance providers.
-- Recursive walks now use the configured attempt timeout and retry only after a timeout. Extra DNSSEC recovery work has one shared budget. Optional aggregate diagnostics contain no names, authority IPs, or clients.
-- Registered local reverse zones, `home.arpa`, `resolver.arpa`, `service.arpa`, and `.local` requests are handled locally by default. Public reverse DNS and `ipv4only.arpa` still work. Set `resolver.local_zones = false` only when another local DNS path owns these names.
-- Small response/filter allocation cleanups and portable ThinLTO are included. No benchmark gain from them is claimed.
-- **Measured on an Apple M4:** an idle Lumen with the web console and state database uses about 10.9 MiB (7.7 MiB without the console) and no measurable CPU. Cached and blocked answers take about 0.03 ms at the median on loopback, and memory peaks near 16 MiB under heavy local load. The release binary is 18.5 MiB. See `docs/project/performance.md`. Native CPU tuning stays opt-in and separate from release artifacts.
-- See `docs/project/optimization-audit.md` for rejected and deferred I/O, allocator, parser and data-structure changes. No statistically significant public cold-recursion gain is claimed, and Hickory does not expose privacy-safe per-authority timing through its stable API.
+- **Forward mode and unsigned child zones (Issue #35).** With local DNSSEC validation on, names such as `clients4.google.com` no longer return `SERVFAIL`: Lumen proves an unsigned ancestor and repeats the lookup once without validation. Signed zones with bad signatures and bogus ancestors still fail.
+
+## Not in this release
+
+Automatic (timer-driven) zone key rollover, TLS-ALPN-01 ACME challenges, native ECH, DNSCrypt upstreams, and Anonymized DNSCrypt. DNSCrypt has not been tested against a third-party client.
 
 ## Check the download
 
@@ -28,7 +34,7 @@ Download the archive for your system plus `SHA256SUMS`, then run:
 
 ```sh
 sha256sum --check SHA256SUMS --ignore-missing
-gh attestation verify lumen-v0.6.0-<platform>.<extension> --repo StruktSource/lumen-dns
+gh attestation verify lumen-v0.7.0-<platform>.<extension> --repo StruktSource/lumen-dns
 ```
 
 On macOS, use `shasum -a 256 -c` with the matching `.sha256` file if `sha256sum` is not installed.
@@ -37,12 +43,4 @@ While a release is still publishing, its page lists only the platforms that are 
 
 ## Upgrade notes
 
-- **The state database migrates to schema 7** on first start (a new table for single sign-on identities). The migration is automatic and one-way: **back up the state first**, because 0.5.x cannot read schema 7. See [Docker: update without losing data](docs/deployment/docker.md#update-without-losing-data).
-- No required configuration changes since 0.5.9. New resolver fields and `[web.oidc]` keep safe defaults, and external login is off.
-- Block lists are now also cached on disk in managed mode (`filter-cache` beside the state database). It is safe to delete.
-- Old `#/account` and `#/access` console links redirect to the new **Users** page.
-- Replace both `lumen` and `lumenctl` from the same archive.
-- Container and Helm users should pin image tag `0.6.0` and back up `/var/lib/lumen` before recreating the container.
-- Installs that picked forward mode in setup but ended up recursive can switch under DNS settings, then Resolver.
-
-Lumen remains pre-release software. Test it on the target network before wider use. See `CHANGELOG.md` for the full summary.
+- No state-database schema change. Config schema 1 stays compatible; the new tables are optional.

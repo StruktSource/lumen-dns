@@ -57,11 +57,21 @@ const CATALOG = [
     { id: 'hagezi-fake', name: 'Hagezi Fake shops and scams', info: 'Fake stores, scams and fraud.', rules: 18000, format: 'adblock', url: HZ + 'fake.txt' }] },
   { group: 'Extras', note: 'Applied to every device. To limit one to certain devices, restrict it in a profile.', items: [
     { id: 'hagezi-popupads', name: 'Hagezi Pop-up ads', info: 'Pop-ups, redirects and aggressive ad networks.', rules: 51000, format: 'adblock', url: HZ + 'popupads.txt' },
-    { id: 'hagezi-nsfw', name: 'Hagezi Adult content', info: 'Pornography.', rules: 92000, format: 'adblock', url: HZ + 'nsfw.txt' },
-    { id: 'hagezi-gambling', name: 'Hagezi Gambling', info: 'Betting and casino sites.', rules: 627000, format: 'adblock', url: HZ + 'gambling.txt' },
     { id: 'hagezi-bypass', name: 'Hagezi DoH/VPN/Proxy bypass', info: 'Stops devices from sidestepping Lumen with their own DNS-over-HTTPS or VPN.', rules: 17000, format: 'adblock', url: HZ + 'doh-vpn-proxy-bypass.txt' },
     { id: 'hagezi-apple', name: 'Hagezi Apple telemetry', info: 'Apple tracking endpoints. May affect some Apple services.', rules: 110, format: 'adblock', url: HZ + 'native.apple.txt' },
     { id: 'hagezi-windows', name: 'Hagezi Windows/Office telemetry', info: 'Microsoft telemetry endpoints.', rules: 384, format: 'adblock', url: HZ + 'native.winoffice.txt' }] }];
+const BLP = 'https://blocklistproject.github.io/Lists/alt-version/';
+/* Child safety: every list here carries a category, so it applies only to profiles that select that category. */
+CATALOG.push({ group: 'Child safety', note: 'Each list has its own category and applies only to profiles that select it, so adults on the network are not affected. Installing creates or extends a profile called child-safe. Put a child’s device or group in that profile (Devices) for it to apply.', items: [
+  { id: 'hagezi-nsfw', name: 'Adult content', category: 'adult', info: 'Pornography. Hagezi.', rules: 92000, format: 'adblock', url: HZ + 'nsfw.txt' },
+  { id: 'hagezi-gambling', name: 'Gambling', category: 'gambling', info: 'Betting and casino sites. Hagezi. Large.', rules: 627000, format: 'adblock', url: HZ + 'gambling.txt' },
+  { id: 'hagezi-social', name: 'Social networks', category: 'social', info: 'Social networks and messengers. Hagezi.', rules: 8000, format: 'adblock', url: HZ + 'social.txt' },
+  { id: 'blp-drugs', name: 'Drugs', category: 'drugs', info: 'Drug sales and promotion. BlocklistProject.', rules: 26000, format: 'domains', url: BLP + 'drugs-nl.txt' },
+  { id: 'hagezi-piracy', name: 'Piracy', category: 'piracy', info: 'Pirate streaming and download sites. Hagezi.', rules: 62000, format: 'adblock', url: HZ + 'anti.piracy.txt' },
+  { id: 'blp-torrent', name: 'Torrents', category: 'torrent', info: 'Torrent trackers and sites. BlocklistProject.', rules: 2600, format: 'domains', url: BLP + 'torrent-nl.txt' },
+  { id: 'blp-tiktok', name: 'TikTok', category: 'tiktok', info: 'TikTok domains. BlocklistProject.', rules: 3700, format: 'domains', url: BLP + 'tiktok-nl.txt' },
+  { id: 'blp-youtube', name: 'YouTube', category: 'youtube', info: 'YouTube domains, including video delivery. BlocklistProject.', rules: 24000, format: 'domains', url: BLP + 'youtube-nl.txt' },
+  { id: 'blp-facebook', name: 'Facebook and Instagram', category: 'facebook', info: 'Facebook family domains. BlocklistProject.', rules: 22000, format: 'domains', url: BLP + 'facebook-nl.txt' }] });
 const BUNDLES = [
   { key: 'recommended', name: 'Recommended', info: 'Hagezi Pro and Threat Intelligence', ids: ['hagezi-pro', 'hagezi-tif'] },
   { key: 'light', name: 'Light', info: 'Hagezi Light and Threat Intelligence Mini', ids: ['hagezi-light', 'hagezi-tif-mini'] },
@@ -80,10 +90,17 @@ async function installLists(ids) {
   if (!(await L.confirm({ title: L.t('Install {what}?', { what }), text: 'Lumen downloads it in the background and starts blocking when it is ready. DNS keeps working, lists you already have are not downloaded again, and you can cancel in the progress panel.', label: 'Install' }))) return;
   /* Profiles that restrict themselves to named lists get the new ones too, otherwise the list would silently never apply. */
   await L.changeLists(f => {
-    const added = [], widened = [];
-    for (const c of add) if (!f.lists.some(l => l.id === c.id)) { f.lists.push({ id: c.id, format: c.format, url: c.url, path: '', text: '', category: '', refresh_secs: 86400 }); added.push(c.id); }
+    const added = [], widened = [], addedCategories = []; let createdSafe = false;
+    for (const c of add) if (!f.lists.some(l => l.id === c.id)) { f.lists.push({ id: c.id, format: c.format, url: c.url, path: '', text: '', category: c.category || '', refresh_secs: 86400 }); added.push(c.id); }
+    /* Categorized lists only apply to profiles that select the category: put them in child-safe. */
+    const categories = [...new Set(CATALOG_ITEMS.filter(c => added.includes(c.id) && c.category).map(c => c.category))];
+    if (categories.length) {
+      let safe = f.profiles.find(p => p.id === 'child-safe');
+      if (!safe) { safe = { id: 'child-safe', lists: [], categories: [], rules: { allow: [], block: [] }, schedules: [] }; f.profiles.push(safe); createdSafe = true; }
+      for (const c of categories) if (!safe.categories.includes(c)) { safe.categories.push(c); addedCategories.push(c); }
+    }
     for (const p of f.profiles) if (p.lists.length) { const missing = added.filter(id => !p.lists.includes(id)); if (missing.length) { p.lists = [...p.lists, ...missing]; widened.push([p.id, missing]); } }
-    return g => { g.lists = g.lists.filter(x => !added.includes(x.id)); for (const [pid, extra] of widened) { const p = g.profiles.find(x => x.id === pid); if (p) p.lists = p.lists.filter(x => !extra.includes(x)); } };
+    return g => { g.lists = g.lists.filter(x => !added.includes(x.id)); const safe = g.profiles.find(p => p.id === 'child-safe'); if (safe) { safe.categories = safe.categories.filter(c => !addedCategories.includes(c)); if (createdSafe && !safe.categories.length) g.profiles = g.profiles.filter(p => p !== safe); } for (const [pid, extra] of widened) { const p = g.profiles.find(x => x.id === pid); if (p) p.lists = p.lists.filter(x => !extra.includes(x)); } };
   });
 }
 function catalogCard() {

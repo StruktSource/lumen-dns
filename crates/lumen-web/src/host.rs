@@ -3,6 +3,62 @@
 
 use std::net::IpAddr;
 
+/// One DHCP network, for the console.
+#[derive(Clone, Debug)]
+pub struct DhcpScopeInfo {
+    /// 4 or 6.
+    pub family: u8,
+    pub interface: Option<String>,
+    pub network: String,
+    pub range: String,
+    pub active: usize,
+    pub capacity: u64,
+}
+
+/// One bound DHCP lease, for the console.
+#[derive(Clone, Debug)]
+pub struct DhcpLeaseInfo {
+    pub family: u8,
+    pub ip: IpAddr,
+    /// Set for a delegated prefix: its length.
+    pub prefix_len: Option<u8>,
+    /// A temporary address (`IA_TA`).
+    pub temporary: bool,
+    /// The device agreed to be told to renew.
+    pub reconfigurable: bool,
+    pub client: String,
+    pub hostname: Option<String>,
+    /// Unix seconds.
+    pub expires: u64,
+}
+
+/// One interface Router Advertisements go out on, for the console.
+#[derive(Clone, Debug)]
+pub struct DhcpAdvertisementInfo {
+    pub interface: String,
+    pub prefixes: Vec<String>,
+    /// Hosts are told to ask `DHCPv6` for addresses (the M flag).
+    pub managed: bool,
+    /// Hosts are told to ask `DHCPv6` for other settings (the O flag).
+    pub other_config: bool,
+    /// Seconds hosts keep this machine as a default router; 0 means it is not one.
+    pub router_lifetime_secs: u32,
+    pub dns: Vec<IpAddr>,
+    pub sent: u64,
+    /// Unix seconds of the last advertisement, 0 before the first.
+    pub last_sent: u64,
+}
+
+/// What the DHCP module shows. `None` from [`Host::dhcp`] means the server is not running.
+#[derive(Clone, Debug, Default)]
+pub struct DhcpInfo {
+    pub scopes: Vec<DhcpScopeInfo>,
+    pub leases: Vec<DhcpLeaseInfo>,
+    /// `(role, answering now)` when this server is half of a failover pair.
+    pub failover: Option<(String, bool)>,
+    pub advertisements: Vec<DhcpAdvertisementInfo>,
+}
+
 /// Aggregate counters. No domain names, clients, or profiles.
 #[derive(Clone, Debug, Default)]
 pub struct Counters {
@@ -88,5 +144,17 @@ pub trait Host: Send + Sync + 'static {
     /// External sign-in settings when the operator turned them on.
     fn oidc(&self) -> Option<lumen_config::Oidc> {
         None
+    }
+    /// The DHCP server's scopes and leases, when it is running.
+    fn dhcp(&self) -> Option<DhcpInfo> {
+        None
+    }
+    /// Ask the device that holds `ip` to renew now (`DHCPv6` Reconfigure, or `DHCPFORCERENEW`
+    /// for an IPv4 address).
+    ///
+    /// # Errors
+    /// Says why it could not be done.
+    fn dhcp_reconfigure(&self, _ip: IpAddr, _info_only: bool) -> Result<(), String> {
+        Err("the DHCP server is not running".into())
     }
 }

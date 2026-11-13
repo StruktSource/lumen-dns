@@ -39,16 +39,35 @@ tcp = ["127.0.0.1:5353", "[::1]:5353"]
 dot = []
 doh = []
 doq = []
+doh3 = []
 # Only this host may query Lumen by default.
 allow_clients = ["127.0.0.0/8", "::1/128"]
 # Optional encrypted listener example. See ../docs/guides/encrypted-dns.md.
 # dot = ["127.0.0.1:8853", "[::1]:8853"]
 # doh = ["127.0.0.1:8443", "[::1]:8443"]
 # doq = ["127.0.0.1:8853", "[::1]:8853"]
+# doh3 = ["127.0.0.1:8443", "[::1]:8443"]
 # certificate = "tls/cert.pem"
 # private_key = "tls/key.pem"
 
 # Built-in iterative recursion with local DNSSEC validation. No provider is used.
+# Optional DNSCrypt v2 server (no TLS certificate). Off by default. See docs/guides/encrypted-dns.md.
+# [dnscrypt]
+# enabled = true
+# listen = ["127.0.0.1:5443"]
+# provider_name = "2.dnscrypt-cert.dns.home.example"
+# key_file = "dnscrypt-provider.key"
+
+# Optional authoritative zones, split-horizon views, conditional forwarding, dynamic updates and
+# transfers. Off by default. See docs/guides/authoritative-dns.md.
+# [[zones]]
+# name = "home.example"
+# file = "zones/home.example.zone"
+#
+# [[forwarders]]
+# domain = "corp.example"
+# upstreams = ["10.0.0.53:53"]
+
 [resolver]
 mode = "recursive"
 dnssec = true
@@ -70,6 +89,21 @@ diagnostics = false
 # Optional overrides: BIND-format root hints and DNSKEY-format trust anchors.
 # root_hints = "root.hints"
 # trust_anchor = "root.key"
+# trust_anchor_state = "anchors.state"   # RFC 5011 automatic root key rollover
+
+# Optional RFC 8767 stale answers. Off by default. Expired DNSSEC-authenticated data is not served.
+# [resolver.serve_stale]
+# enabled = true
+# max_age_secs = 86400
+# answer_ttl_secs = 30
+
+# Optional persistent response cache. This file contains queried names and answers, not clients.
+# [resolver.persistent_cache]
+# enabled = true
+# path = "dns-cache.sqlite"
+# max_entries = 16384
+# max_bytes = 67108864
+# max_ttl_secs = 604800
 
 # Prime the root and common top-level zones once at startup so the first lookups skip the
 # slowest delegation and DNSSEC-key fetches. Queries name only these zones, never clients.
@@ -112,4 +146,41 @@ io_timeout_ms = 5000
 # Maximum accepted DNS message size.
 max_message_bytes = 4096
 
+# Multicast DNS bridge (off by default): answers for .local devices under a domain of yours and
+# can repeat mDNS between networks. See docs/guides/mdns.md.
+# [mdns]
+# enabled = true
+# interfaces = ["eth0"]
+# domain = "mdns.home.example"
+
+# DHCP server for IPv4 and IPv6 (off by default). A network needs exactly one DHCP server:
+# turn your router's off first. See docs/guides/dhcp.md.
+# [dhcp]
+# enabled = true
+# domain = "home.lan"
+# lease_file = "dhcp-leases.db"
+# [[dhcp.scopes]]
+# interface = "eth0"
+# subnet = "192.168.1.0/24"
+# server_address = "192.168.1.2"
+# range_start = "192.168.1.100"
+# range_end = "192.168.1.199"
+# router = "192.168.1.1"
+# IPv6 Router Advertisements (needs root or CAP_NET_RAW). See docs/guides/dhcp.md.
+# [[dhcp.router_advertisements]]
+# interface = "eth0"
+# managed = true
+# [[dhcp.router_advertisements.prefixes]]
+# prefix = "fd00:1::/64"
+# autonomous = false
+
 # Filtering is empty by default. See filtering.example.toml to opt in.
+
+# Automatic certificates (ACME, HTTP-01). Needs port 80 reachable from the internet and the
+# [listen] certificate and private_key paths. Off unless domains is set. See
+# docs/guides/certificates.md.
+# [acme]
+# domains = ["dns.example.com"]
+# directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+# terms_agreed = true
+# account_file = "acme-account.json"

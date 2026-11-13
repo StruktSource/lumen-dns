@@ -9,7 +9,8 @@ mod host;
 mod oidc;
 pub use console::Console;
 pub use host::{
-    Counters, Explained, HistoryDetail, HistoryMode, HistorySettings, Host, ListInfo, QueryRecord,
+    Counters, DhcpAdvertisementInfo, DhcpInfo, DhcpLeaseInfo, DhcpScopeInfo, Explained,
+    HistoryDetail, HistoryMode, HistorySettings, Host, ListInfo, QueryRecord,
 };
 
 use bytes::Bytes;
@@ -75,6 +76,7 @@ const ASSETS: &[Asset] = &[
     asset!("/assets/js/view-devices.js", JS, "js/view-devices.js"),
     asset!("/assets/js/view-modules.js", JS, "js/view-modules.js"),
     asset!("/assets/js/view-trafficmap.js", JS, "js/view-trafficmap.js"),
+    asset!("/assets/js/view-dhcp.js", JS, "js/view-dhcp.js"),
     asset!("/assets/js/view-filtering.js", JS, "js/view-filtering.js"),
     asset!("/assets/js/view-dns.js", JS, "js/view-dns.js"),
     asset!("/assets/js/view-users.js", JS, "js/view-users.js"),
@@ -600,6 +602,20 @@ mod tests {
                 catalogs[0].0
             );
         }
+    }
+
+    #[test]
+    fn console_managed_zone_schema_round_trips() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let status = std::process::Command::new("node")
+            .arg(root.join("web/tests/config-roundtrip.mjs"))
+            .current_dir(root)
+            .status()
+            .expect("Node.js is required for the console JavaScript test");
+        assert!(
+            status.success(),
+            "managed-zone JavaScript round-trip failed"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

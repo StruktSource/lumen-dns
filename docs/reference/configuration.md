@@ -51,19 +51,156 @@ lumen --config FILE --check
 | `limits` | Shared admission and I/O limits: [below](#limits) |
 | `filtering` | Optional rules, lists, profiles, devices, groups, subnets, schedules: [below](#filtering) |
 
+## `[dnscrypt]`
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Serve DNSCrypt v2 on every `listen` address, over UDP and TCP |
+| `listen` | `[]` | 1 to 8 addresses | Unique nonzero ports. Each address serves UDP and TCP, so the OS rejects a clash with another listener on the same port and transport |
+| `provider_name` | empty | Valid DNS name starting with `2.dnscrypt-cert.`, no trailing dot | Name clients query for the certificate |
+| `key_file` | unset | Required when enabled | Ed25519 provider seed as 64 hex characters. Created with mode `0600` if missing. Relative paths resolve beside the config file |
+| `cert_hours` | `24` | 2 to 168 | Certificate lifetime. Keys rotate at half this age |
+
+See [Encrypted DNS](../guides/encrypted-dns.md#dnscrypt). No TLS certificate is needed.
+
+## `[acme]`
+
+Off unless `domains` is set. See [Automatic certificates](../guides/certificates.md).
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `domains` | `[]` | 1 to 8 DNS names | Names on the certificate. Wildcards (`*.example.com`) need `challenge = "dns-01"`. Empty turns ACME off |
+| `challenge` | `http-01` | `http-01` or `dns-01` | How the CA checks control. `dns-01` is answered by Lumen's own resolver |
+| `directory` | unset | `https://` URL | The CA's ACME directory. Required, no default |
+| `terms_agreed` | `false` | Must be `true` | You accept the CA's terms of service |
+| `email` | unset | One address | Contact for expiry notices |
+| `account_file` | unset | Required | ACME account key, created with mode `0600` |
+| `challenge_listen` | `0.0.0.0:80` | Address | Where the HTTP-01 challenge is answered while an order runs. Unused with `dns-01` |
+| `renew_before_days` | `30` | 1 to 60 | Renew when fewer days remain |
+| `directory_ca` | unset | PEM file | Extra root to trust for the directory, for a private CA |
+
+Needs `listen.certificate`, `listen.private_key`, and at least one encrypted listener.
+
+## `[dhcp]`
+
+Off unless `enabled = true`. See [DHCP server](../guides/dhcp.md).
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Serve DHCP. Nothing listens otherwise |
+| `domain` | unset | DNS name, no trailing dot | Required when enabled. Leased names become `host.<domain>`. Must not overlap a `[[zones]]` zone |
+| `lease_file` | unset | Path | Required when enabled. SQLite file, mode `0600`. Relative paths resolve beside the config file |
+| `listen4` / `listen6` | `0.0.0.0:67` / `[::]:547` | Socket address | Server sockets. Change only for testing or behind a relay |
+| `client_port4` / `client_port6` | `68` / `546` | 1 to 65535 | Ports clients listen on |
+
+`[[dhcp.scopes]]` (IPv4, up to 16): `interface` (needed when there are several), `subnet`, `server_address`, `range_start`, `range_end` (at most 65,536 addresses), `router`, `dns` (defaults to `server_address`), `lease_secs` (default `43200`, 60 to 2,592,000), `next_server` and `boot_file` (network boot, together), `forcerenew` (default `false`: let devices be told to renew with `DHCPFORCERENEW`), and `[[dhcp.scopes.reservations]]` with `mac`, `ip`, `hostname` (up to 512).
+
+`[[dhcp.scopes6]]` (IPv6, up to 16): `interface` (omit for a network reached through a relay), `prefix`, `range_start`, `range_end`, `dns` (required), `preferred_secs` (default `21600`, at least 60), `valid_secs` (default `43200`, at least `preferred_secs`, at most 2,592,000), `reconfigure` (default `false`: let devices be told to renew), `[dhcp.scopes6.delegation]` with `pool`, `length` and `[[...reservations]]` (`duid`, `prefix`) for prefix delegation, and `[[dhcp.scopes6.reservations]]` with `duid` (hex), `ip`, `hostname`.
+
+`[[dhcp.router_advertisements]]` (IPv6 Router Advertisements, up to 16, one per `interface`): `interface`, `managed` (the M flag, default `false`), `other_config` (the O flag, default `false`), `router_lifetime_secs` (default `0`, not a default router; otherwise `interval_secs` to 9000), `preference` (`low`, `medium` default or `high`), `interval_secs` (default `600`, 4 to 1800), `mtu` (1280 to 65535, off by default), `dns` (up to 4 addresses; left out: the DHCPv6 scope's DNS servers on that interface), `search` (up to 4 names; left out: `dhcp.domain`), `[[dhcp.router_advertisements.prefixes]]` (up to 8) with `prefix`, `on_link` (default `true`), `autonomous` (default `true`, needs a /64), `valid_secs` (default 2,592,000) and `preferred_secs` (default 604,800, at most `valid_secs`), and `[[dhcp.router_advertisements.routes]]` (up to 8) with `prefix`, `preference` and `lifetime_secs` (default 1800). With these entries alone `dhcp` needs no scope. Needs a raw socket (root or `CAP_NET_RAW`); Linux, macOS and the BSDs. See [Router Advertisements](../guides/dhcp.md#router-advertisements-ipv6).
+
+`[dhcp.failover]`: `role` (`primary` or `secondary`), `peer` (the primary connects here), `listen` (the secondary accepts here), `secret_file` (at least 16 characters, mode `0600`), `takeover_secs` (default `30`, 5 to 3600), `reserve_percent` (default `20`, 5 to 50). See [Failover](../guides/dhcp.md#failover).
+
+## `[mdns]`
+
+Off unless `enabled = true`. See [Multicast DNS bridge](../guides/mdns.md).
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Listen for and ask multicast DNS. Nothing is sent otherwise |
+| `interfaces` | `[]` | 1 to 8 names, no repeats | Networks to listen on, such as `eth0` |
+| `domain` | unset | DNS name, not `.local`, not under `.arpa`, no overlap with a zone or `dhcp.domain` | Turns on the discovery proxy: `<name>.<domain>` mirrors `<name>.local` |
+| `reflect` | `false` | Needs two or more interfaces | Repeat mDNS between the interfaces. Crosses network boundaries |
+| `ipv6` | `true` | | Also use `ff02::fb` |
+| `wait_ms` | `700` | 100 to 3000 | How long a question waits for devices |
+| `ttl_cap_secs` | `120` | 1 to 3600 | Longest TTL given to an answer |
+| `max_records` | `4096` | 64 to 65536 | Records kept. The soonest to expire go first |
+
+At least one of `domain` and `reflect` is required.
+
+## Authoritative zones, forwarders, and TSIG keys
+
+Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these are off until you add a table.
+
+`[[zones]]`
+
+| Field | Default | Meaning |
+| :--- | :--- | :--- |
+| `name` | required | Zone apex without a trailing dot. Unique per config. Up to 64 zones |
+| `file` / `text` / `managed` | exactly one | RFC 1035 zone file path (relative to the config file), inline text (at most 1 MiB), or a typed [console-managed zone](#console-managed-zones). File and text zones need a SOA at the apex |
+| `views` | `[]` | Up to 8 `[[zones.views]]` with `clients` (1 to 32 CIDRs) and their own `file` or `text`. First match wins |
+| `journal` | unset | SQLite file that makes the zone dynamic. Needs `file`, `update_rules`, and no `views` |
+| `update_rules` | `[]` | Up to 16 `[[zones.update_rules]]` with `key`, `names` (exact or `*.suffix`, inside the zone), and `types` |
+| `dnssec` | off | `[zones.dnssec]` with `key_file` (PKCS#8 PEM, mode 0600), `algorithm` (`ed25519` or `ecdsap256sha256`) `signature_days` (2 to 90, default 14), `denial` (`nsec` or `nsec3`), `nsec3_salt` (hex, up to 8 bytes) and `nsec3_opt_out`, and `next_key_file` with `next_algorithm` for a [key rollover](../guides/authoritative-dns.md#key-rollover). Not with `views`, `journal`, or `transfer_keys`. See [DNSSEC signing](../guides/authoritative-dns.md#dnssec-signing) |
+| `transfer_keys` | `[]` | Up to 8 TSIG key names allowed to run AXFR/IXFR over TCP. Empty refuses all transfers |
+| `notify` | `[]` | Up to 8 secondary `ip:port` addresses that get a NOTIFY at startup and after each accepted update. Not Lumen's own listeners |
+
+`[[forwarders]]`
+
+| Field | Meaning |
+| :--- | :--- |
+| `domain` | Domain (and everything below) to forward. Unique, and not also a zone name. Up to 64 |
+| `upstreams` | 1 to 8 plain UDP/TCP resolver addresses with nonzero ports, not Lumen's own listeners. Answers are not DNSSEC-validated |
+
+`[[tsig_keys]]`
+
+| Field | Meaning |
+| :--- | :--- |
+| `name` | Unique DNS-style key name. Updaters and secondaries must use the same name |
+| `algorithm` | `hmac-sha256`, `hmac-sha384`, or `hmac-sha512` |
+| `secret_file` | File with one line of base64 (at least 16 bytes decoded). Up to 32 keys |
+
+### Console-managed zones
+
+`[zones.managed]` is the typed form used by **DNS → Local DNS** in the web console. It is also valid TOML:
+
+```toml
+[[zones]]
+name = "home.arpa"
+
+  [zones.managed]
+  description = "Names used on the home network"
+  default_ttl = 300
+
+    [[zones.managed.records]]
+    name = "dash"
+    type = "a"
+    address = "192.168.0.10"
+```
+
+Lumen generates the zone's SOA and apex NS records. `name = "@"` means the apex; other owner names are relative to the zone, without a trailing dot. A wildcard is allowed only as the first complete label. The zone description is optional plain text, at most 200 characters, and is never published in DNS. `default_ttl` defaults to `300`; it and each optional record `ttl` must be 1 to 604,800 seconds.
+Target and exchange names are relative to the zone unless they end in a dot. For example,
+`target = "server"` and `target = "server.home.arpa."` name the same host in `home.arpa`.
+
+One managed zone has at most 1,024 records. It cannot also use `file`, `text`, `views`, `journal`, `update_rules`, `transfer_keys`, `notify`, or `dnssec`. `local` and names below `.local` are rejected because `.local` belongs to mDNS; use `home.arpa` for ordinary local DNS or the [mDNS bridge](../guides/mdns.md). The limit of 64 total `[[zones]]` entries includes managed and advanced zones together.
+
+| `type` | Required fields and bounds |
+| :--- | :--- |
+| `a` | `address`: IPv4 address |
+| `aaaa` | `address`: IPv6 address |
+| `cname` | `target`: DNS name. Its owner cannot have another record |
+| `txt` | `value`: plain text, at most 255 bytes |
+| `ptr` | `target`: DNS name |
+| `mx` | `priority`: 0 to 65535; `exchange`: DNS name |
+| `srv` | `priority`, `weight`, `port`: each 0 to 65535; `target`: DNS name |
+| `caa` | `flags`: 0 to 255; `tag`: 1 to 15 ASCII letters or digits; `value`: plain text, at most 255 bytes |
+| `tlsa` | `usage`: 0 to 3; `selector`: 0 to 1; `matching_type`: 0 to 2; `certificate_association_data`: nonempty hexadecimal, even length, at most 4,096 characters |
+
+Console edits are saved as a staged managed-mode config revision. Applying them restarts DNS listeners and clears caches; a validation or startup failure discards the candidate and restores the previous config and listeners. Advanced file, text, split, dynamic, transferred, and signed zones are listed read-only in the console.
+
 ## Listeners
 
 | Field | Default |
 | :--- | :--- |
 | `udp`, `tcp` | Each `["127.0.0.1:5353"]` |
-| `dot`, `doh`, `doq` | Each `[]` (disabled) |
+| `dot`, `doh`, `doh3`, `doq` | Each `[]` (disabled) |
 | `allow_clients` | `["127.0.0.0/8", "::1/128"]` |
 | `certificate`, `private_key` | Unset. Both are required for any encrypted listener |
 
 - An empty array disables that transport. Enable 1 to 16 DNS listeners in total.
-- Ports must be nonzero, and duplicates within one transport are invalid. The OS also rejects incompatible bindings across transports. UDP and TCP may share a port, and DoT (TCP) and DoQ (UDP) may share a port. IPv6 sockets are IPv6-only, so IPv4 and IPv6 wildcard listeners can coexist.
+- Ports must be nonzero, and duplicates within one transport are invalid. The OS also rejects incompatible bindings across transports. UDP and TCP may share a port, DoT (TCP) and DoQ (UDP) may share a port, and DoH (TCP) and DoH3 (UDP) may share a port. IPv6 sockets are IPv6-only, so IPv4 and IPv6 wildcard listeners can coexist.
 - **Every client must match an allowed CIDR**, including on encrypted transports. An empty allowlist is invalid (maximum 128 CIDRs). A wildcard bind does not grant access. See [Serve your network](../guides/serve-your-network.md).
-- TLS listeners use TLS 1.3 with no early data and PEM files (certificate up to 1 MiB, key up to 64 KiB). Startup verifies the key matches the certificate. You manage validity, renewal, permissions, and restarts after rotation. See [Encrypted DNS](../guides/encrypted-dns.md).
+- TLS listeners use TLS 1.3 with no early data and PEM files (certificate up to 1 MiB, key up to 64 KiB). Startup verifies the key matches the certificate. You obtain and renew the files and manage permissions. Lumen picks up a renewed, valid pair within 30 seconds without a restart. See [Encrypted DNS](../guides/encrypted-dns.md).
 
 ## Resolver
 
@@ -74,6 +211,7 @@ lumen --config FILE --check
 | `mode` | `"recursive"` | `"recursive"` or `"forward"`. Only one runs at a time |
 | `dnssec` | `true` | Both modes validate locally by default |
 | `root_hints` | Bundled InterNIC hints | Optional BIND-format file. Recursive mode only. 64 KiB, 1 to 64 IP records, directives disabled |
+| `trust_anchor_state` | off | Path of the RFC 5011 trust-anchor state file. Setting it turns on automatic root key rollover. See [DNSSEC and trust](dnssec-and-trust.md#automatic-rollover-rfc-5011) |
 | `trust_anchor` | Hickory's bundled root DNSKEYs | Optional DNSKEY-format file. 64 KiB, at least one key. DNSSEC must be enabled |
 | `upstream_ca` | Public WebPKI roots | Optional PEM CA bundle (1 MiB). Replaces the public roots for encrypted forwarding |
 | `upstreams` | `[]` | Up to 8 custom endpoints, which rank after any providers. In forward mode you need at least one provider or upstream. Rejected in recursive mode |
@@ -96,6 +234,28 @@ lumen --config FILE --check
 | `negative_ttl_secs` | `3600` | 1 to 86400. TTL ceiling for NXDOMAIN and NODATA |
 
 Capacities count **entries, not bytes of memory**. Record sizes, separate caches, in-flight work, library maintenance, and TLS or QUIC buffers also use memory. For a hard memory ceiling, use container or OS limits. A TTL of zero is never extended into a positive cache lifetime.
+
+### `[resolver.serve_stale]`
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Serve an eligible expired answer at once and refresh it in the background |
+| `max_age_secs` | `86400` | 60 to 604800 | Maximum time after the authoritative TTL that an answer stays eligible |
+| `answer_ttl_secs` | `30` | 1 to 300 | TTL placed on a stale response |
+
+This is a separate, Lumen-owned RFC 8767 cache because Hickory does not expose expired entries. It is bounded by `cache_entries` and 64 MiB when persistence is off. A zero-TTL, malformed, truncated, TSIG, REFUSED, FORMERR, or SERVFAIL response is never cached. Filtering still runs first. DNSSEC-authenticated data is not served after expiry because its signatures may also have expired. One refresh per name, type, class, and DNSSEC flag may run at once; a stale response does not wait for it.
+
+### `[resolver.persistent_cache]`
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Save eligible DNS responses in a separate SQLite file |
+| `path` | unset | Required when enabled | Cache database; relative paths resolve beside the config file |
+| `max_entries` | `16384` | 128 to 65536 | Maximum saved responses |
+| `max_bytes` | `67108864` | 1 MiB to 1 GiB | Maximum encoded response bytes, excluding SQLite overhead |
+| `max_ttl_secs` | `604800` | 60 to 604800 | Extra ceiling on data written to disk |
+
+Persistence is an explicit privacy choice: the file contains queried names and DNS answers, but never client addresses, device IDs, or query-history rows. On Unix the file is mode `0600`. Database reads happen before listeners open and writes use a bounded blocking worker, not a Tokio DNS worker. Expired rows are removed on startup. A corrupt database is renamed with a `.corrupt-TIMESTAMP` suffix and replaced with an empty cache. The cache is disposable: exclude it from backups or delete it while Lumen is stopped to start empty.
 
 ### Speed features (recursive mode only)
 
@@ -148,7 +308,7 @@ Tracked names live in memory only, are never logged, exported, or saved, and are
 | Field | Meaning |
 | :--- | :--- |
 | `address` | **Required.** Explicit IPv4 or IPv6 address and port. No bootstrap DNS lookup |
-| `protocol` | `udp`, `tcp`, `tls`, `https`, or `quic` |
+| `protocol` | `udp`, `tcp`, `tls`, `https`, `h3`, or `quic`. `h3` is DNS over HTTP/3 and takes `doh_path` like `https` |
 | `server_name` | Required for encrypted protocols. Used as the certificate name and SNI |
 | `doh_path` | Optional, HTTPS only. An absolute path, default `/dns-query` |
 
@@ -159,7 +319,7 @@ Tracked names live in memory only, are never logged, exported, or saved, and are
 | Field | Meaning |
 | :--- | :--- |
 | `id` | **Required.** Stable ID from the bundled [provider catalog](../guides/upstream-providers.md) |
-| `protocol` | An explicit `udp`, `tcp`, `tls`, `https`, or `quic`; or encrypted-only `auto` |
+| `protocol` | An explicit `udp`, `tcp`, `tls`, `https`, `h3`, or `quic`; or encrypted-only `auto` |
 | `address_family` | `any` (default), `ipv4`, or `ipv6` |
 | `encryption` | Auto mode only. Defaults to, and only accepts, `required` |
 | `transport_priority` | Auto mode only. A unique ordered subset of `quic`, `https`, `tls` |
@@ -193,6 +353,8 @@ The optional `[filtering]` table holds rules, lists, profiles, groups, devices, 
 | Item | Detail |
 | :--- | :--- |
 | `filtering.action` | `nxdomain` (default), `nodata`, `refused`, `address`, or `cname`; profiles may override |
+| `rules.regex_allow` / `rules.regex_block` | Full-name regular expressions, global or per profile. 128 per rule set, 1024 bytes each, 32 KiB total |
+| `profiles.safe_search` | Default `false`. Rewrites Google, Bing, and YouTube names to restricted endpoints for that profile |
 | `filtering.default_profile` | Profile used for clients no device, group, or subnet matches |
 | `filtering.decision_log` | Default `false`. When `true`, logs names, client IPs, and decisions to stderr |
 | `[[filtering.lists]]` | Unique `id`, a `format` (`domains`, `hosts`, `adblock`), exactly one of `path`, `url`, `text`, optional `category`, and `refresh_secs` (60 to 604800, default 86400, `0` disables) |

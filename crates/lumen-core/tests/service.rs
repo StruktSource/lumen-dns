@@ -8,7 +8,7 @@ use hickory_proto::{
     op::{Edns, Message, Query, ResponseCode},
     rr::{
         Name, RData, Record, RecordType,
-        rdata::{A, AAAA, SOA},
+        rdata::{A, AAAA, CNAME, SOA},
     },
 };
 use lumen_config::{Config, ForwardStrategy, Mode, Upstream, UpstreamProtocol};
@@ -143,6 +143,8 @@ async fn framed<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, packet: &[u8]
 struct Fixture {
     address: SocketAddr,
     queries: Arc<AtomicUsize>,
+    /// Set when any upstream query carried an EDNS Client Subnet option.
+    subnet_seen: Arc<std::sync::atomic::AtomicBool>,
     tasks: JoinSet<()>,
 }
 impl Drop for Fixture {
@@ -176,14 +178,22 @@ async fn fixture_with_servfail(servfail: bool) -> Fixture {
         }
     };
     let queries = Arc::new(AtomicUsize::new(0));
+    let subnet_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut tasks = JoinSet::new();
     let count = Arc::clone(&queries);
+    let subnet = Arc::clone(&subnet_seen);
     tasks.spawn(async move {
         let mut buffer = vec![0; 65535];
         loop {
             let (size, peer) = udp.recv_from(&mut buffer).await.unwrap();
             let request = Message::from_vec(&buffer[..size]).unwrap();
             count.fetch_add(1, Ordering::Relaxed);
+            if request.edns.as_ref().is_some_and(|edns| {
+                edns.option(hickory_proto::rr::rdata::opt::EdnsCode::Subnet)
+                    .is_some()
+            }) {
+                subnet.store(true, Ordering::Relaxed);
+            }
             if request.queries[0]
                 .name()
                 .to_ascii()
@@ -246,9 +256,15 @@ async fn fixture_with_servfail(servfail: bool) -> Fixture {
     Fixture {
         address,
         queries,
+        subnet_seen,
         tasks,
     }
 }
+
+use hickory_proto::rr::rdata::svcb::{Alpn, EchConfigList, SvcParamKey, SvcParamValue};
+
+/// A minimal ECHConfigList-shaped blob. Lumen must pass it through untouched.
+const ECH_CONFIG: [u8; 7] = [0, 7, 0xfe, 0x0d, 1, 2, 3];
 
 fn mock_response(request: Message, tcp: bool, servfail: bool) -> Message {
     let mut response = Message::response(request.metadata.id, request.metadata.op_code);
@@ -283,6 +299,34 @@ fn mock_response(request: Message, tcp: bool, servfail: bool) -> Message {
                 60,
                 60,
                 1,
+            )),
+        ));
+    } else if text.starts_with("alias.") {
+        response.metadata.authentic_data = true;
+        response.add_answer(Record::from_rdata(
+            name,
+            1,
+            RData::CNAME(CNAME(Name::from_ascii("tracker.example.").unwrap())),
+        ));
+    } else if q.query_type() == RecordType::HTTPS {
+        response.add_answer(Record::from_rdata(
+            name,
+            60,
+            RData::HTTPS(hickory_proto::rr::rdata::HTTPS(
+                hickory_proto::rr::rdata::SVCB::new(
+                    1,
+                    Name::from_ascii("Pool.Example.").unwrap(),
+                    vec![
+                        (
+                            SvcParamKey::Alpn,
+                            SvcParamValue::Alpn(Alpn(vec!["h2".into(), "h3".into()])),
+                        ),
+                        (
+                            SvcParamKey::EchConfigList,
+                            SvcParamValue::EchConfigList(EchConfigList(ECH_CONFIG.to_vec())),
+                        ),
+                    ],
+                ),
             )),
         ));
     } else if q.query_type() == RecordType::AAAA {
@@ -815,6 +859,13 @@ async fn dnssec_valid_bogus_wrong_anchor_and_signed_denial() {
             server_name: Some("localhost".into()),
             doh_path: Some("/dns-query".into()),
         },
+        // An HTTP/3 tier behind a working one is never reached either.
+        Upstream {
+            address: unused_address,
+            protocol: UpstreamProtocol::H3,
+            server_name: Some("localhost".into()),
+            doh_path: Some("/dns-query".into()),
+        },
     ];
     let mut encrypted_server = RunningServer::start(automatic).await.unwrap();
     for (name, expected) in [
@@ -862,20 +913,22 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
     // Free ports are probed by binding and dropping, so another test can win the race.
     // Retry with fresh ports instead of failing on that collision.
     let mut attempt = 0;
-    let (mut upstream, tls, https, quic) = loop {
+    let (mut upstream, tls, https, quic, h3) = loop {
         let mut upstream_cfg = config(fixture.address, address("127.0.0.1"));
         upstream_cfg.listen.udp.clear();
         upstream_cfg.listen.tcp.clear();
         let tls = address("127.0.0.1");
         let https = address("127.0.0.1");
         let quic = address("127.0.0.1");
+        let h3 = address("127.0.0.1");
+        upstream_cfg.listen.doh3 = vec![h3];
         upstream_cfg.listen.dot = vec![tls];
         upstream_cfg.listen.doh = vec![https];
         upstream_cfg.listen.doq = vec![quic];
         upstream_cfg.listen.certificate = Some(directory.path().join("cert.pem"));
         upstream_cfg.listen.private_key = Some(directory.path().join("key.pem"));
         match RunningServer::start(upstream_cfg).await {
-            Ok(server) => break (server, tls, https, quic),
+            Ok(server) => break (server, tls, https, quic, h3),
             Err(error) if error.kind() == std::io::ErrorKind::AddrInUse && attempt < 5 => {
                 attempt += 1;
             }
@@ -885,6 +938,7 @@ async fn encrypted_forwarding_checks_upstream_certificates() {
     for (protocol, address) in [
         (UpstreamProtocol::Tls, tls),
         (UpstreamProtocol::Https, https),
+        (UpstreamProtocol::H3, h3),
         (UpstreamProtocol::Quic, quic),
     ] {
         let bind = self::address("127.0.0.1");
@@ -1248,6 +1302,26 @@ async fn filtering_precedes_shared_cache_updates_and_rollback() {
 }
 
 #[tokio::test]
+async fn cname_chain_filtering_replaces_validated_answer_and_clears_ad() {
+    let fixture = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(fixture.address, bind);
+    cfg.filtering.rules.block = vec!["tracker.example".into()];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+
+    let reply = udp(bind, &query("alias.example.", RecordType::A)).await;
+    assert_eq!(reply.metadata.response_code, ResponseCode::NXDomain);
+    assert!(!reply.metadata.authentic_data);
+    assert!(reply.answers.is_empty());
+    assert_eq!(server.filter().metrics.blocked.load(Ordering::Relaxed), 1);
+    assert_eq!(server.filter().metrics.allowed.load(Ordering::Relaxed), 0);
+    // Hickory follows the CNAME once; policy then replaces the completed chain.
+    assert_eq!(fixture.queries.load(Ordering::Relaxed), 2);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn bad_filter_source_fails_before_listeners_open() {
     let fixture = fixture().await;
     let bind = address("127.0.0.1");
@@ -1531,10 +1605,10 @@ async fn forward_strategies_fail_over_spread_race_and_skip_dead_upstreams() {
         bad_after_first,
         "SERVFAIL provider should rest after the first failure"
     );
-    assert_eq!(
-        upstreams[1].queries.load(Ordering::Relaxed) - before_live,
-        4,
-        "the next provider should answer every query"
+    let live_queries = upstreams[1].queries.load(Ordering::Relaxed) - before_live;
+    assert!(
+        (4..=8).contains(&live_queries),
+        "the next provider should answer every query with at most one UDP retry each: {live_queries}"
     );
     server.shutdown().await;
 }
@@ -1586,5 +1660,2286 @@ async fn a_new_filter_goes_live_without_restarting_listeners() {
     // The totals carry on instead of starting from zero.
     assert_eq!(server.filter().metrics.allowed.load(Ordering::Relaxed), 1);
     assert_eq!(server.filter().metrics.blocked.load(Ordering::Relaxed), 1);
+    server.shutdown().await;
+}
+
+type H3Sender = h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>;
+
+async fn doh3(
+    sender: &mut H3Sender,
+    packet: &[u8],
+    method: &str,
+    path: &str,
+    media: &str,
+) -> (http::StatusCode, Vec<u8>) {
+    use bytes::Buf;
+    let request = http::Request::builder()
+        .method(method)
+        .uri(format!("https://localhost{path}"))
+        .header("content-type", media)
+        .body(())
+        .unwrap();
+    let mut stream = sender.send_request(request).await.unwrap();
+    if !packet.is_empty() {
+        stream
+            .send_data(bytes::Bytes::copy_from_slice(packet))
+            .await
+            .unwrap();
+    }
+    stream.finish().await.unwrap();
+    let response = timeout(Duration::from_secs(3), stream.recv_response())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut body = vec![];
+    while let Some(mut chunk) = timeout(Duration::from_secs(3), stream.recv_data())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+    }
+    (response.status(), body)
+}
+
+#[tokio::test]
+async fn doh3_listener_answers_get_post_and_rejects_bad_requests() {
+    let fixture = fixture().await;
+    let (directory, cert) = certificates();
+    for ip in ["127.0.0.1", "[::1]"] {
+        let mut cfg = config(fixture.address, address(ip));
+        cfg.listen.udp.clear();
+        cfg.listen.tcp.clear();
+        let bind = address(ip);
+        cfg.listen.doh3 = vec![bind];
+        cfg.listen.certificate = Some(directory.path().join("cert.pem"));
+        cfg.listen.private_key = Some(directory.path().join("key.pem"));
+        cfg.filtering.rules.block = vec!["blocked.example".into()];
+        let mut server = RunningServer::start(cfg).await.unwrap();
+        let socket = std::net::UdpSocket::bind(if bind.is_ipv4() {
+            "127.0.0.1:0"
+        } else {
+            "[::1]:0"
+        })
+        .unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let mut endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            None,
+            socket,
+            Arc::new(quinn::TokioRuntime),
+        )
+        .unwrap();
+        endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_tls(cert.clone(), b"h3"))
+                .unwrap(),
+        )));
+        let connection = endpoint.connect(bind, "localhost").unwrap().await.unwrap();
+        let (mut driver, mut sender) =
+            h3::client::new(h3_quinn::Connection::new(connection.clone()))
+                .await
+                .unwrap();
+        let driver = tokio::spawn(async move {
+            let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+        });
+        let packet = query("ok.example.", RecordType::A);
+        let (status, body) = doh3(
+            &mut sender,
+            &packet,
+            "POST",
+            "/dns-query",
+            "application/dns-message",
+        )
+        .await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert!(!Message::from_vec(&body).unwrap().answers.is_empty());
+        let path = format!("/dns-query?dns={}", URL_SAFE_NO_PAD.encode(&packet));
+        let (status, body) = doh3(&mut sender, &[], "GET", &path, "application/dns-message").await;
+        assert_eq!(status, http::StatusCode::OK);
+        assert!(!Message::from_vec(&body).unwrap().answers.is_empty());
+        let (_, body) = doh3(
+            &mut sender,
+            &query("blocked.example.", RecordType::A),
+            "POST",
+            "/dns-query",
+            "application/dns-message",
+        )
+        .await;
+        assert_eq!(
+            Message::from_vec(&body).unwrap().metadata.response_code,
+            ResponseCode::NXDomain
+        );
+        assert_eq!(
+            doh3(&mut sender, &packet, "POST", "/dns-query", "text/plain")
+                .await
+                .0,
+            http::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(
+            doh3(&mut sender, &[], "GET", "/other", "application/dns-message")
+                .await
+                .0,
+            http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            doh3(
+                &mut sender,
+                &[],
+                "PUT",
+                "/dns-query",
+                "application/dns-message"
+            )
+            .await
+            .0,
+            http::StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            doh3(
+                &mut sender,
+                &[],
+                "GET",
+                "/dns-query?dns=!!",
+                "application/dns-message"
+            )
+            .await
+            .0,
+            http::StatusCode::BAD_REQUEST
+        );
+        driver.abort();
+        connection.close(0_u32.into(), b"done");
+        endpoint.close(0_u32.into(), b"done");
+        server.shutdown().await;
+    }
+}
+
+/// Minimal independent `DNSCrypt` v2 client for the integration test.
+struct CryptClient {
+    resolver: crypto_box::PublicKey,
+    magic: [u8; 8],
+    secret: crypto_box::SecretKey,
+    chacha: bool,
+}
+
+impl CryptClient {
+    fn from_certificate(cert: &[u8], provider: &ed25519_dalek::VerifyingKey, chacha: bool) -> Self {
+        use ed25519_dalek::Verifier;
+        assert_eq!((cert.len(), &cert[..4]), (124, &b"DNSC"[..]));
+        assert_eq!(
+            u16::from_be_bytes([cert[4], cert[5]]),
+            if chacha { 2 } else { 1 }
+        );
+        let signature = ed25519_dalek::Signature::from_slice(&cert[8..72]).unwrap();
+        provider.verify(&cert[72..], &signature).unwrap();
+        let start = u32::from_be_bytes(cert[116..120].try_into().unwrap());
+        let end = u32::from_be_bytes(cert[120..124].try_into().unwrap());
+        let now = u32::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .unwrap();
+        assert!(start <= now && now < end);
+        Self {
+            resolver: crypto_box::PublicKey::from(<[u8; 32]>::try_from(&cert[72..104]).unwrap()),
+            magic: cert[104..112].try_into().unwrap(),
+            secret: crypto_box::SecretKey::generate(&mut rand_core::OsRng),
+            chacha,
+        }
+    }
+
+    fn encrypt(&self, dns: &[u8]) -> (Vec<u8>, [u8; 12]) {
+        use crypto_box::aead::{Aead, generic_array::GenericArray};
+        let mut plain = dns.to_vec();
+        plain.push(0x80);
+        plain.resize(plain.len().div_ceil(64).max(4) * 64, 0);
+        let mut nonce = [0_u8; 24];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce[..12]);
+        let nonce_ga = GenericArray::from_slice(&nonce);
+        let boxed = if self.chacha {
+            crypto_box::ChaChaBox::new(&self.resolver, &self.secret)
+                .encrypt(nonce_ga, &plain[..])
+                .unwrap()
+        } else {
+            crypto_box::SalsaBox::new(&self.resolver, &self.secret)
+                .encrypt(nonce_ga, &plain[..])
+                .unwrap()
+        };
+        let mut packet = self.magic.to_vec();
+        packet.extend_from_slice(crypto_box::PublicKey::from(&self.secret).as_bytes());
+        packet.extend_from_slice(&nonce[..12]);
+        packet.extend_from_slice(&boxed);
+        (packet, nonce[..12].try_into().unwrap())
+    }
+
+    fn decrypt(&self, packet: &[u8], client_nonce: [u8; 12]) -> Message {
+        use crypto_box::aead::{Aead, generic_array::GenericArray};
+        assert_eq!(
+            &packet[..8],
+            &[0x72, 0x36, 0x66, 0x6e, 0x76, 0x57, 0x6a, 0x38]
+        );
+        assert_eq!(packet[8..20], client_nonce);
+        let nonce = GenericArray::from_slice(&packet[8..32]);
+        let mut plain = if self.chacha {
+            crypto_box::ChaChaBox::new(&self.resolver, &self.secret)
+                .decrypt(nonce, &packet[32..])
+                .unwrap()
+        } else {
+            crypto_box::SalsaBox::new(&self.resolver, &self.secret)
+                .decrypt(nonce, &packet[32..])
+                .unwrap()
+        };
+        while plain.last() == Some(&0) {
+            plain.pop();
+        }
+        assert_eq!(plain.pop(), Some(0x80));
+        Message::from_vec(&plain).unwrap()
+    }
+}
+
+fn certificates_from(response: &[u8]) -> Vec<Vec<u8>> {
+    Message::from_vec(response)
+        .unwrap()
+        .answers
+        .iter()
+        .map(|record| match &record.data {
+            hickory_proto::rr::RData::TXT(txt) => {
+                txt.txt_data.iter().flat_map(|part| part.to_vec()).collect()
+            }
+            _ => panic!("certificate answer is not TXT"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn dnscrypt_serves_certificates_and_encrypted_queries_over_udp_and_tcp() {
+    let fixture = fixture().await;
+    let directory = tempfile::tempdir().unwrap();
+    let key_file = directory.path().join("provider.key");
+    let bind = address("127.0.0.1");
+    let mut cfg = config(fixture.address, address("127.0.0.1"));
+    cfg.dnscrypt.enabled = true;
+    cfg.dnscrypt.listen = vec![bind];
+    cfg.dnscrypt.provider_name = "2.dnscrypt-cert.lumen.test".into();
+    cfg.dnscrypt.key_file = Some(key_file.clone());
+    cfg.filtering.rules.block = vec!["blocked.example".into()];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    let seed: [u8; 32] = std::fs::read_to_string(&key_file)
+        .unwrap()
+        .trim()
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    let provider = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&key_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut buffer = vec![0_u8; 4096];
+    // The wrong provider name is dropped silently.
+    socket
+        .send_to(&query("wrong.lumen.test.", RecordType::TXT), bind)
+        .await
+        .unwrap();
+    assert!(
+        timeout(Duration::from_millis(300), socket.recv_from(&mut buffer))
+            .await
+            .is_err()
+    );
+    socket
+        .send_to(&query("2.dnscrypt-cert.lumen.test.", RecordType::TXT), bind)
+        .await
+        .unwrap();
+    let (size, _) = timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    let certs = certificates_from(&buffer[..size]);
+    assert_eq!(certs.len(), 2);
+
+    for cert in &certs {
+        let chacha = u16::from_be_bytes([cert[4], cert[5]]) == 2;
+        let client = CryptClient::from_certificate(cert, &provider, chacha);
+        // UDP: an answer and a blocked name.
+        for (name, code) in [
+            ("ok.example.", ResponseCode::NoError),
+            ("blocked.example.", ResponseCode::NXDomain),
+        ] {
+            let (packet, nonce) = client.encrypt(&query(name, RecordType::A));
+            socket.send_to(&packet, bind).await.unwrap();
+            let (size, _) = timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(size <= packet.len(), "UDP reply must not exceed the query");
+            let message = client.decrypt(&buffer[..size], nonce);
+            assert_eq!(message.metadata.response_code, code);
+            assert_eq!(!message.answers.is_empty(), code == ResponseCode::NoError);
+        }
+        // TCP, two queries on one connection, then a forged packet closes it.
+        let mut stream = TcpStream::connect(bind).await.unwrap();
+        for _ in 0..2 {
+            let (packet, nonce) = client.encrypt(&query("ok.example.", RecordType::A));
+            stream
+                .write_u16(u16::try_from(packet.len()).unwrap())
+                .await
+                .unwrap();
+            stream.write_all(&packet).await.unwrap();
+            let length = timeout(Duration::from_secs(3), stream.read_u16())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut reply = vec![0; usize::from(length)];
+            stream.read_exact(&mut reply).await.unwrap();
+            assert!(!client.decrypt(&reply, nonce).answers.is_empty());
+        }
+        let (mut forged, _) = client.encrypt(&query("ok.example.", RecordType::A));
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        stream
+            .write_u16(u16::try_from(forged.len()).unwrap())
+            .await
+            .unwrap();
+        stream.write_all(&forged).await.unwrap();
+        assert!(
+            timeout(Duration::from_secs(3), stream.read_u16())
+                .await
+                .unwrap()
+                .is_err(),
+            "a forged packet must close the stream without a reply"
+        );
+    }
+    server.shutdown().await;
+}
+
+fn zone_text(origin: &str, address: &str) -> String {
+    format!(
+        "{origin}. 60 IN SOA ns.{origin}. hostmaster.{origin}. 1 60 60 60 60\n\
+         {origin}. 60 IN NS ns.{origin}.\n\
+         ns.{origin}. 60 IN A 192.0.2.53\n\
+         host.{origin}. 60 IN A {address}\n\
+         _web._tcp.{origin}. 60 IN SRV 0 0 443 host.{origin}.\n"
+    )
+}
+
+#[tokio::test]
+async fn authoritative_zones_views_and_conditional_forwarding() {
+    let upstream = fixture().await;
+    let corp = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    cfg.zones = vec![
+        lumen_config::Zone {
+            name: "plain.test".into(),
+            text: Some(zone_text("plain.test", "192.0.2.1")),
+            ..Default::default()
+        },
+        lumen_config::Zone {
+            name: "split.test".into(),
+            text: Some(zone_text("split.test", "203.0.113.1")),
+            views: vec![lumen_config::ZoneView {
+                clients: vec!["127.0.0.0/8".parse().unwrap()],
+                text: Some(zone_text("split.test", "10.0.0.7")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        lumen_config::Zone {
+            name: "other.test".into(),
+            text: Some(zone_text("other.test", "203.0.113.9")),
+            views: vec![lumen_config::ZoneView {
+                clients: vec!["10.0.0.0/8".parse().unwrap()],
+                text: Some(zone_text("other.test", "10.0.0.9")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    ];
+    cfg.forwarders = vec![lumen_config::Forwarder {
+        domain: "corp.example".into(),
+        upstreams: vec![corp.address],
+    }];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    let a_record = |message: &Message| {
+        message
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                hickory_proto::rr::RData::A(a) => Some(a.0.to_string()),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    let plain = udp(bind, &query("host.plain.test.", RecordType::A)).await;
+    assert!(plain.metadata.authoritative);
+    assert_eq!(a_record(&plain), "192.0.2.1");
+    // The client matches the view, so it gets the view's copy.
+    let split = udp(bind, &query("host.split.test.", RecordType::A)).await;
+    assert_eq!(a_record(&split), "10.0.0.7");
+    // The client matches no view of this zone, so it gets the default copy.
+    let other = udp(bind, &query("host.other.test.", RecordType::A)).await;
+    assert_eq!(a_record(&other), "203.0.113.9");
+    // DNS-SD style records are ordinary authoritative data.
+    let srv = udp(bind, &query("_web._tcp.plain.test.", RecordType::SRV)).await;
+    assert_eq!(srv.answers.len(), 1);
+    // Names missing from a zone are authoritative NXDOMAIN and never leave Lumen.
+    let missing = udp(bind, &query("nope.plain.test.", RecordType::A)).await;
+    assert_eq!(missing.metadata.response_code, ResponseCode::NXDomain);
+    assert!(missing.metadata.authoritative);
+    // Zone transfers are refused unless a later policy allows them.
+    assert_eq!(upstream.queries.load(Ordering::Relaxed), 0);
+
+    // Conditional forwarding reaches only its own resolver.
+    let forwarded = udp(bind, &query("host.corp.example.", RecordType::A)).await;
+    assert!(!forwarded.answers.is_empty());
+    assert!(corp.queries.load(Ordering::Relaxed) >= 1);
+    assert_eq!(upstream.queries.load(Ordering::Relaxed), 0);
+    // Everything else still uses the main resolver.
+    let main = udp(bind, &query("ok.example.", RecordType::A)).await;
+    assert!(!main.answers.is_empty());
+    assert!(upstream.queries.load(Ordering::Relaxed) >= 1);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_zone_edits_and_deletes_stay_authoritative() {
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    cfg.zones = vec![lumen_config::Zone {
+        name: "home.arpa".into(),
+        managed: Some(lumen_config::ManagedZone {
+            description: Some("Local names".into()),
+            default_ttl: 300,
+            records: vec![lumen_config::ManagedRecord {
+                name: "router".into(),
+                ttl: None,
+                data: lumen_config::ManagedRecordData::A {
+                    address: "192.0.2.10".parse().unwrap(),
+                },
+            }],
+        }),
+        ..Default::default()
+    }];
+
+    let a_record = |message: &Message| {
+        message
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                RData::A(address) => Some(address.0.to_string()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let packet = query("router.home.arpa.", RecordType::A);
+    let mut server = RunningServer::start(cfg.clone()).await.unwrap();
+    let reply = udp(bind, &packet).await;
+    assert!(reply.metadata.authoritative);
+    assert_eq!(a_record(&reply), "192.0.2.10");
+    let mut tcp = TcpStream::connect(bind).await.unwrap();
+    let reply = framed(&mut tcp, &packet).await;
+    assert!(reply.metadata.authoritative);
+    assert_eq!(a_record(&reply), "192.0.2.10");
+    let nodata = udp(bind, &query("router.home.arpa.", RecordType::AAAA)).await;
+    assert_eq!(nodata.metadata.response_code, ResponseCode::NoError);
+    assert!(nodata.metadata.authoritative);
+    assert!(nodata.answers.is_empty());
+    assert_eq!(upstream.queries.load(Ordering::Relaxed), 0);
+    drop(tcp);
+    server.shutdown().await;
+
+    if let lumen_config::ManagedRecordData::A { address } =
+        &mut cfg.zones[0].managed.as_mut().unwrap().records[0].data
+    {
+        *address = "192.0.2.20".parse().unwrap();
+    }
+    let mut server = RunningServer::start(cfg.clone()).await.unwrap();
+    assert_eq!(a_record(&udp(bind, &packet).await), "192.0.2.20");
+    server.shutdown().await;
+
+    cfg.zones[0].managed.as_mut().unwrap().records.clear();
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    let deleted = udp(bind, &packet).await;
+    assert_eq!(deleted.metadata.response_code, ResponseCode::NXDomain);
+    assert!(deleted.metadata.authoritative);
+    assert_eq!(upstream.queries.load(Ordering::Relaxed), 0);
+    server.shutdown().await;
+}
+
+fn tsig_signer(name: &str, secret: &[u8]) -> hickory_proto::rr::TSigner {
+    hickory_proto::rr::TSigner::new(
+        secret.to_vec(),
+        hickory_proto::rr::rdata::tsig::TsigAlgorithm::HmacSha256,
+        Name::from_ascii(format!("{name}.")).unwrap(),
+        300,
+    )
+    .unwrap()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn update_message(
+    zone: &str,
+    name: &str,
+    kind: RecordType,
+    data: hickory_proto::rr::RData,
+) -> Message {
+    let owner = Name::from_ascii(name).unwrap();
+    let mut rrset = hickory_proto::rr::RecordSet::new(owner.clone(), kind, 0);
+    rrset.insert(Record::from_rdata(owner, 60, data), 0);
+    hickory_proto::op::update_message::append(rrset, Name::from_ascii(zone).unwrap(), false, false)
+}
+
+async fn signed(
+    address: SocketAddr,
+    mut message: Message,
+    signer: &hickory_proto::rr::TSigner,
+    tcp: bool,
+) -> Message {
+    message.finalize(signer, now_secs()).unwrap();
+    let bytes = message.to_vec().unwrap();
+    if tcp {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        framed(&mut stream, &bytes).await
+    } else {
+        udp(address, &bytes).await
+    }
+}
+
+fn base64_secret(secret: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(secret)
+}
+
+#[tokio::test]
+async fn dynamic_updates_and_zone_transfers_use_scoped_tsig_keys() {
+    let upstream = fixture().await;
+    let directory = tempfile::tempdir().unwrap();
+    let path = |name: &str| directory.path().join(name);
+    let (ddns_secret, xfr_secret) = ([7_u8; 32], [9_u8; 32]);
+    std::fs::write(path("ddns.key"), base64_secret(&ddns_secret)).unwrap();
+    std::fs::write(path("xfr.key"), base64_secret(&xfr_secret)).unwrap();
+    std::fs::write(path("dyn.zone"), zone_text("dyn.test", "192.0.2.1")).unwrap();
+    // A secondary that acknowledges every NOTIFY and reports the zone it was for.
+    let secondary = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let secondary_address = secondary.local_addr().unwrap();
+    let (notified, mut notifications) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        let mut buffer = vec![0; 512];
+        loop {
+            let (size, from) = secondary.recv_from(&mut buffer).await.unwrap();
+            let request = Message::from_vec(&buffer[..size]).unwrap();
+            assert_eq!(request.metadata.op_code, hickory_proto::op::OpCode::Notify);
+            let mut reply = buffer[..size].to_vec();
+            reply[2] |= 0x80;
+            secondary.send_to(&reply, from).await.unwrap();
+            let _ = notified.send(request.queries[0].name().to_ascii());
+        }
+    });
+    let build = |bind: SocketAddr| {
+        let mut cfg = config(upstream.address, bind);
+        cfg.tsig_keys = vec![
+            lumen_config::TsigKey {
+                name: "ddns".into(),
+                algorithm: "hmac-sha256".into(),
+                secret_file: Some(path("ddns.key")),
+            },
+            lumen_config::TsigKey {
+                name: "xfr".into(),
+                algorithm: "hmac-sha256".into(),
+                secret_file: Some(path("xfr.key")),
+            },
+        ];
+        cfg.zones = vec![
+            lumen_config::Zone {
+                name: "dyn.test".into(),
+                file: Some(path("dyn.zone")),
+                journal: Some(path("dyn.journal")),
+                update_rules: vec![lumen_config::UpdateRule {
+                    key: "ddns".into(),
+                    names: vec!["*.dyn.test".into()],
+                    types: vec!["A".into(), "TXT".into()],
+                }],
+                transfer_keys: vec!["xfr".into()],
+                notify: vec![secondary_address],
+                ..Default::default()
+            },
+            lumen_config::Zone {
+                name: "static.test".into(),
+                text: Some(zone_text("static.test", "192.0.2.2")),
+                transfer_keys: vec!["xfr".into()],
+                ..Default::default()
+            },
+            lumen_config::Zone {
+                name: "closed.test".into(),
+                text: Some(zone_text("closed.test", "192.0.2.3")),
+                ..Default::default()
+            },
+        ];
+        cfg
+    };
+    let bind = address("127.0.0.1");
+    let mut server = RunningServer::start(build(bind)).await.unwrap();
+    let (ddns, xfr) = (
+        tsig_signer("ddns", &ddns_secret),
+        tsig_signer("xfr", &xfr_secret),
+    );
+    let a = |ip: &str| hickory_proto::rr::RData::A(A(ip.parse().unwrap()));
+    let owner = "new.dyn.test.";
+
+    let serial_of = |message: &Message| {
+        message
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                hickory_proto::rr::RData::SOA(soa) => Some(soa.serial),
+                _ => None,
+            })
+            .expect("SOA in answer")
+    };
+    let first_serial = serial_of(&udp(bind, &query("dyn.test.", RecordType::SOA)).await);
+
+    // Unsigned, wrongly signed, and out-of-scope updates change nothing.
+    let unsigned = update_message("dyn.test.", owner, RecordType::A, a("192.0.2.77"))
+        .to_vec()
+        .unwrap();
+    assert_eq!(
+        udp(bind, &unsigned).await.metadata.response_code,
+        ResponseCode::Refused
+    );
+    let forged = tsig_signer("ddns", &[1_u8; 32]);
+    assert_eq!(
+        signed(
+            bind,
+            update_message("dyn.test.", owner, RecordType::A, a("192.0.2.77")),
+            &forged,
+            false
+        )
+        .await
+        .metadata
+        .response_code,
+        ResponseCode::NotAuth
+    );
+    for (message, signer) in [
+        // Another key has no update rule.
+        (
+            update_message("dyn.test.", owner, RecordType::A, a("192.0.2.77")),
+            &xfr,
+        ),
+        // A type the rule does not list.
+        (
+            update_message(
+                "dyn.test.",
+                owner,
+                RecordType::AAAA,
+                hickory_proto::rr::RData::AAAA(AAAA("2001:db8::1".parse().unwrap())),
+            ),
+            &ddns,
+        ),
+        // The apex is not below `*.dyn.test`.
+        (
+            update_message("dyn.test.", "dyn.test.", RecordType::A, a("192.0.2.77")),
+            &ddns,
+        ),
+    ] {
+        assert_eq!(
+            signed(bind, message, signer, false)
+                .await
+                .metadata
+                .response_code,
+            ResponseCode::Refused
+        );
+    }
+    // A zone with no journal is not dynamic at all.
+    assert_eq!(
+        signed(
+            bind,
+            update_message(
+                "closed.test.",
+                "x.closed.test.",
+                RecordType::A,
+                a("192.0.2.77")
+            ),
+            &ddns,
+            false
+        )
+        .await
+        .metadata
+        .response_code,
+        ResponseCode::NotImp
+    );
+    let before = udp(bind, &query("new.dyn.test.", RecordType::A)).await;
+    assert_eq!(before.metadata.response_code, ResponseCode::NXDomain);
+    // The secondary heard about the zone at startup, and the refused updates added nothing.
+    let waited = |wait: u64| Duration::from_millis(wait);
+    assert_eq!(
+        tokio::time::timeout(waited(5000), notifications.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "dyn.test."
+    );
+    assert!(
+        tokio::time::timeout(waited(300), notifications.recv())
+            .await
+            .is_err()
+    );
+
+    // A scoped, signed update works over UDP and TCP.
+    let ok = signed(
+        bind,
+        update_message("dyn.test.", owner, RecordType::A, a("192.0.2.77")),
+        &ddns,
+        false,
+    )
+    .await;
+    assert_eq!(ok.metadata.response_code, ResponseCode::NoError);
+    // An accepted update tells the secondary again.
+    assert_eq!(
+        tokio::time::timeout(waited(5000), notifications.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        "dyn.test."
+    );
+    let ok = signed(
+        bind,
+        update_message(
+            "dyn.test.",
+            "txt.dyn.test.",
+            RecordType::TXT,
+            hickory_proto::rr::RData::TXT(hickory_proto::rr::rdata::TXT::new(vec!["hello".into()])),
+        ),
+        &ddns,
+        true,
+    )
+    .await;
+    assert_eq!(ok.metadata.response_code, ResponseCode::NoError);
+    let after = udp(bind, &query("new.dyn.test.", RecordType::A)).await;
+    assert_eq!(after.answers.len(), 1);
+
+    // Transfers: only the transfer key, only over TCP, never unsigned.
+    let axfr = |zone: &str| {
+        hickory_proto::op::update_message::zone_transfer(Name::from_ascii(zone).unwrap(), None)
+    };
+    let transfer = signed(bind, axfr("dyn.test."), &xfr, true).await;
+    assert_eq!(transfer.metadata.response_code, ResponseCode::NoError);
+    let owners: Vec<String> = transfer.answers.iter().map(|r| r.name.to_ascii()).collect();
+    assert!(owners.contains(&"new.dyn.test.".to_string()), "{owners:?}");
+    assert!(owners.contains(&"txt.dyn.test.".to_string()));
+    assert_eq!(
+        transfer.answers.first().unwrap().record_type(),
+        RecordType::SOA
+    );
+    assert_eq!(
+        transfer.answers.last().unwrap().record_type(),
+        RecordType::SOA
+    );
+    // Incremental transfer: a client holding the first serial gets only the differences.
+    let ixfr_from = |serial: u32| {
+        let mut message = axfr("dyn.test.");
+        message.queries[0].set_query_type(RecordType::IXFR);
+        message.add_authority(Record::from_rdata(
+            Name::from_ascii("dyn.test.").unwrap(),
+            0,
+            hickory_proto::rr::RData::SOA(SOA::new(
+                Name::from_ascii("ns.dyn.test.").unwrap(),
+                Name::from_ascii("hostmaster.dyn.test.").unwrap(),
+                serial,
+                60,
+                60,
+                60,
+                1,
+            )),
+        ));
+        message
+    };
+    let current_serial = serial_of(&udp(bind, &query("dyn.test.", RecordType::SOA)).await);
+    assert!(current_serial != first_serial);
+    let owners_of = |message: &Message| -> Vec<String> {
+        message.answers.iter().map(|r| r.name.to_ascii()).collect()
+    };
+    let diff = signed(bind, ixfr_from(first_serial), &xfr, true).await;
+    assert_eq!(diff.metadata.response_code, ResponseCode::NoError);
+    let owners = owners_of(&diff);
+    assert!(owners.contains(&"new.dyn.test.".to_string()), "{owners:?}");
+    assert!(owners.contains(&"txt.dyn.test.".to_string()));
+    assert!(
+        !owners.contains(&"host.dyn.test.".to_string()),
+        "unchanged records are not resent"
+    );
+    assert_eq!(
+        serial_of(&diff),
+        current_serial,
+        "starts with the current SOA"
+    );
+    assert_eq!(diff.answers[1].record_type(), RecordType::SOA);
+    match &diff.answers[1].data {
+        hickory_proto::rr::RData::SOA(soa) => assert_eq!(soa.serial, first_serial),
+        other => panic!("expected the old SOA, got {other:?}"),
+    }
+    assert_eq!(diff.answers.last().unwrap().record_type(), RecordType::SOA);
+    // Already current: the SOA alone.
+    let current = signed(bind, ixfr_from(current_serial), &xfr, true).await;
+    assert_eq!(current.answers.len(), 1);
+    assert_eq!(serial_of(&current), current_serial);
+    // A serial the server does not remember: the whole zone, which is always allowed.
+    let unknown = signed(bind, ixfr_from(first_serial.wrapping_add(9999)), &xfr, true).await;
+    assert!(owners_of(&unknown).contains(&"host.dyn.test.".to_string()));
+    assert_eq!(
+        signed(bind, axfr("static.test."), &xfr, true)
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::NoError
+    );
+    for (zone, signer) in [
+        ("dyn.test.", &ddns),
+        ("closed.test.", &xfr),
+        ("static.test.", &ddns),
+    ] {
+        assert_eq!(
+            signed(bind, axfr(zone), signer, true)
+                .await
+                .metadata
+                .response_code,
+            ResponseCode::Refused,
+            "{zone}"
+        );
+    }
+    assert_eq!(
+        signed(bind, axfr("dyn.test."), &xfr, false)
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::Refused,
+        "transfers are TCP only"
+    );
+    let mut stream = TcpStream::connect(bind).await.unwrap();
+    assert_eq!(
+        framed(&mut stream, &axfr("dyn.test.").to_vec().unwrap())
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::Refused
+    );
+    server.shutdown().await;
+
+    // The journal keeps the change across a restart, with the file mode kept private.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(path("dyn.journal"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    let bind = address("127.0.0.1");
+    let mut server = RunningServer::start(build(bind)).await.unwrap();
+    let again = udp(bind, &query("new.dyn.test.", RecordType::A)).await;
+    assert_eq!(again.answers.len(), 1);
+    // Delete the record again with the same scoped key.
+    let mut owner_record = Record::from_rdata(
+        Name::from_ascii(owner).unwrap(),
+        0,
+        hickory_proto::rr::RData::A(A("192.0.2.77".parse().unwrap())),
+    );
+    owner_record.dns_class = hickory_proto::rr::DNSClass::IN;
+    let delete = hickory_proto::op::update_message::delete_rrset(
+        owner_record,
+        Name::from_ascii("dyn.test.").unwrap(),
+        false,
+    );
+    assert_eq!(
+        signed(bind, delete, &ddns, false)
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::NoError
+    );
+    let gone = udp(bind, &query("new.dyn.test.", RecordType::A)).await;
+    assert_eq!(gone.metadata.response_code, ResponseCode::NXDomain);
+    server.shutdown().await;
+}
+
+async fn served_certificate(address: SocketAddr, trusted: &CertificateDer<'static>) -> Vec<u8> {
+    let stream = TcpStream::connect(address).await.unwrap();
+    let stream = TlsConnector::from(Arc::new(client_tls(trusted.clone(), b"dot")))
+        .connect(ServerName::try_from("localhost").unwrap(), stream)
+        .await
+        .unwrap();
+    stream.get_ref().1.peer_certificates().unwrap()[0].to_vec()
+}
+
+fn write_pair(directory: &std::path::Path) -> CertificateDer<'static> {
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    std::fs::write(directory.join("cert.pem"), cert.pem()).unwrap();
+    std::fs::write(directory.join("key.pem"), signing_key.serialize_pem()).unwrap();
+    cert.der().clone()
+}
+
+#[tokio::test]
+async fn renewed_certificates_replace_the_served_pair_without_a_restart() {
+    let upstream = fixture().await;
+    let (directory, first) = certificates();
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    cfg.listen.udp.clear();
+    cfg.listen.tcp.clear();
+    let dot = address("127.0.0.1");
+    cfg.listen.dot = vec![dot];
+    cfg.listen.certificate = Some(directory.path().join("cert.pem"));
+    cfg.listen.private_key = Some(directory.path().join("key.pem"));
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    assert_eq!(served_certificate(dot, &first).await, first.to_vec());
+    assert_eq!(server.reload_certificates(), lumen_core::Reload::Unchanged);
+    assert!(
+        server
+            .metrics
+            .render()
+            .contains("lumen_dns_certificate_not_after_timestamp_seconds")
+    );
+
+    // A renewal takes effect for the next connection.
+    let second = write_pair(directory.path());
+    assert!(matches!(
+        server.reload_certificates(),
+        lumen_core::Reload::Replaced(not_after) if not_after > 0
+    ));
+    assert_eq!(served_certificate(dot, &second).await, second.to_vec());
+
+    // A half-written or mismatched pair is rejected and the good pair keeps serving.
+    std::fs::write(directory.path().join("cert.pem"), "not a certificate").unwrap();
+    assert_eq!(server.reload_certificates(), lumen_core::Reload::Rejected);
+    assert_eq!(server.reload_certificates(), lumen_core::Reload::Unchanged);
+    assert_eq!(served_certificate(dot, &second).await, second.to_vec());
+    std::fs::write(
+        directory.path().join("cert.pem"),
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            base64::engine::general_purpose::STANDARD.encode(first.as_ref())
+        ),
+    )
+    .unwrap();
+    assert_eq!(server.reload_certificates(), lumen_core::Reload::Rejected);
+    assert_eq!(served_certificate(dot, &second).await, second.to_vec());
+
+    // Fixing the files recovers on the next check.
+    let third = write_pair(directory.path());
+    assert!(matches!(
+        server.reload_certificates(),
+        lumen_core::Reload::Replaced(_)
+    ));
+    assert_eq!(served_certificate(dot, &third).await, third.to_vec());
+    let metrics = server.metrics.render();
+    assert!(metrics.contains("lumen_dns_certificate_reloads_total 2"));
+    assert!(metrics.contains("lumen_dns_certificate_reload_failures_total 2"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn https_records_keep_their_ech_configuration_end_to_end() {
+    use hickory_proto::rr::{
+        RData,
+        rdata::svcb::{SvcParamKey, SvcParamValue},
+    };
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    // base64 of the bytes 00 07 fe 0d 01 02 03, a minimal ECHConfigList shape.
+    let ech = [0u8, 7, 0xfe, 0x0d, 1, 2, 3];
+    let mut text = zone_text("svc.test", "192.0.2.1");
+    text.push_str("svc.test. 60 IN HTTPS 1 Pool.SVC.test. alpn=h2,h3 ech=AAf+DQECAw==\n");
+    cfg.zones = vec![lumen_config::Zone {
+        name: "svc.test".into(),
+        text: Some(text),
+        ..Default::default()
+    }];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    // The first answer is built live and the second is repeated, which is where
+    // a cache or a name rewrite could alter the record.
+    for _ in 0..2 {
+        let reply = udp(bind, &query("svc.test.", RecordType::HTTPS)).await;
+        assert!(reply.metadata.authoritative);
+        let svcb = reply
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                RData::HTTPS(value) => Some(&value.0),
+                _ => None,
+            })
+            .expect("HTTPS answer");
+        assert_eq!(svcb.target_name.to_ascii(), "pool.svc.test.");
+        let has_ech = svcb.svc_params.iter().any(|(key, value)| {
+            *key == SvcParamKey::EchConfigList
+                && matches!(value, SvcParamValue::EchConfigList(list) if list.0 == ech)
+        });
+        assert!(has_ech, "ECH configuration was altered: {svcb:?}");
+        assert!(
+            svcb.svc_params
+                .iter()
+                .any(|(key, _)| *key == SvcParamKey::Alpn)
+        );
+    }
+    server.shutdown().await;
+}
+
+fn dnssec_query(name: &str, kind: RecordType) -> Vec<u8> {
+    let mut query = Message::query();
+    query.metadata.id = 4321;
+    query.metadata.recursion_desired = true;
+    query.add_query(Query::query(Name::from_ascii(name).unwrap(), kind));
+    let mut edns = hickory_proto::op::Edns::new();
+    edns.set_dnssec_ok(true);
+    edns.set_max_payload(1232);
+    query.edns = Some(edns);
+    query.to_vec().unwrap()
+}
+
+#[tokio::test]
+async fn signed_zones_serve_verifiable_signatures_and_proofs_of_absence() {
+    use hickory_proto::dnssec::{Verifier, rdata::DNSSECRData};
+    use hickory_proto::rr::{DNSClass, RData};
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let dir = std::env::temp_dir().join(format!("lumen-signed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_file = dir.join("zone.pem");
+    let description = lumen_resolver::zone_key(
+        &key_file,
+        "signed.test",
+        lumen_config::SigningAlgorithm::Ed25519,
+    )
+    .unwrap();
+    assert!(description.contains("IN DS "));
+    let mut cfg = config(upstream.address, bind);
+    cfg.zones = vec![lumen_config::Zone {
+        name: "signed.test".into(),
+        text: Some(zone_text("signed.test", "192.0.2.1")),
+        dnssec: Some(lumen_config::ZoneSigning {
+            key_file,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+
+    // The zone's own DNSKEY, then a signature over the A set that it must verify.
+    let keys = udp(bind, &dnssec_query("signed.test.", RecordType::DNSKEY)).await;
+    let dnskey = keys
+        .answers
+        .iter()
+        .find_map(|record| match &record.data {
+            RData::DNSSEC(DNSSECRData::DNSKEY(key)) => Some(key.clone()),
+            _ => None,
+        })
+        .expect("DNSKEY served");
+    let reply = udp(bind, &dnssec_query("host.signed.test.", RecordType::A)).await;
+    assert!(reply.metadata.authoritative);
+    let set: Vec<_> = reply
+        .answers
+        .iter()
+        .filter(|record| record.record_type() == RecordType::A)
+        .collect();
+    let sig = reply
+        .answers
+        .iter()
+        .find_map(|record| match &record.data {
+            RData::DNSSEC(DNSSECRData::RRSIG(sig)) => Some(sig.clone()),
+            _ => None,
+        })
+        .expect("RRSIG with the answer");
+    assert_eq!(sig.input().key_tag, dnskey.calculate_key_tag().unwrap());
+    dnskey
+        .verify_rrsig(
+            &Name::from_ascii("host.signed.test.").unwrap(),
+            DNSClass::IN,
+            &sig,
+            set.iter().copied(),
+        )
+        .expect("signature verifies against the zone key");
+
+    // A name that does not exist comes with NSEC and its signature.
+    let missing = udp(bind, &dnssec_query("nope.signed.test.", RecordType::A)).await;
+    assert_eq!(
+        missing.metadata.response_code,
+        hickory_proto::op::ResponseCode::NXDomain
+    );
+    assert!(
+        missing
+            .authorities
+            .iter()
+            .any(|r| r.record_type() == RecordType::NSEC)
+    );
+    assert!(
+        missing
+            .authorities
+            .iter()
+            .any(|r| r.record_type() == RecordType::RRSIG)
+    );
+
+    // A client that did not ask for DNSSEC data gets none.
+    let plain = udp(bind, &query("host.signed.test.", RecordType::A)).await;
+    assert!(
+        plain
+            .answers
+            .iter()
+            .all(|r| r.record_type() != RecordType::RRSIG)
+    );
+    server.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn forwarded_https_records_keep_ech_over_udp_tcp_and_the_cache() {
+    async fn tcp(address: SocketAddr, packet: &[u8]) -> Message {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let length = u16::try_from(packet.len()).unwrap().to_be_bytes();
+        stream.write_all(&length).await.unwrap();
+        stream.write_all(packet).await.unwrap();
+        let mut size = [0; 2];
+        stream.read_exact(&mut size).await.unwrap();
+        let mut reply = vec![0; usize::from(u16::from_be_bytes(size))];
+        stream.read_exact(&mut reply).await.unwrap();
+        Message::from_vec(&reply).unwrap()
+    }
+    use hickory_proto::rr::RData;
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let cfg = config(upstream.address, bind);
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    let check = |reply: &Message| {
+        let svcb = reply
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                RData::HTTPS(value) => Some(&value.0),
+                _ => None,
+            })
+            .expect("HTTPS answer");
+        assert!(
+            svcb.target_name
+                .to_ascii()
+                .eq_ignore_ascii_case("pool.example.")
+        );
+        assert!(svcb.svc_params.iter().any(|(key, value)| {
+            *key == SvcParamKey::EchConfigList
+                && matches!(value, SvcParamValue::EchConfigList(list) if list.0 == ECH_CONFIG)
+        }));
+        assert!(
+            svcb.svc_params
+                .iter()
+                .any(|(key, _)| *key == SvcParamKey::Alpn)
+        );
+    };
+    // First answer is live from the upstream, the next ones can come from the cache.
+    for _ in 0..3 {
+        check(&udp(bind, &query("svcb.example.", RecordType::HTTPS)).await);
+    }
+    check(&tcp(bind, &query("svcb.example.", RecordType::HTTPS)).await);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn dhcp_leases_become_dns_names_and_are_off_by_default() {
+    use dhcproto::{
+        Decodable, Decoder, Encodable,
+        v4::{self, DhcpOption, HType, MessageType, Opcode, OptionCode},
+    };
+    // Nothing listens for DHCP unless asked to.
+    assert!(!Config::default().dhcp.enabled);
+
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let directory = tempfile::tempdir().unwrap();
+    let port = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut cfg = config(upstream.address, bind);
+    cfg.dhcp = lumen_config::Dhcp {
+        enabled: true,
+        domain: Some("home.lan".into()),
+        lease_file: Some(directory.path().join("leases.db")),
+        listen4: SocketAddr::from(([127, 0, 0, 1], port)),
+        scopes: vec![lumen_config::DhcpScope {
+            interface: None,
+            subnet: "192.168.50.0/24".parse().unwrap(),
+            server_address: "192.168.50.1".parse().unwrap(),
+            range_start: "192.168.50.100".parse().unwrap(),
+            range_end: "192.168.50.110".parse().unwrap(),
+            router: None,
+            dns: Vec::new(),
+            lease_secs: 3600,
+            next_server: None,
+            boot_file: None,
+            forcerenew: false,
+            reservations: Vec::new(),
+        }],
+        ..lumen_config::Dhcp::default()
+    };
+    let mut server = RunningServer::start(cfg).await.unwrap();
+
+    let message = |kind: MessageType, requested: Option<std::net::Ipv4Addr>| {
+        let mut message = v4::Message::new_with_id(
+            9,
+            [0; 4].into(),
+            [0; 4].into(),
+            [0; 4].into(),
+            [0; 4].into(),
+            &[2, 0, 0, 0, 0, 7],
+        );
+        message.set_opcode(Opcode::BootRequest);
+        message.set_htype(HType::Eth);
+        let options = message.opts_mut();
+        options.insert(DhcpOption::MessageType(kind));
+        options.insert(DhcpOption::Hostname("Laptop".into()));
+        if let Some(ip) = requested {
+            options.insert(DhcpOption::RequestedIpAddress(ip));
+        }
+        message
+    };
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_address = SocketAddr::from(([127, 0, 0, 1], port));
+    let exchange = async |message: v4::Message| {
+        client
+            .send_to(&message.to_vec().unwrap(), server_address)
+            .await
+            .unwrap();
+        let mut buffer = [0u8; 1500];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(3), client.recv_from(&mut buffer))
+                .await
+                .expect("the DHCP server answered")
+                .unwrap();
+        v4::Message::decode(&mut Decoder::new(&buffer[..length])).unwrap()
+    };
+    let offer = exchange(message(MessageType::Discover, None)).await;
+    let ip = offer.yiaddr();
+    // An offer is not a lease: the name does not resolve yet.
+    let before = udp(bind, &query("laptop.home.lan.", RecordType::A)).await;
+    assert!(before.answers.is_empty());
+    let ack = exchange(message(MessageType::Request, Some(ip))).await;
+    assert!(matches!(
+        ack.opts().get(OptionCode::MessageType),
+        Some(DhcpOption::MessageType(MessageType::Ack))
+    ));
+
+    // The device is now a DNS name, forward and reverse, answered authoritatively.
+    let forward = udp(bind, &query("laptop.home.lan.", RecordType::A)).await;
+    assert!(forward.metadata.authoritative);
+    assert_eq!(forward.answers.len(), 1);
+    assert_eq!(forward.answers[0].data.to_string(), ip.to_string());
+    let octets = ip.octets();
+    let reverse = udp(
+        bind,
+        &query(
+            &format!(
+                "{}.{}.{}.{}.in-addr.arpa.",
+                octets[3], octets[2], octets[1], octets[0]
+            ),
+            RecordType::PTR,
+        ),
+    )
+    .await;
+    assert_eq!(reverse.answers.len(), 1);
+    assert!(
+        reverse.answers[0]
+            .data
+            .to_string()
+            .eq_ignore_ascii_case("laptop.home.lan.")
+    );
+    server.shutdown().await;
+}
+
+/// What an authority that serves a parent and its child from the same servers sends for a DS
+/// query at the child (Google's `l.google.com` does this).
+#[derive(Clone, Copy)]
+enum OddDs {
+    /// `NOERROR` with only the child's own SOA in the authority section.
+    ChildSoa = 0,
+    /// `NOERROR` with an empty authority section (Cloudflare's resolver does this).
+    Empty = 1,
+}
+
+/// A signed root with an unsigned `google.` below it (no DS, proven by NSEC), a separate
+/// unsigned `google.` zone with a CNAME into `l.google.`, and a front end that answers the DS
+/// query for `l.google.` in an odd shape. Returns the front end's address, the trust anchor file,
+/// and the shape switch.
+struct OddDsAuthority {
+    address: SocketAddr,
+    anchor: std::path::PathBuf,
+    shape: Arc<std::sync::atomic::AtomicU8>,
+    ds_queries: Arc<AtomicUsize>,
+    _directory: tempfile::TempDir,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for OddDsAuthority {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+async fn odd_ds_authority() -> OddDsAuthority {
+    use hickory_server::{
+        dnssec::NxProofKind,
+        proto::{
+            dnssec::{Algorithm, DnssecSigner, SigningKey, crypto::EcdsaSigningKey, rdata::DNSKEY},
+            serialize::txt::Parser,
+        },
+        server::Server,
+        store::in_memory::InMemoryZoneHandler,
+        zone_handler::{AxfrPolicy, Catalog, ZoneType},
+    };
+    let roots = Name::root();
+    let root_text = ". 60 IN SOA ns. hostmaster. 1 60 60 60 60\n. 60 IN NS ns.\nns. 60 IN A 127.0.0.1\ngoogle. 60 IN NS ns.\nbroken. 60 IN NS ns.\nbroken. 60 IN DS 12345 13 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nvalid.example. 60 IN A 192.0.2.1\nbogus.example. 60 IN A 192.0.2.2\n";
+    let (_, records) = Parser::new(root_text, None, Some(roots.clone()))
+        .parse()
+        .unwrap();
+    let mut root: InMemoryZoneHandler = InMemoryZoneHandler::new(
+        roots.clone(),
+        records,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        Some(NxProofKind::Nsec),
+    )
+    .unwrap();
+    let der = EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP256SHA256).unwrap();
+    let key = EcdsaSigningKey::from_pkcs8(&der, Algorithm::ECDSAP256SHA256).unwrap();
+    let dnskey = DNSKEY::new(true, true, false, key.to_public_key().unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    let anchor = directory.path().join("root.key");
+    std::fs::write(&anchor, format!(". 60 IN DNSKEY {dnskey}\n")).unwrap();
+    root.add_zone_signing_key_mut(DnssecSigner::new(
+        dnskey,
+        Box::new(key),
+        roots.clone(),
+        Duration::from_secs(3600),
+    ))
+    .unwrap();
+    root.upsert_mut(
+        Record::from_rdata(
+            Name::from_ascii("svcb.example.").unwrap(),
+            60,
+            RData::HTTPS(hickory_proto::rr::rdata::HTTPS(
+                hickory_proto::rr::rdata::SVCB::new(
+                    1,
+                    Name::from_ascii("pool.example.").unwrap(),
+                    vec![
+                        (
+                            SvcParamKey::Alpn,
+                            SvcParamValue::Alpn(Alpn(vec!["h2".into(), "h3".into()])),
+                        ),
+                        (
+                            SvcParamKey::EchConfigList,
+                            SvcParamValue::EchConfigList(EchConfigList(ECH_CONFIG.to_vec())),
+                        ),
+                    ],
+                ),
+            )),
+        ),
+        1,
+    );
+    root.secure_zone_mut().unwrap();
+    // A record changed after signing keeps its old signature: bogus.
+    root.upsert_mut(
+        Record::from_rdata(
+            Name::from_ascii("bogus.example.").unwrap(),
+            60,
+            RData::A(A::new(192, 0, 2, 99)),
+        ),
+        1,
+    );
+
+    let google_text = "google. 60 IN SOA ns.google. hostmaster.google. 1 60 60 60 60\ngoogle. 60 IN NS ns.google.\nns.google. 60 IN A 127.0.0.1\nwww.google. 60 IN A 192.0.2.10\nclients4.google. 60 IN CNAME clients.l.google.\nclients1.google. 60 IN CNAME clients.l.google.\nl.google. 60 IN NS ns.google.\n";
+    let google = Name::from_ascii("google.").unwrap();
+    let (_, records) = Parser::new(google_text, None, Some(google.clone()))
+        .parse()
+        .unwrap();
+    let child: InMemoryZoneHandler = InMemoryZoneHandler::new(
+        google.clone(),
+        records,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        None,
+    )
+    .unwrap();
+
+    let child_text = "l.google. 60 IN SOA ns.google. hostmaster.google. 1 60 60 60 60\nl.google. 60 IN NS ns.google.\nclients.l.google. 60 IN A 192.0.2.20\n";
+    let l_google = Name::from_ascii("l.google.").unwrap();
+    let (_, records) = Parser::new(child_text, None, Some(l_google.clone()))
+        .parse()
+        .unwrap();
+    let l_google_zone: InMemoryZoneHandler = InMemoryZoneHandler::new(
+        l_google.clone(),
+        records,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        None,
+    )
+    .unwrap();
+    let broken_text = "broken. 60 IN SOA ns.broken. hostmaster.broken. 1 60 60 60 60\nbroken. 60 IN NS ns.broken.\nns.broken. 60 IN A 127.0.0.1\nwww.broken. 60 IN A 192.0.2.30\nclients.l.broken. 60 IN A 192.0.2.31\n";
+    let broken = Name::from_ascii("broken.").unwrap();
+    let (_, records) = Parser::new(broken_text, None, Some(broken.clone()))
+        .parse()
+        .unwrap();
+    // Unsigned, although the root says it must be signed: everything in it is bogus.
+    let broken_zone: InMemoryZoneHandler = InMemoryZoneHandler::new(
+        broken.clone(),
+        records,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        None,
+    )
+    .unwrap();
+
+    let serve = |zones: Vec<(Name, InMemoryZoneHandler)>| async move {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut catalog = Catalog::new();
+        for (origin, zone) in zones {
+            catalog.upsert(origin.into(), vec![Arc::new(zone)]);
+        }
+        let mut server = Server::new(catalog);
+        server.register_socket(socket);
+        let task = tokio::spawn(async move {
+            server.block_until_done().await.unwrap();
+        });
+        (address, task)
+    };
+    let (root_address, root_task) = serve(vec![(roots, root)]).await;
+    let (google_address, google_task) =
+        serve(vec![(google, child), (l_google, l_google_zone)]).await;
+    let (broken_address, broken_task) = serve(vec![(broken, broken_zone)]).await;
+
+    let front = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = front.local_addr().unwrap();
+    let shape = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let ds_queries = Arc::new(AtomicUsize::new(0));
+    let (switch, counter) = (Arc::clone(&shape), Arc::clone(&ds_queries));
+    let front_task = tokio::spawn(async move {
+        let mut buffer = vec![0u8; 4096];
+        loop {
+            let Ok((size, from)) = front.recv_from(&mut buffer).await else {
+                continue;
+            };
+            let Ok(request) = Message::from_vec(&buffer[..size]) else {
+                continue;
+            };
+            let Some(question) = request.queries.first() else {
+                continue;
+            };
+            let name = question.name().to_ascii().to_ascii_lowercase();
+            let kind = question.query_type();
+            // Every DS query inside the child zone gets the odd answer.
+            let child = ["l.google.", "l.broken."]
+                .into_iter()
+                .find(|child| name == *child || name.ends_with(&format!(".{child}")));
+            if let (RecordType::DS, Some(child)) = (kind, child) {
+                counter.fetch_add(1, Ordering::Relaxed);
+                let mut reply = Message::response(request.metadata.id, request.metadata.op_code);
+                reply.metadata.response_code = ResponseCode::NoError;
+                reply.metadata.authoritative = true;
+                reply.metadata.recursion_desired = request.metadata.recursion_desired;
+                reply.add_query(question.clone());
+                if switch.load(Ordering::Relaxed) == OddDs::ChildSoa as u8 {
+                    reply.add_authority(Record::from_rdata(
+                        Name::from_ascii(child).unwrap(),
+                        60,
+                        RData::SOA(SOA::new(
+                            Name::from_ascii("ns.google.").unwrap(),
+                            Name::from_ascii("hostmaster.google.").unwrap(),
+                            1,
+                            60,
+                            60,
+                            60,
+                            60,
+                        )),
+                    ));
+                }
+                if request.edns.is_some() {
+                    let mut edns = Edns::new();
+                    edns.set_dnssec_ok(true).set_max_payload(1232);
+                    reply.edns = Some(edns);
+                }
+                let _ = front.send_to(&reply.to_vec().unwrap(), from).await;
+                continue;
+            }
+            // Everything under google. except the parent's DS answer comes from the child zone.
+            let below = |zone: &str| {
+                (name == zone || name.ends_with(&format!(".{zone}")))
+                    && !(kind == RecordType::DS && name == zone)
+            };
+            let backend = if below("google.") {
+                google_address
+            } else if below("broken.") {
+                broken_address
+            } else {
+                root_address
+            };
+            let forward = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            forward.send_to(&buffer[..size], backend).await.unwrap();
+            let mut answer = vec![0u8; 4096];
+            if let Ok(Ok((length, _))) =
+                timeout(Duration::from_secs(2), forward.recv_from(&mut answer)).await
+            {
+                let _ = front.send_to(&answer[..length], from).await;
+            }
+        }
+    });
+    OddDsAuthority {
+        address,
+        anchor,
+        shape,
+        ds_queries,
+        _directory: directory,
+        tasks: vec![root_task, google_task, broken_task, front_task],
+    }
+}
+
+async fn answer_for(bind: SocketAddr, name: &str) -> Message {
+    udp(bind, &dnssec_query(name, RecordType::A)).await
+}
+
+#[tokio::test]
+async fn forward_mode_recovers_names_below_an_unsigned_zone_with_an_odd_ds_answer() {
+    for shape in [OddDs::ChildSoa, OddDs::Empty] {
+        let authority = odd_ds_authority().await;
+        authority.shape.store(shape as u8, Ordering::Relaxed);
+        let bind = address("127.0.0.1");
+        let mut cfg = config(authority.address, bind);
+        cfg.resolver.dnssec = true;
+        cfg.resolver.trust_anchor = Some(authority.anchor.clone());
+        cfg.resolver.diagnostics = true;
+        let metrics = address("127.0.0.1");
+        cfg.metrics = Some(metrics);
+        let mut server = RunningServer::start(cfg).await.unwrap();
+
+        // The name and a CNAME into the child zone both resolve, and are not marked validated.
+        for alias in ["clients4.google.", "clients1.google."] {
+            let chain = answer_for(bind, alias).await;
+            assert_eq!(
+                chain.metadata.response_code,
+                ResponseCode::NoError,
+                "{alias}"
+            );
+            assert!(!chain.metadata.authentic_data);
+            assert!(
+                chain
+                    .answers
+                    .iter()
+                    .any(|r| r.record_type() == RecordType::CNAME)
+            );
+            assert!(
+                chain
+                    .answers
+                    .iter()
+                    .any(|r| r.record_type() == RecordType::A)
+            );
+        }
+        let direct = answer_for(bind, "clients.l.google.").await;
+        assert_eq!(direct.metadata.response_code, ResponseCode::NoError);
+        assert!(!direct.metadata.authentic_data);
+        assert!(
+            direct
+                .answers
+                .iter()
+                .any(|r| r.record_type() == RecordType::A)
+        );
+        assert!(
+            authority.ds_queries.load(Ordering::Relaxed) > 0,
+            "the odd DS answer was really sent"
+        );
+        // Names that never failed are untouched, and the metric counted the recoveries.
+        assert_eq!(
+            answer_for(bind, "www.google.").await.metadata.response_code,
+            ResponseCode::NoError
+        );
+        let mut stream = TcpStream::connect(metrics).await.unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut text = String::new();
+        stream.read_to_string(&mut text).await.unwrap();
+        let counted = text
+            .lines()
+            .find(|line| line.starts_with("lumen_dns_forward_insecure_recoveries_total "))
+            .expect("the recovery counter is exported");
+        assert!(!counted.ends_with(" 0"), "{counted}");
+        assert!(!text.contains("google"), "no names in metrics");
+
+        // A signed zone keeps its protection: valid is validated, tampered data still fails.
+        let valid = answer_for(bind, "valid.example.").await;
+        assert_eq!(valid.metadata.response_code, ResponseCode::NoError);
+        assert!(valid.metadata.authentic_data);
+        assert_eq!(
+            answer_for(bind, "bogus.example.")
+                .await
+                .metadata
+                .response_code,
+            ResponseCode::ServFail
+        );
+        assert_eq!(
+            answer_for(bind, "absent.example.")
+                .await
+                .metadata
+                .response_code,
+            ResponseCode::NXDomain
+        );
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn forward_mode_does_not_recover_below_a_bogus_ancestor_or_when_validation_is_off() {
+    let authority = odd_ds_authority().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(authority.address, bind);
+    cfg.resolver.dnssec = true;
+    cfg.resolver.trust_anchor = Some(authority.anchor.clone());
+    let mut server = RunningServer::start(cfg.clone()).await.unwrap();
+    // `broken.` has a DS in the signed root but is not signed itself: bogus. Nothing below it may
+    // be rescued, whether or not the child zone answers DS oddly.
+    for name in ["www.broken.", "clients.l.broken."] {
+        assert_eq!(
+            answer_for(bind, name).await.metadata.response_code,
+            ResponseCode::ServFail,
+            "{name}"
+        );
+    }
+    server.shutdown().await;
+    // With validation off nothing is checked, so nothing needs recovering.
+    cfg.resolver.dnssec = false;
+    cfg.resolver.trust_anchor = None;
+    let mut plain = RunningServer::start(cfg).await.unwrap();
+    assert_eq!(
+        answer_for(bind, "clients.l.google.")
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::NoError
+    );
+    plain.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_usable_forward_answer_is_never_asked_again_elsewhere_and_recovery_is_bounded() {
+    let authority = odd_ds_authority().await;
+    // A second provider that counts what it is asked and never answers.
+    let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let other_address = other.local_addr().unwrap();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&asked);
+    let counting = tokio::spawn(async move {
+        let mut buffer = [0u8; 512];
+        loop {
+            if other.recv_from(&mut buffer).await.is_ok() {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+    let bind = address("127.0.0.1");
+    let mut cfg = config(authority.address, bind);
+    cfg.resolver.dnssec = true;
+    cfg.resolver.trust_anchor = Some(authority.anchor.clone());
+    cfg.resolver.strategy = Some(ForwardStrategy::Failover);
+    cfg.resolver.upstreams.push(Upstream {
+        address: other_address,
+        protocol: UpstreamProtocol::Udp,
+        server_name: None,
+        doh_path: None,
+    });
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    for name in [
+        "absent.example.",
+        "valid.example.",
+        "clients.l.google.",
+        "bogus.example.",
+    ] {
+        answer_for(bind, name).await;
+    }
+    assert_eq!(
+        asked.load(Ordering::Relaxed),
+        0,
+        "the first provider's answers are final"
+    );
+    // Many concurrent recoveries finish together and leave the server answering.
+    let mut set = JoinSet::new();
+    for _ in 0..40 {
+        set.spawn(async move {
+            answer_for(bind, "clients4.google.")
+                .await
+                .metadata
+                .response_code
+        });
+    }
+    while let Some(code) = set.join_next().await {
+        assert_eq!(code.unwrap(), ResponseCode::NoError);
+    }
+    assert_eq!(
+        answer_for(bind, "www.google.").await.metadata.response_code,
+        ResponseCode::NoError
+    );
+    server.shutdown().await;
+    counting.abort();
+}
+
+#[tokio::test]
+async fn validated_forwarded_https_records_keep_ech_and_are_marked_authentic() {
+    let authority = odd_ds_authority().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(authority.address, bind);
+    cfg.resolver.dnssec = true;
+    cfg.resolver.trust_anchor = Some(authority.anchor.clone());
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    // First live, then from the cache: the signed record is the same each time.
+    for _ in 0..3 {
+        let reply = udp(bind, &dnssec_query("svcb.example.", RecordType::HTTPS)).await;
+        assert_eq!(reply.metadata.response_code, ResponseCode::NoError);
+        assert!(
+            reply.metadata.authentic_data,
+            "validated against the trust anchor"
+        );
+        let svcb = reply
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                RData::HTTPS(https) => Some(&https.0),
+                _ => None,
+            })
+            .expect("an HTTPS record");
+        assert!(svcb.svc_params.iter().any(|(key, value)| {
+            *key == SvcParamKey::EchConfigList
+                && matches!(value, SvcParamValue::EchConfigList(list) if list.0 == ECH_CONFIG)
+        }));
+        assert!(svcb.svc_params.iter().any(|(key, value)| {
+            *key == SvcParamKey::Alpn
+                && matches!(value, SvcParamValue::Alpn(list) if list.0 == ["h2", "h3"])
+        }));
+    }
+    server.shutdown().await;
+}
+
+/// A signed zone `signed.test` served by one Lumen.
+async fn signed_authority(signing: lumen_config::ZoneSigning) -> (RunningServer, SocketAddr) {
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    cfg.zones = vec![lumen_config::Zone {
+        name: "signed.test".into(),
+        text: Some(zone_text("signed.test", "192.0.2.1")),
+        dnssec: Some(signing),
+        ..Default::default()
+    }];
+    (RunningServer::start(cfg).await.unwrap(), bind)
+}
+
+/// Check every signature on the answers in `reply` against the DNSKEYs the zone publishes.
+/// Returns the key tags that signed `kind`, sorted.
+fn verified_signers(
+    reply: &Message,
+    published: &[hickory_proto::dnssec::rdata::DNSKEY],
+    owner: &str,
+    kind: RecordType,
+) -> Vec<u16> {
+    use hickory_proto::dnssec::{Verifier, rdata::DNSSECRData};
+    use hickory_proto::rr::DNSClass;
+    let set: Vec<_> = reply
+        .answers
+        .iter()
+        .filter(|r| r.record_type() == kind)
+        .collect();
+    assert!(!set.is_empty(), "no {kind:?} records in the answer");
+    let mut tags = Vec::new();
+    for record in &reply.answers {
+        let RData::DNSSEC(DNSSECRData::RRSIG(sig)) = &record.data else {
+            continue;
+        };
+        if sig.input().type_covered != kind {
+            continue;
+        }
+        let key = published
+            .iter()
+            .find(|key| key.calculate_key_tag().unwrap() == sig.input().key_tag)
+            .expect("a signature by a key that is not published");
+        key.verify_rrsig(
+            &Name::from_ascii(owner).unwrap(),
+            DNSClass::IN,
+            sig,
+            set.iter().copied(),
+        )
+        .expect("the signature verifies against its published key");
+        tags.push(sig.input().key_tag);
+    }
+    tags.sort_unstable();
+    tags
+}
+
+fn published_keys(reply: &Message) -> Vec<hickory_proto::dnssec::rdata::DNSKEY> {
+    use hickory_proto::dnssec::rdata::DNSSECRData;
+    reply
+        .answers
+        .iter()
+        .filter_map(|record| match &record.data {
+            RData::DNSSEC(DNSSECRData::DNSKEY(key)) => Some(key.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn nsec3_signed_zones_prove_absence_with_hashed_names() {
+    use hickory_proto::dnssec::{Nsec3HashAlgorithm, rdata::DNSSECRData};
+    use hickory_proto::rr::RecordType as T;
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("zone.pem");
+    lumen_resolver::zone_key(&key, "signed.test", lumen_config::SigningAlgorithm::Ed25519).unwrap();
+    let (mut server, bind) = signed_authority(lumen_config::ZoneSigning {
+        key_file: key,
+        denial: lumen_config::Denial::Nsec3,
+        ..Default::default()
+    })
+    .await;
+    let keys = published_keys(&udp(bind, &dnssec_query("signed.test.", T::DNSKEY)).await);
+    assert_eq!(keys.len(), 1);
+
+    // A missing name is answered with NSEC3 records, their signatures, and no NSEC.
+    let missing = udp(bind, &dnssec_query("nope.signed.test.", T::A)).await;
+    assert_eq!(missing.metadata.response_code, ResponseCode::NXDomain);
+    let kinds: Vec<T> = missing
+        .authorities
+        .iter()
+        .map(hickory_proto::rr::Record::record_type)
+        .collect();
+    assert!(
+        kinds.contains(&T::NSEC3) && kinds.contains(&T::RRSIG),
+        "{kinds:?}"
+    );
+    assert!(!kinds.contains(&T::NSEC));
+    // The closest encloser (the apex) has an NSEC3 record, and the next closer name's hash falls
+    // between one record's hash and its successor: the proof of RFC 5155 section 8.4.
+    let hash = |name: &str| {
+        Nsec3HashAlgorithm::SHA1
+            .hash(&[], &Name::from_ascii(name).unwrap(), 0)
+            .unwrap()
+            .as_ref()
+            .to_vec()
+    };
+    let chain: Vec<(Vec<u8>, Vec<u8>)> = missing
+        .authorities
+        .iter()
+        .filter_map(|record| match &record.data {
+            RData::DNSSEC(DNSSECRData::NSEC3(nsec3)) => {
+                let label = record.name.iter().next().unwrap();
+                Some((
+                    data_encoding::BASE32_DNSSEC.decode(label).unwrap(),
+                    nsec3.next_hashed_owner_name().to_vec(),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    let apex = hash("signed.test.");
+    let next_closer = hash("nope.signed.test.");
+    assert!(
+        chain.iter().any(|(owner, _)| *owner == apex),
+        "closest encloser matched"
+    );
+    assert!(
+        chain.iter().any(|(owner, next)| {
+            if owner < next {
+                *owner < next_closer && next_closer < *next
+            } else {
+                // The last record wraps around to the first.
+                next_closer > *owner || next_closer < *next
+            }
+        }),
+        "next closer name covered"
+    );
+    let params = udp(bind, &dnssec_query("signed.test.", T::NSEC3PARAM)).await;
+    assert!(
+        params
+            .answers
+            .iter()
+            .any(|r| r.record_type() == T::NSEC3PARAM)
+    );
+    // A name that exists without the asked type is proven the same way.
+    let nodata = udp(bind, &dnssec_query("host.signed.test.", T::AAAA)).await;
+    assert_eq!(nodata.metadata.response_code, ResponseCode::NoError);
+    assert!(
+        nodata
+            .authorities
+            .iter()
+            .any(|r| r.record_type() == T::NSEC3)
+    );
+    // And the data itself is signed and verifies.
+    let host = udp(bind, &dnssec_query("host.signed.test.", T::A)).await;
+    assert_eq!(
+        verified_signers(&host, &keys, "host.signed.test.", T::A).len(),
+        1
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_double_signature_rollover_publishes_both_keys_and_signs_with_both() {
+    use hickory_proto::rr::RecordType as T;
+    let dir = tempfile::tempdir().unwrap();
+    let (old_key, new_key) = (dir.path().join("old.pem"), dir.path().join("new.pem"));
+    for path in [&old_key, &new_key] {
+        lumen_resolver::zone_key(path, "signed.test", lumen_config::SigningAlgorithm::Ed25519)
+            .unwrap();
+    }
+    let tag = |path: &std::path::Path| {
+        // The key's tag, as the zone publishes it.
+        let text =
+            lumen_resolver::zone_key(path, "signed.test", lumen_config::SigningAlgorithm::Ed25519)
+                .unwrap();
+        text.lines()
+            .find(|line| line.contains(" IN DS "))
+            .and_then(|line| line.split_whitespace().nth(3))
+            .and_then(|tag| tag.parse::<u16>().ok())
+            .unwrap()
+    };
+    let (old_tag, new_tag) = (tag(&old_key), tag(&new_key));
+    assert_ne!(old_tag, new_tag);
+
+    // Stage 1: both keys are published, and every record set carries both signatures, so a
+    // parent whose DS names either key can vouch for the zone.
+    let (mut server, bind) = signed_authority(lumen_config::ZoneSigning {
+        key_file: old_key.clone(),
+        next_key_file: Some(new_key.clone()),
+        ..Default::default()
+    })
+    .await;
+    let key_reply = udp(bind, &dnssec_query("signed.test.", T::DNSKEY)).await;
+    let keys = published_keys(&key_reply);
+    let mut published: Vec<u16> = keys
+        .iter()
+        .map(|k| k.calculate_key_tag().unwrap())
+        .collect();
+    published.sort_unstable();
+    let mut both = vec![old_tag, new_tag];
+    both.sort_unstable();
+    assert_eq!(published, both, "both keys are published");
+    assert_eq!(
+        verified_signers(&key_reply, &keys, "signed.test.", T::DNSKEY),
+        both
+    );
+    let host = udp(bind, &dnssec_query("host.signed.test.", T::A)).await;
+    assert_eq!(
+        verified_signers(&host, &keys, "host.signed.test.", T::A),
+        both
+    );
+    server.shutdown().await;
+
+    // Stage 2: the old key is gone. One key is published and signs everything.
+    let (mut server, bind) = signed_authority(lumen_config::ZoneSigning {
+        key_file: new_key,
+        ..Default::default()
+    })
+    .await;
+    let key_reply = udp(bind, &dnssec_query("signed.test.", T::DNSKEY)).await;
+    let keys = published_keys(&key_reply);
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].calculate_key_tag().unwrap(), new_tag);
+    let host = udp(bind, &dnssec_query("host.signed.test.", T::A)).await;
+    assert_eq!(
+        verified_signers(&host, &keys, "host.signed.test.", T::A),
+        vec![new_tag]
+    );
+    server.shutdown().await;
+}
+
+/// A pretend mDNS device answers whoever asked, from a fresh socket.
+async fn mdns_reply(from: SocketAddr, reply: &Message) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket
+        .send_to(&reply.to_vec().unwrap(), from)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_mdns_discovery_proxy_answers_dns_questions_from_what_devices_announce() {
+    use hickory_proto::rr::rdata::{PTR, SRV, TXT};
+    // A pretend device on loopback. It answers mDNS questions about two names, to whoever asked.
+    let device = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let device_address = device.local_addr().unwrap();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&asked);
+    let responder = tokio::spawn(async move {
+        let mut buffer = vec![0u8; 2048];
+        loop {
+            let (size, from) = device.recv_from(&mut buffer).await.unwrap();
+            let Ok(request) = Message::from_vec(&buffer[..size]) else {
+                continue;
+            };
+            let Some(question) = request.queries.first() else {
+                continue;
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+            let name = question.name().to_ascii().to_lowercase();
+            let mut reply = Message::response(0, hickory_proto::op::OpCode::Query);
+            reply.metadata.authoritative = true;
+            let address = |host: &str, last: u8| {
+                let mut record = Record::from_rdata(
+                    Name::from_ascii(host).unwrap(),
+                    120,
+                    RData::A(A::new(192, 168, 1, last)),
+                );
+                record.mdns_cache_flush = true;
+                record
+            };
+            match (name.as_str(), question.query_type()) {
+                ("tv.local.", RecordType::A) => {
+                    reply.add_answer(address("tv.local.", 60));
+                }
+                ("_http._tcp.local.", RecordType::PTR) => {
+                    reply.add_answer(Record::from_rdata(
+                        Name::from_ascii("_http._tcp.local.").unwrap(),
+                        4500,
+                        RData::PTR(PTR(Name::from_ascii("Wiki._http._tcp.local.").unwrap())),
+                    ));
+                    reply.add_additional(Record::from_rdata(
+                        Name::from_ascii("Wiki._http._tcp.local.").unwrap(),
+                        120,
+                        RData::SRV(SRV::new(
+                            0,
+                            0,
+                            8080,
+                            Name::from_ascii("box.local.").unwrap(),
+                        )),
+                    ));
+                    reply.add_additional(Record::from_rdata(
+                        Name::from_ascii("Wiki._http._tcp.local.").unwrap(),
+                        4500,
+                        RData::TXT(TXT::new(vec!["path=/wiki".into()])),
+                    ));
+                    reply.add_additional(address("box.local.", 70));
+                }
+                _ => continue,
+            }
+            mdns_reply(from, &reply).await;
+        }
+    });
+
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    cfg.mdns = lumen_config::Mdns {
+        enabled: true,
+        interfaces: vec!["lo0".into()],
+        domain: Some("mdns.home.test".into()),
+        wait_ms: 800,
+        group4: Some(device_address),
+        ipv6: false,
+        ..lumen_config::Mdns::default()
+    };
+    let mut server = RunningServer::start(cfg).await.unwrap();
+
+    // A name only a device knows: asked of the network, answered under the domain, flagged
+    // authoritative, with a TTL no longer than the cap.
+    let tv = udp(bind, &query("TV.mdns.home.test.", RecordType::A)).await;
+    assert_eq!(tv.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(tv.answers.len(), 1);
+    assert_eq!(tv.answers[0].data, RData::A(A::new(192, 168, 1, 60)));
+    assert_eq!(
+        tv.answers[0].name.to_ascii().to_lowercase(),
+        "tv.mdns.home.test."
+    );
+    assert!(tv.answers[0].ttl <= 120);
+    let asked_once = asked.load(Ordering::Relaxed);
+    assert!(asked_once >= 1);
+    // The second time it comes from memory: nothing more is asked.
+    let again = udp(bind, &query("tv.mdns.home.test.", RecordType::A)).await;
+    assert_eq!(again.answers.len(), 1);
+    assert_eq!(asked.load(Ordering::Relaxed), asked_once);
+
+    // Browsing: the service type lists the instance, with its service, text and address alongside.
+    let browse = udp(bind, &query("_http._tcp.mdns.home.test.", RecordType::PTR)).await;
+    assert_eq!(browse.answers.len(), 1);
+    let RData::PTR(target) = &browse.answers[0].data else {
+        panic!("not a PTR");
+    };
+    assert_eq!(
+        target.0.to_ascii().to_lowercase(),
+        "wiki._http._tcp.mdns.home.test."
+    );
+    let kinds: Vec<RecordType> = browse.additionals.iter().map(Record::record_type).collect();
+    assert!(
+        kinds.contains(&RecordType::SRV)
+            && kinds.contains(&RecordType::TXT)
+            && kinds.contains(&RecordType::A),
+        "{kinds:?}"
+    );
+
+    // Nobody answers for this name: a clean NXDOMAIN, and the apex has a SOA.
+    let ghost = udp(bind, &query("ghost.mdns.home.test.", RecordType::A)).await;
+    assert_eq!(ghost.metadata.response_code, ResponseCode::NXDomain);
+    assert!(
+        ghost
+            .authorities
+            .iter()
+            .any(|r| r.record_type() == RecordType::SOA)
+    );
+    let apex = udp(bind, &query("mdns.home.test.", RecordType::SOA)).await;
+    assert_eq!(apex.answers.len(), 1);
+    // Names outside the domain still go the normal way.
+    let outside = udp(bind, &query("www.example.", RecordType::A)).await;
+    assert_ne!(outside.metadata.response_code, ResponseCode::NXDomain);
+    server.shutdown().await;
+    responder.abort();
+}
+
+fn padded_query(name: &str, padding: bool) -> Vec<u8> {
+    let mut message = Message::from_vec(&query(name, RecordType::A)).unwrap();
+    let mut edns = Edns::new();
+    edns.set_max_payload(1232);
+    if padding {
+        edns.options_mut()
+            .insert(hickory_proto::rr::rdata::opt::EdnsOption::Unknown(
+                12,
+                vec![0; 20],
+            ));
+    }
+    message.edns = Some(edns);
+    message.to_vec().unwrap()
+}
+
+#[tokio::test]
+async fn encrypted_answers_are_padded_only_when_the_client_asks() {
+    let fixture = fixture().await;
+    let (directory, cert) = certificates();
+    let mut cfg = config(fixture.address, address("127.0.0.1"));
+    let dot = address("127.0.0.1");
+    let doh_addr = address("127.0.0.1");
+    cfg.listen.dot = vec![dot];
+    cfg.listen.doh = vec![doh_addr];
+    cfg.listen.certificate = Some(directory.path().join("cert.pem"));
+    cfg.listen.private_key = Some(directory.path().join("key.pem"));
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    // 468 is the block RFC 8467 recommends for servers.
+    let block = 468;
+
+    let stream = TcpStream::connect(dot).await.unwrap();
+    let mut stream = TlsConnector::from(Arc::new(client_tls(cert.clone(), b"dot")))
+        .connect(ServerName::try_from("localhost").unwrap(), stream)
+        .await
+        .unwrap();
+    for (name, asked) in [("ok.example.", true), ("ok.example.", false)] {
+        let packet = padded_query(name, asked);
+        stream
+            .write_u16(u16::try_from(packet.len()).unwrap())
+            .await
+            .unwrap();
+        stream.write_all(&packet).await.unwrap();
+        stream.flush().await.unwrap();
+        let length = usize::from(
+            timeout(Duration::from_secs(3), stream.read_u16())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        let mut bytes = vec![0; length];
+        stream.read_exact(&mut bytes).await.unwrap();
+        let message = Message::from_vec(&bytes).unwrap();
+        assert!(!message.answers.is_empty());
+        assert_eq!(
+            length % block == 0,
+            asked,
+            "DoT padded={asked} len={length}"
+        );
+    }
+    for (asked, expect) in [(true, true), (false, false)] {
+        let (status, body) = doh(
+            doh_addr,
+            client_tls(cert.clone(), b"h2"),
+            &padded_query("ok.example.", asked),
+            "POST",
+            "/dns-query",
+            "application/dns-message",
+        )
+        .await;
+        assert!(status.is_success());
+        assert_eq!(
+            body.len() % block == 0,
+            expect,
+            "DoH padded={asked} len={}",
+            body.len()
+        );
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_client_subnet_option_is_never_sent_upstream() {
+    let fixture = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut server = RunningServer::start(config(fixture.address, bind))
+        .await
+        .unwrap();
+    let mut message = Message::from_vec(&query("ecs.example.", RecordType::A)).unwrap();
+    let mut edns = Edns::new();
+    edns.set_max_payload(1232);
+    edns.options_mut()
+        .insert(hickory_proto::rr::rdata::opt::EdnsOption::Subnet(
+            hickory_proto::rr::rdata::opt::ClientSubnet::new(
+                std::net::IpAddr::from([192, 0, 2, 0]),
+                24,
+                0,
+            ),
+        ));
+    message.edns = Some(edns);
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket
+        .send_to(&message.to_vec().unwrap(), bind)
+        .await
+        .unwrap();
+    let mut buffer = vec![0; 4096];
+    let (size, _) = timeout(Duration::from_secs(3), socket.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !Message::from_vec(&buffer[..size])
+            .unwrap()
+            .answers
+            .is_empty()
+    );
+    assert!(
+        fixture.queries.load(Ordering::Relaxed) > 0,
+        "upstream was asked"
+    );
+    assert!(
+        !fixture.subnet_seen.load(Ordering::Relaxed),
+        "ECS must not reach the upstream"
+    );
     server.shutdown().await;
 }
