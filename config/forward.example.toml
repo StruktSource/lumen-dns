@@ -21,7 +21,7 @@ id = "cloudflare-unfiltered"
 protocol = "auto"
 encryption = "required"
 address_family = "ipv4"
-transport_priority = ["quic", "https", "tls"]
+transport_priority = ["quic", "https", "h3", "tls"]
 
 # Custom upstreams can be added next to provider presets (at most 8 addresses in total).
 # [[resolver.upstreams]]

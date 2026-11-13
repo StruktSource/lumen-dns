@@ -104,7 +104,7 @@ L.ROLE_LABEL = { admin: 'Administrator', user: 'User' };
 
 /* ---------- provider presets ---------- */
 /* How many upstreams the selected presets expand to. The daemon allows at most 8. */
-const DEFAULT_PRIORITY = ['quic', 'https', 'tls'];
+const DEFAULT_PRIORITY = ['quic', 'https', 'h3', 'tls'];
 L.providerUpstreams = providers => {
   let n = 0;
   for (const sel of providers) {
@@ -243,7 +243,7 @@ L.validate = cfg => {
   if (r.mode === 'forward' && r.providers.length > 8) bad('resolver.providers', 'at most 8 providers');
   if (r.mode === 'forward' && r.providers.some(x => x.protocol === 'auto') && !r.providers.every(x => x.protocol === 'auto')) bad('resolver.providers', 'automatic and explicit provider transports cannot be mixed');
   if (r.mode === 'forward' && r.providers.length) { const n = L.providerUpstreams(r.providers) + r.upstreams.length; if (n > 128) bad('resolver.providers', `the providers and custom upstreams add up to ${n} addresses but 128 is the most. Choose IPv4 only or fewer providers`); }
-  r.upstreams.forEach((u, i) => { if (!L.v.socket(u.address)) bad(`resolver.upstreams[${i}]`, 'address must be an explicit IP:port'); if (['tls', 'https', 'quic'].includes(u.protocol) && !u.server_name) bad(`resolver.upstreams[${i}]`, 'encrypted protocols need server_name'); });
+  r.upstreams.forEach((u, i) => { if (!L.v.socket(u.address)) bad(`resolver.upstreams[${i}]`, 'address must be an explicit IP:port'); if (['tls', 'https', 'h3', 'quic'].includes(u.protocol) && !u.server_name) bad(`resolver.upstreams[${i}]`, 'encrypted protocols need server_name'); });
   const f = r.fallback; if (f.enabled) { if (r.mode !== 'recursive') bad('resolver.fallback', 'recursive mode only'); if (!f.upstreams.length || f.upstreams.length > 8) bad('resolver.fallback.upstreams', 'enabled fallback needs 1–8 upstreams'); if (f.recursive_timeout_ms + f.timeout_ms > cfg.limits.query_timeout_ms) bad('resolver.fallback', 'recursive_timeout_ms + timeout_ms must not exceed limits.query_timeout_ms'); }
   if (r.mode === 'recursive' && (r.attempts + (r.dnssec ? 1 : 0)) * r.upstream_timeout_ms > (f.enabled ? f.recursive_timeout_ms : cfg.limits.query_timeout_ms)) bad('resolver.attempts', 'walk attempts plus DNSSEC recovery must fit the recursive deadline');
   if (!(r.hedge_ms === 0 || (r.hedge_ms >= 100 && r.hedge_ms <= 5000))) bad('resolver.hedge_ms', 'must be 0 or 100–5000'); if (r.hedge_ms && r.mode !== 'recursive') bad('resolver.hedge_ms', 'recursive mode only');

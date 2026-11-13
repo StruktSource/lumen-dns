@@ -936,6 +936,7 @@ pub enum ProviderProtocol {
     Tcp,
     Tls,
     Https,
+    H3,
     Quic,
     Auto,
 }
@@ -947,6 +948,7 @@ impl ProviderProtocol {
             Self::Tcp => Some(UpstreamProtocol::Tcp),
             Self::Tls => Some(UpstreamProtocol::Tls),
             Self::Https => Some(UpstreamProtocol::Https),
+            Self::H3 => Some(UpstreamProtocol::H3),
             Self::Quic => Some(UpstreamProtocol::Quic),
             Self::Auto => None,
         }
@@ -964,6 +966,8 @@ pub enum EncryptionPolicy {
 pub enum EncryptedProtocol {
     Quic,
     Https,
+    /// DNS over HTTP/3.
+    H3,
     Tls,
 }
 

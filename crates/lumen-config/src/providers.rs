@@ -9,9 +9,12 @@ use std::{
 };
 
 const BUNDLED: &str = include_str!("../../../config/providers/resolvers.toml");
-const DEFAULT_ENCRYPTED_PRIORITY: [EncryptedProtocol; 3] = [
+// HTTP/3 comes after HTTP/2: it shares QUIC's UDP path, which some networks block, so it is a
+// fallback by default. `transport_priority` can put it first.
+const DEFAULT_ENCRYPTED_PRIORITY: [EncryptedProtocol; 4] = [
     EncryptedProtocol::Quic,
     EncryptedProtocol::Https,
+    EncryptedProtocol::H3,
     EncryptedProtocol::Tls,
 ];
 
@@ -201,7 +204,7 @@ impl Catalog {
         } else {
             transport.bootstrap_ips.clone()
         };
-        let path = if protocol == UpstreamProtocol::Https {
+        let path = if matches!(protocol, UpstreamProtocol::Https | UpstreamProtocol::H3) {
             Some(doh_path(transport)?.to_owned())
         } else {
             None
@@ -246,7 +249,7 @@ impl Catalog {
             .ok_or_else(|| format!("unknown provider preset: {id}"))?;
         let priority = priority.unwrap_or(&DEFAULT_ENCRYPTED_PRIORITY);
         if priority.is_empty() || priority.len() > DEFAULT_ENCRYPTED_PRIORITY.len() {
-            return Err("transport_priority needs 1..3 encrypted protocols".into());
+            return Err("transport_priority needs 1..4 encrypted protocols".into());
         }
         let mut unique = HashSet::new();
         if priority.iter().any(|protocol| !unique.insert(*protocol)) {
@@ -257,6 +260,7 @@ impl Catalog {
             let protocol = match protocol {
                 EncryptedProtocol::Quic => UpstreamProtocol::Quic,
                 EncryptedProtocol::Https => UpstreamProtocol::Https,
+                EncryptedProtocol::H3 => UpstreamProtocol::H3,
                 EncryptedProtocol::Tls => UpstreamProtocol::Tls,
             };
             let supported = provider.transports.iter().any(|transport| {
@@ -304,10 +308,13 @@ fn validate_transport(transport: &Transport) -> Result<(), String> {
     {
         return Err("supported encrypted transport needs server_name".into());
     }
-    if transport.protocol == UpstreamProtocol::Https {
+    if matches!(
+        transport.protocol,
+        UpstreamProtocol::Https | UpstreamProtocol::H3
+    ) {
         doh_path(transport)?;
     } else if transport.url.is_some() {
-        return Err("only https transports may contain a URL".into());
+        return Err("only DoH transports may contain a URL".into());
     }
     Ok(())
 }
@@ -464,6 +471,76 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn doh3_is_an_automatic_transport_after_http2_and_only_where_documented() {
+        let catalog = Catalog::bundled().unwrap();
+        // The default order is QUIC, HTTP/2, HTTP/3, TLS; Cloudflare has no DoQ entry.
+        let upstreams = catalog
+            .select_encrypted("cloudflare-unfiltered", AddressFamily::Ipv4, None)
+            .unwrap();
+        let order: Vec<UpstreamProtocol> =
+            upstreams
+                .iter()
+                .map(|u| u.protocol)
+                .fold(Vec::new(), |mut seen, protocol| {
+                    if !seen.contains(&protocol) {
+                        seen.push(protocol);
+                    }
+                    seen
+                });
+        assert_eq!(
+            order,
+            [
+                UpstreamProtocol::Https,
+                UpstreamProtocol::H3,
+                UpstreamProtocol::Tls
+            ]
+        );
+        let h3 = upstreams
+            .iter()
+            .find(|u| u.protocol == UpstreamProtocol::H3)
+            .unwrap();
+        assert_eq!(h3.address.port(), 443);
+        assert_eq!(h3.server_name.as_deref(), Some("cloudflare-dns.com"));
+        assert_eq!(h3.doh_path.as_deref(), Some("/dns-query"));
+        // It can be asked for first, or alone.
+        let first = catalog
+            .select_encrypted(
+                "cloudflare-unfiltered",
+                AddressFamily::Ipv4,
+                Some(&[EncryptedProtocol::H3, EncryptedProtocol::Tls]),
+            )
+            .unwrap();
+        assert_eq!(first[0].protocol, UpstreamProtocol::H3);
+        // A provider that does not document DoH3 never gets an H3 upstream.
+        let none = catalog
+            .select_encrypted("libredns-unfiltered", AddressFamily::Any, None)
+            .unwrap();
+        assert!(none.iter().all(|u| u.protocol != UpstreamProtocol::H3));
+        assert!(
+            catalog
+                .select(
+                    "libredns-unfiltered",
+                    UpstreamProtocol::H3,
+                    AddressFamily::Any
+                )
+                .is_err()
+        );
+        // The catalog entry follows the same rules as DoH: the URL host is the server name.
+        let mut broken = Catalog::bundled().unwrap();
+        let entry = broken
+            .providers
+            .iter_mut()
+            .find(|p| p.id == "cloudflare-unfiltered")
+            .unwrap()
+            .transports
+            .iter_mut()
+            .find(|t| t.protocol == UpstreamProtocol::H3)
+            .unwrap();
+        entry.url = Some("https://other.example/dns-query".into());
+        assert!(broken.validate().is_err());
     }
 
     #[test]

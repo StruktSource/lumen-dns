@@ -42,7 +42,7 @@ function resolverTab() {
 }
 
 /* ---------- upstreams ---------- */
-const PROTOS = ['udp', 'tcp', 'tls', 'https', 'quic'];
+const PROTOS = ['udp', 'tcp', 'tls', 'https', 'h3', 'quic'];
 function upstreamTable(arr, max, title, addBtnLabel) {
   const draft = { address: '', protocol: 'tls', server_name: '', doh_path: '' };
   const rows = h('tbody', {});
@@ -51,11 +51,11 @@ function upstreamTable(arr, max, title, addBtnLabel) {
   draw(); const err = h('div', { class: 'err' });
   return h('div', {}, h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Address', 'Protocol', 'Server name', ''].map(x => h('th', {}, x)))), rows)),
     h('div', { class: 'card-b stack', style: 'border-top:1px solid var(--rule)' }, h('div', { class: 'fgrid' }, f.field('Address:port', f.text(draft, 'address', { mono: true, placeholder: '9.9.9.9:853', validate: L.v.socket }), 'Explicit IP, no bootstrap lookup.'), f.field('Protocol', f.sel(draft, 'protocol', PROTOS)), f.field('Server name', f.text(draft, 'server_name', { mono: true, placeholder: 'dns.example' }), 'Required for tls, https, quic.'), f.field('DoH path', f.text(draft, 'doh_path', { mono: true, placeholder: '/dns-query' }), 'Only for https. Leave empty for /dns-query.')), err,
-      h('div', {}, h('button', { class: 'btn', onclick: () => { if (arr.length >= max) { err.textContent = L.t('At most {n} here.', { n: max }); return; } if (!L.v.socket(draft.address)) { err.textContent = 'Address must be IP:port, e.g. 9.9.9.9:853.'; return; } if (['tls', 'https', 'quic'].includes(draft.protocol) && !draft.server_name) { err.textContent = 'Encrypted protocols need a server name.'; return; } const u = { address: draft.address, protocol: draft.protocol }; if (draft.server_name) u.server_name = draft.server_name; if (draft.protocol === 'https' && draft.doh_path) u.doh_path = draft.doh_path; arr.push(u); L.touch(); L.rerender(); } }, L.ic('plus'), addBtnLabel))));
+      h('div', {}, h('button', { class: 'btn', onclick: () => { if (arr.length >= max) { err.textContent = L.t('At most {n} here.', { n: max }); return; } if (!L.v.socket(draft.address)) { err.textContent = 'Address must be IP:port, e.g. 9.9.9.9:853.'; return; } if (['tls', 'h3', 'https', 'quic'].includes(draft.protocol) && !draft.server_name) { err.textContent = 'Encrypted protocols need a server name.'; return; } const u = { address: draft.address, protocol: draft.protocol }; if (draft.server_name) u.server_name = draft.server_name; if (['https', 'h3'].includes(draft.protocol) && draft.doh_path) u.doh_path = draft.doh_path; arr.push(u); L.touch(); L.rerender(); } }, L.ic('plus'), addBtnLabel))));
 }
-const ENCRYPTED = ['quic', 'https', 'tls'];
+const ENCRYPTED = ['quic', 'https', 'h3', 'tls'];
 const encrypted = p => p.transports.some(t => ENCRYPTED.includes(t));
-/* A provider is added with automatic, encrypted-only transport: QUIC, then HTTPS, then TLS. */
+/* A provider is added with automatic, encrypted-only transport: QUIC, then HTTPS, then HTTP/3, then TLS. */
 const newProvider = p => ({ id: p.id, protocol: 'auto', address_family: 'any', transport_priority: ENCRYPTED.filter(t => p.transports.includes(t)) });
 const STRATEGIES = [
   ['failover', 'Ranked fallback', 'The first provider answers. The next one is used only when it does not respond, in the order you set. Lowest exposure: only one provider sees a lookup.'],

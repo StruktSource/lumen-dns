@@ -848,6 +848,13 @@ async fn dnssec_valid_bogus_wrong_anchor_and_signed_denial() {
             server_name: Some("localhost".into()),
             doh_path: Some("/dns-query".into()),
         },
+        // An HTTP/3 tier behind a working one is never reached either.
+        Upstream {
+            address: unused_address,
+            protocol: UpstreamProtocol::H3,
+            server_name: Some("localhost".into()),
+            doh_path: Some("/dns-query".into()),
+        },
     ];
     let mut encrypted_server = RunningServer::start(automatic).await.unwrap();
     for (name, expected) in [

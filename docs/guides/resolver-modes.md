@@ -33,7 +33,7 @@ id = "cloudflare-unfiltered"
 protocol = "auto"
 encryption = "required"
 address_family = "ipv4"
-transport_priority = ["quic", "https", "tls"]
+transport_priority = ["quic", "https", "h3", "tls"]
 ```
 
 `config/forward.example.toml` is a ready-made example.
@@ -61,7 +61,7 @@ Full field list: [Configuration: resolver](../reference/configuration.md#resolve
 
 ### Encrypted transport failover
 
-With `protocol = "auto"`, Lumen builds an encrypted-only list for a provider, in the order you set (default: QUIC, then HTTPS, then TLS). It moves to the next transport **only** after a connection, transport, or timeout error. An upstream SERVFAIL can move to the next configured provider, but a usable DNS answer (including NXDOMAIN) or local DNSSEC failure is final. It never falls back to plain text. Each automatic transport gets the remaining provider budget divided by the number of transports left; early failures donate unused time to later transports. All tiers share one provider deadline, including silent handshakes and DNSSEC work. The outer client deadline still applies.
+With `protocol = "auto"`, Lumen builds an encrypted-only list for a provider, in the order you set (default: QUIC, then HTTPS, then HTTP/3, then TLS). It moves to the next transport **only** after a connection, transport, or timeout error. An upstream SERVFAIL can move to the next configured provider, but a usable DNS answer (including NXDOMAIN) or local DNSSEC failure is final. It never falls back to plain text. Each automatic transport gets the remaining provider budget divided by the number of transports left; early failures donate unused time to later transports. All tiers share one provider deadline, including silent handshakes and DNSSEC work. The outer client deadline still applies.
 
 ## Which should I choose?
 
