@@ -157,7 +157,7 @@ async fn main() -> io::Result<()> {
                 ));
             }
             if let (Some(config_path), Some(state_path)) = (path.as_deref(), state.as_deref()) {
-                return run_managed(config_path, state_path).await;
+                return Box::pin(run_managed(config_path, state_path)).await;
             }
             let mut server = RunningServer::start(config).await?;
             print_endpoints(&server);

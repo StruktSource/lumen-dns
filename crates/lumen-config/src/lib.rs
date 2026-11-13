@@ -1358,6 +1358,30 @@ impl Config {
         }) {
             return Err("dhcp.domain overlaps a configured zone".into());
         }
+        // One socket per network: with several, each must say which one it is.
+        if dhcp.scopes.len() > 1 {
+            let mut seen = std::collections::HashSet::new();
+            if !dhcp.scopes.iter().all(|scope| {
+                scope
+                    .interface
+                    .as_deref()
+                    .is_some_and(|name| seen.insert(name))
+            }) {
+                return Err(
+                    "dhcp.scopes: with more than one scope, each needs its own interface".into(),
+                );
+            }
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            if !dhcp
+                .scopes6
+                .iter()
+                .all(|scope| seen.insert(scope.interface.as_str()))
+            {
+                return Err("dhcp.scopes6: each scope needs its own interface".into());
+            }
+        }
         let host_ok = |host: &Option<String>| host.as_deref().is_none_or(label_ok);
         for (index, scope) in dhcp.scopes.iter().enumerate() {
             let net = scope.subnet;
@@ -2045,6 +2069,28 @@ mod tests {
             }],
         }];
         config
+    }
+
+    #[test]
+    fn several_dhcp_networks_each_name_their_own_interface() {
+        let mut config = dhcp_config();
+        let mut second = config.dhcp.scopes[0].clone();
+        second.interface = Some("eth1".into());
+        second.subnet = "192.168.2.0/24".parse().unwrap();
+        second.server_address = "192.168.2.2".parse().unwrap();
+        second.range_start = "192.168.2.100".parse().unwrap();
+        second.range_end = "192.168.2.150".parse().unwrap();
+        second.router = None;
+        second.reservations.clear();
+        config.dhcp.scopes.push(second);
+        assert!(config.validate_dhcp().is_ok());
+        config.dhcp.scopes[1].interface = Some("eth0".into());
+        assert!(config.validate_dhcp().is_err(), "the same interface twice");
+        config.dhcp.scopes[1].interface = None;
+        assert!(
+            config.validate_dhcp().is_err(),
+            "no interface with two scopes"
+        );
     }
 
     #[test]

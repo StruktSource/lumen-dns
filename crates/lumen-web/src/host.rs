@@ -3,6 +3,36 @@
 
 use std::net::IpAddr;
 
+/// One DHCP network, for the console.
+#[derive(Clone, Debug)]
+pub struct DhcpScopeInfo {
+    /// 4 or 6.
+    pub family: u8,
+    pub interface: Option<String>,
+    pub network: String,
+    pub range: String,
+    pub active: usize,
+    pub capacity: u64,
+}
+
+/// One bound DHCP lease, for the console.
+#[derive(Clone, Debug)]
+pub struct DhcpLeaseInfo {
+    pub family: u8,
+    pub ip: IpAddr,
+    pub client: String,
+    pub hostname: Option<String>,
+    /// Unix seconds.
+    pub expires: u64,
+}
+
+/// What the DHCP module shows. `None` from [`Host::dhcp`] means the server is not running.
+#[derive(Clone, Debug, Default)]
+pub struct DhcpInfo {
+    pub scopes: Vec<DhcpScopeInfo>,
+    pub leases: Vec<DhcpLeaseInfo>,
+}
+
 /// Aggregate counters. No domain names, clients, or profiles.
 #[derive(Clone, Debug, Default)]
 pub struct Counters {
@@ -87,6 +117,10 @@ pub trait Host: Send + Sync + 'static {
     fn take_unsaved_history(&self) -> Vec<QueryRecord>;
     /// External sign-in settings when the operator turned them on.
     fn oidc(&self) -> Option<lumen_config::Oidc> {
+        None
+    }
+    /// The DHCP server's scopes and leases, when it is running.
+    fn dhcp(&self) -> Option<DhcpInfo> {
         None
     }
 }

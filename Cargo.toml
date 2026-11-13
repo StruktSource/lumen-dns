@@ -6,6 +6,7 @@ members = [
   "crates/lumen-config",
   "crates/lumen-filter",
   "crates/lumen-core",
+  "crates/lumen-dhcp",
   "crates/lumen-proto",
   "crates/lumen-resolver",
   "crates/lumen-store",

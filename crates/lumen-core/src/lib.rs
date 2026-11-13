@@ -252,6 +252,8 @@ struct Service {
     connections: Arc<Semaphore>,
     clients: Mutex<ClientRates>,
     metrics: Arc<Metrics>,
+    /// Set once, after the DHCP server (if any) has started.
+    dhcp: std::sync::OnceLock<lumen_dhcp::Handle>,
 }
 
 impl Service {
@@ -510,6 +512,35 @@ impl Drop for ActiveQuery<'_> {
 }
 
 impl lumen_web::Host for Service {
+    fn dhcp(&self) -> Option<lumen_web::DhcpInfo> {
+        let snapshot = self.dhcp.get()?.snapshot();
+        Some(lumen_web::DhcpInfo {
+            scopes: snapshot
+                .scopes
+                .into_iter()
+                .map(|s| lumen_web::DhcpScopeInfo {
+                    family: s.family,
+                    interface: s.interface,
+                    network: s.network,
+                    range: s.range,
+                    active: s.active,
+                    capacity: s.capacity,
+                })
+                .collect(),
+            leases: snapshot
+                .leases
+                .into_iter()
+                .map(|l| lumen_web::DhcpLeaseInfo {
+                    family: l.family,
+                    ip: l.ip,
+                    client: l.client,
+                    hostname: l.hostname,
+                    expires: l.expires,
+                })
+                .collect(),
+        })
+    }
+
     fn counters(&self) -> lumen_web::Counters {
         let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
         let m = &self.metrics;

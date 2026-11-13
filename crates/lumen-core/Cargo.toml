@@ -12,6 +12,7 @@ lumen-config = { path = "../lumen-config" }
 lumen-proto = { path = "../lumen-proto" }
 lumen-resolver = { path = "../lumen-resolver" }
 lumen-web = { path = "../lumen-web" }
+lumen-dhcp = { path = "../lumen-dhcp" }
 tokio.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
@@ -37,6 +38,7 @@ time = { version = "0.3", default-features = false }
 hickory-server.workspace = true
 hickory-proto.workspace = true
 tempfile = "3"
+dhcproto = "0.15"
 
 [lints]
 workspace = true

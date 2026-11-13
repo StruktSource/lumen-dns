@@ -2776,3 +2776,113 @@ async fn forwarded_https_records_keep_ech_over_udp_tcp_and_the_cache() {
     check(&tcp(bind, &query("svcb.example.", RecordType::HTTPS)).await);
     server.shutdown().await;
 }
+
+#[tokio::test]
+async fn dhcp_leases_become_dns_names_and_are_off_by_default() {
+    use dhcproto::{
+        Decodable, Decoder, Encodable,
+        v4::{self, DhcpOption, HType, MessageType, Opcode, OptionCode},
+    };
+    // Nothing listens for DHCP unless asked to.
+    assert!(!Config::default().dhcp.enabled);
+
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let directory = tempfile::tempdir().unwrap();
+    let port = std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut cfg = config(upstream.address, bind);
+    cfg.dhcp = lumen_config::Dhcp {
+        enabled: true,
+        domain: Some("home.lan".into()),
+        lease_file: Some(directory.path().join("leases.db")),
+        listen4: SocketAddr::from(([127, 0, 0, 1], port)),
+        scopes: vec![lumen_config::DhcpScope {
+            interface: None,
+            subnet: "192.168.50.0/24".parse().unwrap(),
+            server_address: "192.168.50.1".parse().unwrap(),
+            range_start: "192.168.50.100".parse().unwrap(),
+            range_end: "192.168.50.110".parse().unwrap(),
+            router: None,
+            dns: Vec::new(),
+            lease_secs: 3600,
+            reservations: Vec::new(),
+        }],
+        ..lumen_config::Dhcp::default()
+    };
+    let mut server = RunningServer::start(cfg).await.unwrap();
+
+    let message = |kind: MessageType, requested: Option<std::net::Ipv4Addr>| {
+        let mut message = v4::Message::new_with_id(
+            9,
+            [0; 4].into(),
+            [0; 4].into(),
+            [0; 4].into(),
+            [0; 4].into(),
+            &[2, 0, 0, 0, 0, 7],
+        );
+        message.set_opcode(Opcode::BootRequest);
+        message.set_htype(HType::Eth);
+        let options = message.opts_mut();
+        options.insert(DhcpOption::MessageType(kind));
+        options.insert(DhcpOption::Hostname("Laptop".into()));
+        if let Some(ip) = requested {
+            options.insert(DhcpOption::RequestedIpAddress(ip));
+        }
+        message
+    };
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_address = SocketAddr::from(([127, 0, 0, 1], port));
+    let exchange = async |message: v4::Message| {
+        client
+            .send_to(&message.to_vec().unwrap(), server_address)
+            .await
+            .unwrap();
+        let mut buffer = [0u8; 1500];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_secs(3), client.recv_from(&mut buffer))
+                .await
+                .expect("the DHCP server answered")
+                .unwrap();
+        v4::Message::decode(&mut Decoder::new(&buffer[..length])).unwrap()
+    };
+    let offer = exchange(message(MessageType::Discover, None)).await;
+    let ip = offer.yiaddr();
+    // An offer is not a lease: the name does not resolve yet.
+    let before = udp(bind, &query("laptop.home.lan.", RecordType::A)).await;
+    assert!(before.answers.is_empty());
+    let ack = exchange(message(MessageType::Request, Some(ip))).await;
+    assert!(matches!(
+        ack.opts().get(OptionCode::MessageType),
+        Some(DhcpOption::MessageType(MessageType::Ack))
+    ));
+
+    // The device is now a DNS name, forward and reverse, answered authoritatively.
+    let forward = udp(bind, &query("laptop.home.lan.", RecordType::A)).await;
+    assert!(forward.metadata.authoritative);
+    assert_eq!(forward.answers.len(), 1);
+    assert_eq!(forward.answers[0].data.to_string(), ip.to_string());
+    let octets = ip.octets();
+    let reverse = udp(
+        bind,
+        &query(
+            &format!(
+                "{}.{}.{}.{}.in-addr.arpa.",
+                octets[3], octets[2], octets[1], octets[0]
+            ),
+            RecordType::PTR,
+        ),
+    )
+    .await;
+    assert_eq!(reverse.answers.len(), 1);
+    assert!(
+        reverse.answers[0]
+            .data
+            .to_string()
+            .eq_ignore_ascii_case("laptop.home.lan.")
+    );
+    server.shutdown().await;
+}

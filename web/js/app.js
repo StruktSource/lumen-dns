@@ -5,7 +5,7 @@ const L = window.L, h = L.h;
 const PAGES = [['overview', 'Overview', 'overview', 'user'], ['activity', 'Activity', 'activity', 'user'], ['filtering', 'Filtering', 'filter', 'admin'], ['devices', 'Devices', 'devices', 'user'],
   ['dns', 'DNS settings', 'server', 'admin'], ['users', 'Users', 'user', 'user'], ['system', 'System', 'settings', 'admin'],
   /* Pages that belong to a module (6th entry) show in the sidebar only while it is on. */
-  ['modules', 'Modules', 'modules', 'user'], ['trafficmap', 'Traffic map', 'map', 'user', false, 'traffic-map']];
+  ['modules', 'Modules', 'modules', 'user'], ['trafficmap', 'Traffic map', 'map', 'user', false, 'traffic-map'], ['dhcp', 'DHCP', 'server', 'admin', false, 'dhcp']];
 const root = () => L.$('#root');
 L.sideHidden = () => { try { return localStorage.getItem('lumen-side-hidden') === '1'; } catch { return false; } };
 L.toggleSide = () => {

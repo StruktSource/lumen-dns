@@ -491,6 +491,7 @@ impl Console {
             ("DELETE", ["users", name]) => self.remove_user(&mut store, &ctx, name),
             ("PUT", ["devices"]) => self.put_device(&mut store, &ctx),
             ("DELETE", ["devices", id]) => self.delete_device(&mut store, &ctx, id),
+            ("GET", ["dhcp"]) => self.dhcp(&store),
             ("GET", ["config"]) => config_json(&store),
             ("POST", ["config", "preview"]) => preview_config(&store, request),
             ("PUT", ["config"]) => self.put_config(&mut store, &ctx),
@@ -1756,6 +1757,44 @@ impl Console {
         )
     }
 
+    /// The DHCP module's page: scopes and leases. Off until the module is switched on, and empty
+    /// of data when the server is not configured to run.
+    fn dhcp(&self, store: &Store) -> Reply {
+        if !enabled_modules(store).contains(&"dhcp") {
+            return error(StatusCode::NOT_FOUND, "the DHCP module is off");
+        }
+        let Some(info) = self.host.dhcp() else {
+            return reply(
+                StatusCode::OK,
+                &json!({ "running": false, "scopes": [], "leases": [] }),
+            );
+        };
+        let scopes: Vec<_> = info
+            .scopes
+            .iter()
+            .map(|s| {
+                json!({
+                    "family": s.family, "interface": s.interface, "network": s.network,
+                    "range": s.range, "active": s.active, "capacity": s.capacity,
+                })
+            })
+            .collect();
+        let leases: Vec<_> = info
+            .leases
+            .iter()
+            .map(|l| {
+                json!({
+                    "family": l.family, "ip": l.ip.to_string(), "client": l.client,
+                    "hostname": l.hostname, "expires": l.expires,
+                })
+            })
+            .collect();
+        reply(
+            StatusCode::OK,
+            &json!({ "running": true, "scopes": scopes, "leases": leases }),
+        )
+    }
+
     /// Switch one optional module on or off. Modules are off until an administrator turns them on.
     fn put_module(&self, store: &mut Store, ctx: &Ctx<'_>) -> Reply {
         let Ok(body) = serde_json::from_slice::<Value>(&ctx.request.body) else {
@@ -2289,7 +2328,7 @@ fn language(store: &Store) -> Option<String> {
 }
 
 /// Optional features an administrator can switch on. Every module is off by default.
-const MODULES: &[&str] = &["traffic-map"];
+const MODULES: &[&str] = &["traffic-map", "dhcp"];
 
 /// The enabled modules, in catalog order. Unknown names in storage are ignored.
 fn enabled_modules(store: &Store) -> Vec<&'static str> {
@@ -4377,6 +4416,27 @@ mod tests {
     }
 
     #[test]
+    fn the_dhcp_module_is_hidden_until_on_and_says_when_no_server_runs() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let get = || call(&f, Method::GET, "/api/dhcp", session, "", "127.0.0.1");
+        assert_eq!(get().status(), StatusCode::NOT_FOUND);
+        call(
+            &f,
+            Method::PUT,
+            "/api/modules",
+            session,
+            r#"{"id":"dhcp","enabled":true}"#,
+            "127.0.0.1",
+        );
+        let (status, page) = body(get());
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["running"], json!(false));
+        assert_eq!(page["leases"], json!([]));
+    }
+
+    #[test]
     fn modules_are_off_until_an_administrator_turns_them_on() {
         let f = fixture();
         let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
@@ -4393,7 +4453,7 @@ mod tests {
             .1
         };
         assert_eq!(get()["enabled"], json!([]));
-        assert_eq!(get()["available"], json!(["traffic-map"]));
+        assert_eq!(get()["available"], json!(["traffic-map", "dhcp"]));
         let put = |payload: &str| {
             call(
                 &f,

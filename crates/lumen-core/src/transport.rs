@@ -30,6 +30,8 @@ pub struct RunningServer {
     /// One-time code needed to create the first console account from another machine.
     pub setup_code: Option<String>,
     certificates: Option<Credentials>,
+    /// Keeps the DHCP server's sockets open for as long as the service runs.
+    _dhcp: Option<lumen_dhcp::Running>,
 }
 
 /// Optional managed-mode inputs for the web console.
@@ -111,6 +113,7 @@ impl RunningServer {
             filter: std::sync::RwLock::new(filter),
             config: Arc::new(config),
             metrics: Arc::clone(&metrics),
+            dhcp: std::sync::OnceLock::new(),
         });
         if let Some(not_after) = cert_not_after {
             service
@@ -315,6 +318,14 @@ impl RunningServer {
                 }
             });
         }
+        let dhcp = if config.dhcp.enabled {
+            let running =
+                Box::pin(lumen_dhcp::start(&config.dhcp, service.resolver.hosts())).await?;
+            let _ = service.dhcp.set(running.handle());
+            Some(running)
+        } else {
+            None
+        };
         if let Some(listener) = metrics_listener {
             tasks.spawn(serve_metrics(listener, Arc::clone(&service)));
         }
@@ -329,6 +340,7 @@ impl RunningServer {
             web_endpoints,
             setup_code,
             certificates: tls_handle,
+            _dhcp: dhcp,
         })
     }
 
