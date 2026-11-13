@@ -14,6 +14,8 @@ Welcome! This is the map to everything written about Lumen, a self-hosted DNS re
 | Install it on my server, NAS, or Pi | [Deployment guides](deployment/README.md) |
 | Let my phone, laptop, and TV use it | [Serve your network](guides/serve-your-network.md) |
 | Block ads, trackers, or adult sites | [Filtering](guides/filtering.md) |
+| Give my devices and services their own names | [Your own DNS zones](guides/authoritative-dns.md#easy-local-dns-manager) |
+| Hand out IP addresses on my network | [DHCP server](guides/dhcp.md) |
 | Manage everything from a browser | [Web console](guides/web-console.md) |
 
 ## Getting started
@@ -26,13 +28,13 @@ Welcome! This is the map to everything written about Lumen, a self-hosted DNS re
 - [Serve your network](guides/serve-your-network.md): allow other devices to use Lumen safely.
 - [Resolver modes](guides/resolver-modes.md): recursive or forwarding, timeout fallback, and speed features.
 - [Upstream providers](guides/upstream-providers.md): the bundled catalog of encrypted public resolvers.
-- [Encrypted DNS](guides/encrypted-dns.md): serve DNS-over-TLS, DNS-over-HTTPS, and DNS-over-QUIC.
+- [Encrypted DNS](guides/encrypted-dns.md): serve DNS-over-TLS, DNS-over-HTTPS, DNS-over-HTTP/3, DNS-over-QUIC, and DNSCrypt.
 - [Multicast DNS bridge](guides/mdns.md): answer for `.local` devices under a domain and repeat mDNS between networks (off by default).
 - [DHCP server](guides/dhcp.md): hand out IPv4 and IPv6 addresses and turn every lease into a DNS name (off by default).
 - [Automatic certificates (ACME)](guides/certificates.md): get and renew the encrypted-DNS certificate from Let's Encrypt or another ACME CA.
-- [Your own DNS zones](guides/authoritative-dns.md): authoritative zones, split-horizon views, conditional forwarding, dynamic updates, and zone transfers.
+- [Your own DNS zones](guides/authoritative-dns.md): the console's Local DNS manager, authoritative zones, DNSSEC signing, split-horizon views, conditional forwarding, dynamic updates, and zone transfers.
 - [Filtering](guides/filtering.md): block lists, rules, per-device profiles, and schedules.
-- [Web console](guides/web-console.md): accounts, setup, two-step verification, and HTTPS.
+- [Web console](guides/web-console.md): accounts, setup, two-step verification, HTTPS, Local DNS, and the optional Modules (Traffic map, DHCP).
 - [External login](guides/external-login.md): optional console sign-in through Authentik, Authelia, Pocket ID, and other OpenID Connect providers.
 - [Query history](guides/query-history.md): the opt-in record of lookups, with retention and an anonymous mode.
 - [Languages and translations](guides/translations.md): switch language, or add and improve one.

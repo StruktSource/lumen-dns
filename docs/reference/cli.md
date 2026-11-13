@@ -12,6 +12,7 @@ Run either with `--help` or `--version` to see what your build supports.
 ```text
 lumen --config FILE [--state FILE] [--check]
 lumen --bind ADDRESS
+lumen --zone-key FILE --zone NAME [--algorithm ed25519|ecdsap256sha256]
 lumen --version
 ```
 
@@ -21,6 +22,7 @@ lumen --version
 | `--state FILE` | Turn on [managed mode](../guides/managed-mode.md): SQLite config and device storage, the web console, and cross-platform control |
 | `--check` | Validate the config, filter sources, root hints, trust anchors, and TLS keys, then exit. Opens no listeners |
 | `--bind ADDRESS` | Minimal start with no config file: UDP and TCP recursive DNS, loopback clients only |
+| `--zone-key FILE --zone NAME` | Create a DNSSEC signing key for one of your own zones if `FILE` is missing (mode `0600`), then print its `DNSKEY` and `DS` records. `--algorithm` is `ed25519` (default) or `ecdsap256sha256`. See [Your own DNS zones](../guides/authoritative-dns.md#dnssec-signing) |
 | `--help`, `--version` | Show help or the version |
 
 Encrypted DNS and web listeners always need explicit config and certificate and key files.

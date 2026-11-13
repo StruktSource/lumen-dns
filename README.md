@@ -5,21 +5,21 @@
 ### Your DNS. Your rules. Your network.
 
 **A self-hosted DNS resolver with built-in filtering, built for privacy, visibility, and control.**
-Recursive DNS, encrypted transports, DNSSEC validation, and per-device filtering in one small Rust service.
+Recursive DNS, encrypted transports, DNSSEC validation, per-device filtering, and optional local zones, DHCP, and certificates in one small Rust service.
 
 [**Quick start**](docs/getting-started/quick-start.md) · [**What is DNS?**](docs/getting-started/concepts.md) · [**Documentation**](docs/README.md) · [**Install**](docs/deployment/README.md) · [**Roadmap**](docs/project/roadmap.md)
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-2563eb?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-2d3748?style=flat-square&logo=rust)](Cargo.toml)
 [![Status: Pre-release](https://img.shields.io/badge/status-pre--release-f59e0b?style=flat-square)](docs/project/roadmap.md)
-[![DNS: UDP · TCP · DoH · DoT · DoQ](https://img.shields.io/badge/DNS-UDP%20%7C%20TCP%20%7C%20DoH%20%7C%20DoT%20%7C%20DoQ-0f766e?style=flat-square)](docs/guides/encrypted-dns.md)
+[![DNS: UDP · TCP · DoH · DoH3 · DoT · DoQ · DNSCrypt](https://img.shields.io/badge/DNS-UDP%20%7C%20TCP%20%7C%20DoH%20%7C%20DoH3%20%7C%20DoT%20%7C%20DoQ%20%7C%20DNSCrypt-0f766e?style=flat-square)](docs/guides/encrypted-dns.md)
 
 </div>
 
 ---
 
 > [!IMPORTANT]
-> **Lumen is in active pre-release development.** The resolver, encrypted transports, filtering, local controls, web console, and optional management API all work. Security review, soak testing, and release validation are still underway, so try it in a controlled environment before relying on it for network-wide DNS.
+> **Lumen is in active pre-release development.** The resolver, encrypted transports, filtering, local DNS and DHCP, web console, and optional management API all work. Security review, soak testing, and release validation are still underway, so try it in a controlled environment before relying on it for network-wide DNS.
 
 ## What is Lumen?
 
@@ -34,6 +34,7 @@ New to the ideas? Read [Concepts](docs/getting-started/concepts.md) for a plain-
 | 🔒 **Private by default** | No telemetry, no query history unless you opt in, and no outside provider unless you add one. |
 | 🧭 **Resolves for itself** | Walks the DNS tree directly and validates DNSSEC locally, or forwards over encrypted connections to a provider you choose. |
 | 🛡️ **Filters per device** | Block ads, trackers, or categories globally, or with different rules and schedules for each device. |
+| 🏠 **Runs your home network** | Name your own devices with the Local DNS manager, hand out addresses with the optional DHCP server, and bridge `.local` (mDNS) names, all from the console. |
 | 🖥️ **Easy to manage** | A built-in web console and a `lumenctl` command-line tool, with safe reloads that roll back on failure. |
 | 📊 **Visible** | Opt-in aggregate metrics for Prometheus, Grafana, and Home Assistant. |
 | 🪶 **Small** | An idle Lumen uses about 8 MiB of memory (about 11 MiB with the web console), and answers cached or blocked names in about 0.03 ms. |
@@ -42,16 +43,21 @@ New to the ideas? Read [Concepts](docs/getting-started/concepts.md) for a plain-
 
 | Capability | What you get |
 | :--- | :--- |
-| **Recursive DNS** | Iterative resolution, QNAME minimization, caching, and bundled root hints |
-| **DNSSEC** | Local validation on by default, with configurable trust anchors |
-| **Five transports** | UDP, TCP, DNS-over-HTTPS, DNS-over-TLS, and DNS-over-QUIC (encrypted ones need your own certificate) |
-| **Forwarding** | A catalog of encrypted public resolvers: use up to 8, rank them, and choose ranked fallback, fastest first, round-robin, or race. Never downgrades to plain text |
+| **Recursive DNS** | Iterative resolution, QNAME minimization, bounded caches, and bundled root hints. Optional **serve-stale** (RFC 8767) keeps answering from an expired entry during an outage, and an optional **persistent cache** restarts warm |
+| **DNSSEC** | Local validation on by default, configurable trust anchors, and optional automatic root key rollover (RFC 5011) |
+| **Seven transports** | UDP, TCP, DNS-over-HTTPS (HTTP/2), **DNS-over-HTTP/3**, DNS-over-TLS, DNS-over-QUIC, and a **DNSCrypt v2** server. Encrypted answers are padded (RFC 8467). Encrypted listeners need your own certificate, or **automatic certificates (ACME)** |
+| **Automatic certificates** | Opt-in Let's Encrypt-style issuance and renewal (HTTP-01 or DNS-01, wildcards included). Renewed files load without a restart |
+| **Forwarding** | A catalog of encrypted public resolvers over TLS, HTTPS, QUIC, or HTTP/3: use up to 8, rank them, and choose ranked fallback, fastest first, round-robin, or race. Never downgrades to plain text |
 | **Timeout fallback** | Optional forwarding **only** after a recursive timeout, never for DNSSEC failures or normal answers |
-| **Filtering** | Allow and block rules, hosts, domain, and Adblock-style lists, one-click popular lists, and configurable block replies |
-| **Per-client policy** | Device, subnet, group, profile, category, and UTC-scheduled rules, with explainable decisions |
-| **Web console** | First-run setup, one Users page for accounts and roles, optional two-step verification and optional, experimental single sign-on (OpenID Connect), live overview, filtering, devices, and DNS settings, in [English, German, Italian, Spanish, and Dutch](docs/guides/translations.md) |
+| **Filtering** | Allow and block rules (including **regular expressions**), hosts, domain, and Adblock-style lists, one-click popular lists, CNAME-aware blocking, configurable block replies, and opt-in **SafeSearch** |
+| **Per-client policy** | Device, subnet, group, profile, category, and UTC-scheduled rules, with explainable decisions and one-click **child-safety** categories |
+| **Local DNS manager** | Create your own zones and records (`A`, `AAAA`, `CNAME`, `TXT`, `PTR`, `MX`, `SRV`, `CAA`, `TLSA`) in the console. `home.arpa` is recommended; changes apply safely and roll back on failure |
+| **Your own zones** | Authoritative zones from files, split-horizon views, conditional forwarding, TSIG-signed dynamic updates (RFC 2136), zone transfers (AXFR/IXFR), and DNSSEC signing with NSEC or NSEC3 and key rollover |
+| **DHCP server** | Opt-in IPv4 and IPv6 addresses with reservations, relay agents, prefix delegation, network boot options, Router Advertisements, and Lumen-to-Lumen failover. Leases become DNS names |
+| **Multicast DNS bridge** | Opt-in discovery proxy and reflector, so `printer.local` also answers as `printer.your-domain` and across networks |
+| **Web console** | First-run setup, one Users page for accounts and roles, optional two-step verification and optional, experimental single sign-on (OpenID Connect), live overview and activity, filtering, devices, local DNS, and an optional **Modules** page (Traffic map, DHCP), in [English, German, Italian, Spanish, and Dutch](docs/guides/translations.md) |
 | **Query history** | Opt-in. Recent lookups in memory, or saved for 1 to 90 days, anonymous or with the device, with search and one-click deletion |
-| **Operations** | Validated TOML config, optional SQLite state, staged reloads with rollback, audit log, and signed webhooks |
+| **Operations** | Validated TOML config, optional SQLite state, staged reloads with rollback, audit log, signed webhooks, and Prometheus metrics |
 
 ## Quick start
 
@@ -79,6 +85,9 @@ That is a private recursive resolver with DNSSEC validation. Prefer a ready-made
 | Install it as an always-on service | [Deployment guides](docs/deployment/README.md) (Docker, Podman, Kubernetes, Linux, macOS, Windows) |
 | Let my phone, laptop, and TV use it | [Serve your network](docs/guides/serve-your-network.md) |
 | Block ads and trackers | [Filtering](docs/guides/filtering.md) |
+| Name my own devices and services | [Your own DNS zones](docs/guides/authoritative-dns.md#easy-local-dns-manager) |
+| Hand out IP addresses | [DHCP server](docs/guides/dhcp.md) |
+| Serve encrypted DNS with a real certificate | [Encrypted DNS](docs/guides/encrypted-dns.md) and [Automatic certificates](docs/guides/certificates.md) |
 | Use the browser interface | [Web console](docs/guides/web-console.md) (start Lumen with `--state`) |
 | Forward to an encrypted provider | [Resolver modes](docs/guides/resolver-modes.md) and [Upstream providers](docs/guides/upstream-providers.md) |
 | Look up every setting | [Configuration reference](docs/reference/configuration.md) |
@@ -99,13 +108,14 @@ Details: [Threat model](docs/design/threat-model.md) and [Security policy](SECUR
 ## How it works
 
 ```text
-Client (UDP · TCP · DoH · DoT · DoQ)
+Client (UDP · TCP · DoH · DoH3 · DoT · DoQ · DNSCrypt)
                     │
            Access and rate limits
                     │
           Filter policy snapshot ─── Block response
                     │
-        Recursive or forward resolver
+        Your own zones (if any), then
+        recursive or forward resolver
                     │
         DNSSEC validation + cache
                     │
@@ -116,9 +126,9 @@ Lumen is a Rust workspace with a single shared resolver pipeline and deliberatel
 
 ## Project status
 
-**Implemented:** recursive and forwarding DNS, five transports, DNSSEC, per-device filtering, managed mode, the web console in five languages, opt-in query history, optional single sign-on, an authenticated API, metrics, and deployment files for six platforms.
+**Implemented:** recursive and forwarding DNS, seven transports, DNSSEC, per-device filtering with regex rules and SafeSearch, serve-stale and a persistent cache, local DNS and authoritative zones, an optional DHCP server and mDNS bridge, automatic certificates, managed mode, the web console in five languages, opt-in query history, optional single sign-on, an authenticated API, metrics, and deployment files for six platforms.
 
-**Still ahead:** certificate and trust-anchor automation, split DNS and local records, high availability, more interoperability and soak testing, real-hardware validation, and independent security review. These are **roadmap items, not current capabilities**.
+**Still ahead:** a device and room manager, DNSCrypt upstreams and native ECH, high availability, more interoperability and soak testing (including live ACME and real-hardware checks), and independent security review. These are **roadmap items, not current capabilities**.
 
 See the [roadmap](docs/project/roadmap.md), the [verification record](docs/project/verification.md), and [performance notes](docs/project/performance.md). Measured idle memory and loopback latency are recorded there; there is no verified production throughput claim yet.
 
@@ -129,7 +139,7 @@ Everything lives in **[`docs/`](docs/README.md)**:
 | Section | What is in it |
 | :--- | :--- |
 | [Getting started](docs/getting-started/quick-start.md) | Quick start and concepts |
-| [Guides](docs/README.md#guides-how-to-do-things) | Network access, resolver modes, encrypted DNS, filtering, console, monitoring |
+| [Guides](docs/README.md#guides-how-to-do-things) | Network access, resolver modes, encrypted DNS, certificates, local zones, DHCP, mDNS, filtering, console, monitoring |
 | [Deployment](docs/deployment/README.md) | Platform guides and the compatibility matrix |
 | [Reference](docs/reference/configuration.md) | Configuration, command line, API, DNS behavior, DNSSEC |
 | [Design](docs/design/architecture.md) | Architecture and threat model |

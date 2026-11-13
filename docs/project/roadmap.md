@@ -24,6 +24,12 @@ _Last updated 2026-11-13 for version 0.7.0._
 - Optional external console login through OpenID Connect providers (off by default)
 - Native packages for six platforms and container images for `linux/amd64` and `linux/arm64`
 - An admin-only local DNS manager with typed, bounded zones and records, safe staged apply, and advanced zones shown read-only
+- Authoritative zones with split-horizon views, conditional forwarding, RFC 2136 dynamic updates, zone transfers, and DNSSEC signing (NSEC, NSEC3, operator-driven key rollover)
+- Seven transports: UDP, TCP, DoT, DoH (HTTP/2), DoH3, DoQ, and a DNSCrypt v2 server, with DoH3 upstreams and EDNS padding on encrypted links
+- Automatic certificates (ACME, HTTP-01 and DNS-01) with renewal that loads without a restart, and automatic root key rollover (RFC 5011)
+- Serve-stale (RFC 8767) and an optional persistent DNS cache
+- Regex filter rules, CNAME-based blocking, opt-in SafeSearch, and child-safety categories
+- Optional DHCP server (IPv4, IPv6, Router Advertisements, failover) and multicast DNS bridge, both off by default
 
 **Completed in 0.7.0**
 
