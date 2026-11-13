@@ -1435,6 +1435,7 @@ dependencies = [
  "ipnet",
  "lumen-filter",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]

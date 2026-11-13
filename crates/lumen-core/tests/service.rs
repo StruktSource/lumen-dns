@@ -2100,6 +2100,72 @@ async fn authoritative_zones_views_and_conditional_forwarding() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn managed_zone_edits_and_deletes_stay_authoritative() {
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    cfg.zones = vec![lumen_config::Zone {
+        name: "home.arpa".into(),
+        managed: Some(lumen_config::ManagedZone {
+            description: Some("Local names".into()),
+            default_ttl: 300,
+            records: vec![lumen_config::ManagedRecord {
+                name: "router".into(),
+                ttl: None,
+                data: lumen_config::ManagedRecordData::A {
+                    address: "192.0.2.10".parse().unwrap(),
+                },
+            }],
+        }),
+        ..Default::default()
+    }];
+
+    let a_record = |message: &Message| {
+        message
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                RData::A(address) => Some(address.0.to_string()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let packet = query("router.home.arpa.", RecordType::A);
+    let mut server = RunningServer::start(cfg.clone()).await.unwrap();
+    let reply = udp(bind, &packet).await;
+    assert!(reply.metadata.authoritative);
+    assert_eq!(a_record(&reply), "192.0.2.10");
+    let mut tcp = TcpStream::connect(bind).await.unwrap();
+    let reply = framed(&mut tcp, &packet).await;
+    assert!(reply.metadata.authoritative);
+    assert_eq!(a_record(&reply), "192.0.2.10");
+    let nodata = udp(bind, &query("router.home.arpa.", RecordType::AAAA)).await;
+    assert_eq!(nodata.metadata.response_code, ResponseCode::NoError);
+    assert!(nodata.metadata.authoritative);
+    assert!(nodata.answers.is_empty());
+    assert_eq!(upstream.queries.load(Ordering::Relaxed), 0);
+    drop(tcp);
+    server.shutdown().await;
+
+    if let lumen_config::ManagedRecordData::A { address } =
+        &mut cfg.zones[0].managed.as_mut().unwrap().records[0].data
+    {
+        *address = "192.0.2.20".parse().unwrap();
+    }
+    let mut server = RunningServer::start(cfg.clone()).await.unwrap();
+    assert_eq!(a_record(&udp(bind, &packet).await), "192.0.2.20");
+    server.shutdown().await;
+
+    cfg.zones[0].managed.as_mut().unwrap().records.clear();
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    let deleted = udp(bind, &packet).await;
+    assert_eq!(deleted.metadata.response_code, ResponseCode::NXDomain);
+    assert!(deleted.metadata.authoritative);
+    assert_eq!(upstream.queries.load(Ordering::Relaxed), 0);
+    server.shutdown().await;
+}
+
 fn tsig_signer(name: &str, secret: &[u8]) -> hickory_proto::rr::TSigner {
     hickory_proto::rr::TSigner::new(
         secret.to_vec(),

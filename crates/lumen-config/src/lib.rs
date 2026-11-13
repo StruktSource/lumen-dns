@@ -5,7 +5,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -55,6 +55,9 @@ pub struct Zone {
     pub name: String,
     pub file: Option<PathBuf>,
     pub text: Option<String>,
+    /// Records owned by the web-console local DNS manager. Exclusive with `file`, `text`,
+    /// split views, dynamic updates, transfers, notifications, and DNSSEC signing.
+    pub managed: Option<ManagedZone>,
     pub views: Vec<ZoneView>,
     /// `SQLite` journal that makes the zone dynamic (RFC 2136 updates survive restarts). Needs
     /// `file`, at least one `update_rules` entry, and cannot be combined with `views`.
@@ -69,6 +72,83 @@ pub struct Zone {
     /// Sign this zone with DNSSEC. Only plain zones: no views, journal, or transfers.
     pub dnssec: Option<ZoneSigning>,
 }
+
+/// A bounded, structured local zone. Lumen generates its SOA and NS records.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ManagedZone {
+    /// Operator note shown in the console. It is not published in DNS.
+    pub description: Option<String>,
+    /// TTL used when a record has no explicit TTL.
+    pub default_ttl: u32,
+    pub records: Vec<ManagedRecord>,
+}
+
+impl Default for ManagedZone {
+    fn default() -> Self {
+        Self {
+            description: None,
+            default_ttl: 300,
+            records: Vec::new(),
+        }
+    }
+}
+
+/// One structured record in a console-managed zone.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ManagedRecord {
+    /// `@` means the zone apex. Other names are relative to the zone.
+    pub name: String,
+    /// Uses the zone default when omitted.
+    pub ttl: Option<u32>,
+    #[serde(flatten)]
+    pub data: ManagedRecordData,
+}
+
+/// Record types exposed by the local DNS manager.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ManagedRecordData {
+    A {
+        address: Ipv4Addr,
+    },
+    Aaaa {
+        address: Ipv6Addr,
+    },
+    Cname {
+        target: String,
+    },
+    Txt {
+        value: String,
+    },
+    Ptr {
+        target: String,
+    },
+    Mx {
+        priority: u16,
+        exchange: String,
+    },
+    Srv {
+        priority: u16,
+        weight: u16,
+        port: u16,
+        target: String,
+    },
+    Caa {
+        flags: u8,
+        tag: String,
+        value: String,
+    },
+    Tlsa {
+        usage: u8,
+        selector: u8,
+        matching_type: u8,
+        certificate_association_data: String,
+    },
+}
+
+/// Most records one console-managed zone accepts.
+pub const MAX_MANAGED_ZONE_RECORDS: usize = 1024;
 
 /// DNSSEC algorithms Lumen can sign with.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
@@ -1333,6 +1413,7 @@ impl Config {
         self.validate_resolver()
     }
 
+    #[allow(clippy::too_many_lines)] // One bounded validation pass over all zone feature forms.
     fn validate_zones(&self) -> Result<(), String> {
         fn valid_name(name: &str) -> bool {
             (1..=253).contains(&name.len())
@@ -1345,13 +1426,173 @@ impl Config {
                             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                 })
         }
-        fn one_source(file: Option<&PathBuf>, text: Option<&String>) -> Result<(), String> {
-            match (file, text) {
-                (Some(_), None) => Ok(()),
-                (None, Some(text)) if text.len() <= MAX_ZONE_BYTES => Ok(()),
-                (None, Some(_)) => Err(format!("zone text exceeds {MAX_ZONE_BYTES} bytes")),
-                _ => Err("each zone and view needs exactly one of file or text".into()),
+        fn one_source(
+            file: Option<&PathBuf>,
+            text: Option<&String>,
+            managed: Option<&ManagedZone>,
+        ) -> Result<(), String> {
+            match (file, text, managed) {
+                (Some(_), None, None) | (None, None, Some(_)) => Ok(()),
+                (None, Some(text), None) if text.len() <= MAX_ZONE_BYTES => Ok(()),
+                (None, Some(_), None) => Err(format!("zone text exceeds {MAX_ZONE_BYTES} bytes")),
+                _ => Err("each zone needs exactly one of file, text, or managed".into()),
             }
+        }
+        fn valid_relative_name(name: &str) -> bool {
+            if name == "@" {
+                return true;
+            }
+            (1..=253).contains(&name.len())
+                && !name.ends_with('.')
+                && name.split('.').enumerate().all(|(index, label)| {
+                    (1..=63).contains(&label.len())
+                        && ((index == 0 && label == "*")
+                            || label
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+                })
+        }
+        fn valid_target(name: &str, zone_name: &str) -> bool {
+            let absolute = name.ends_with('.');
+            let name = name.strip_suffix('.').unwrap_or(name);
+            name == "@"
+                || (valid_name(name) && (absolute || name.len() + 1 + zone_name.len() <= 253))
+        }
+        #[allow(clippy::too_many_lines)] // Exhaustive checks keep every managed RR type fail-closed.
+        fn validate_managed(zone_name: &str, managed: &ManagedZone) -> Result<(), String> {
+            fn record_identity(record: &ManagedRecord) -> String {
+                let data = match &record.data {
+                    ManagedRecordData::A { address } => format!("a|{address}"),
+                    ManagedRecordData::Aaaa { address } => format!("aaaa|{address}"),
+                    ManagedRecordData::Cname { target } => {
+                        format!("cname|{}", target.to_ascii_lowercase())
+                    }
+                    ManagedRecordData::Txt { value } => format!("txt|{value}"),
+                    ManagedRecordData::Ptr { target } => {
+                        format!("ptr|{}", target.to_ascii_lowercase())
+                    }
+                    ManagedRecordData::Mx { priority, exchange } => {
+                        format!("mx|{priority}|{}", exchange.to_ascii_lowercase())
+                    }
+                    ManagedRecordData::Srv {
+                        priority,
+                        weight,
+                        port,
+                        target,
+                    } => format!(
+                        "srv|{priority}|{weight}|{port}|{}",
+                        target.to_ascii_lowercase()
+                    ),
+                    ManagedRecordData::Caa { flags, tag, value } => {
+                        format!("caa|{flags}|{}|{value}", tag.to_ascii_lowercase())
+                    }
+                    ManagedRecordData::Tlsa {
+                        usage,
+                        selector,
+                        matching_type,
+                        certificate_association_data,
+                    } => format!(
+                        "tlsa|{usage}|{selector}|{matching_type}|{}",
+                        certificate_association_data.to_ascii_lowercase()
+                    ),
+                };
+                format!("{}|{data}", record.name.to_ascii_lowercase())
+            }
+
+            if zone_name.eq_ignore_ascii_case("local")
+                || zone_name
+                    .rsplit_once('.')
+                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("local"))
+            {
+                return Err("console-managed zones cannot use .local; use the mDNS bridge".into());
+            }
+            if !(1..=604_800).contains(&managed.default_ttl) {
+                return Err("managed zone default_ttl must be in 1..=604800".into());
+            }
+            if managed.records.len() > MAX_MANAGED_ZONE_RECORDS {
+                return Err(format!(
+                    "managed zones may have at most {MAX_MANAGED_ZONE_RECORDS} records"
+                ));
+            }
+            if managed.description.as_ref().is_some_and(|description| {
+                description.chars().count() > 200 || description.chars().any(char::is_control)
+            }) {
+                return Err(
+                    "managed zone descriptions must be at most 200 plain characters".into(),
+                );
+            }
+            let mut owners = std::collections::HashMap::<String, (bool, usize)>::new();
+            let mut records = std::collections::HashSet::new();
+            for record in &managed.records {
+                if !valid_relative_name(&record.name)
+                    || (record.name != "@" && record.name.len() + 1 + zone_name.len() > 253)
+                {
+                    return Err("managed record names must be @ or relative DNS names".into());
+                }
+                if record.ttl.is_some_and(|ttl| !(1..=604_800).contains(&ttl)) {
+                    return Err("managed record ttl must be in 1..=604800".into());
+                }
+                if !records.insert(record_identity(record)) {
+                    return Err("managed zones cannot contain duplicate records".into());
+                }
+                let is_cname = matches!(&record.data, ManagedRecordData::Cname { .. });
+                let state = owners.entry(record.name.to_ascii_lowercase()).or_default();
+                state.0 |= is_cname;
+                state.1 += 1;
+                match &record.data {
+                    ManagedRecordData::Cname { target }
+                    | ManagedRecordData::Ptr { target }
+                    | ManagedRecordData::Srv { target, .. } => {
+                        if !valid_target(target, zone_name) {
+                            return Err("managed record target is not a DNS name".into());
+                        }
+                    }
+                    ManagedRecordData::Mx { exchange, .. } => {
+                        if !valid_target(exchange, zone_name) {
+                            return Err("managed MX exchange is not a DNS name".into());
+                        }
+                    }
+                    ManagedRecordData::Txt { value } => {
+                        if value.len() > 255 || value.chars().any(char::is_control) {
+                            return Err("managed TXT values must be at most 255 bytes".into());
+                        }
+                    }
+                    ManagedRecordData::Caa { tag, value, .. } => {
+                        if tag.is_empty()
+                            || tag.len() > 15
+                            || !tag.bytes().all(|b| b.is_ascii_alphanumeric())
+                            || value.len() > 255
+                            || value.chars().any(char::is_control)
+                        {
+                            return Err("managed CAA tag or value is invalid".into());
+                        }
+                    }
+                    ManagedRecordData::Tlsa {
+                        usage,
+                        selector,
+                        matching_type,
+                        certificate_association_data,
+                    } => {
+                        if *usage > 3
+                            || *selector > 1
+                            || *matching_type > 2
+                            || certificate_association_data.is_empty()
+                            || certificate_association_data.len() > 4096
+                            || !certificate_association_data.len().is_multiple_of(2)
+                            || !certificate_association_data
+                                .bytes()
+                                .all(|b| b.is_ascii_hexdigit())
+                        {
+                            return Err("managed TLSA fields are invalid".into());
+                        }
+                    }
+                    ManagedRecordData::A { .. } | ManagedRecordData::Aaaa { .. } => {}
+                }
+            }
+            if owners.values().any(|(cname, count)| *cname && *count != 1) {
+                return Err("a managed CNAME owner cannot have another record".into());
+            }
+            Ok(())
         }
         if self.zones.len() > MAX_ZONES || self.forwarders.len() > MAX_FORWARDERS {
             return Err("too many zones or forwarders".into());
@@ -1361,7 +1602,23 @@ impl Config {
             if !valid_name(&zone.name) || !seen.insert(zone.name.to_ascii_lowercase()) {
                 return Err("zone names must be unique DNS names without a trailing dot".into());
             }
-            one_source(zone.file.as_ref(), zone.text.as_ref())?;
+            one_source(
+                zone.file.as_ref(),
+                zone.text.as_ref(),
+                zone.managed.as_ref(),
+            )?;
+            if let Some(managed) = &zone.managed {
+                if !zone.views.is_empty()
+                    || zone.journal.is_some()
+                    || !zone.update_rules.is_empty()
+                    || !zone.transfer_keys.is_empty()
+                    || !zone.notify.is_empty()
+                    || zone.dnssec.is_some()
+                {
+                    return Err("managed zones cannot use views, journals, updates, transfers, notifications, or DNSSEC".into());
+                }
+                validate_managed(&zone.name, managed)?;
+            }
             if zone.notify.len() > 8
                 || zone
                     .notify
@@ -1379,7 +1636,7 @@ impl Config {
                 if view.clients.is_empty() || view.clients.len() > 32 {
                     return Err("each view needs 1..=32 client networks".into());
                 }
-                one_source(view.file.as_ref(), view.text.as_ref())?;
+                one_source(view.file.as_ref(), view.text.as_ref(), None)?;
             }
         }
         self.validate_tsig(&valid_name)?;
@@ -3423,6 +3680,150 @@ mod tests {
         assert!(bad.validate().is_err());
         bad = config;
         bad.resolver.persistent_cache.max_bytes = 1024;
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One round-trip matrix covers every managed RR type.
+    fn managed_zones_are_typed_bounded_and_isolated_from_advanced_features() {
+        let record = |name: &str, data| ManagedRecord {
+            name: name.into(),
+            ttl: None,
+            data,
+        };
+        let config = Config {
+            schema_version: 1,
+            zones: vec![Zone {
+                name: "home.arpa".into(),
+                managed: Some(ManagedZone {
+                    description: Some("Local names".into()),
+                    default_ttl: 300,
+                    records: vec![
+                        record(
+                            "dash",
+                            ManagedRecordData::A {
+                                address: "192.168.1.10".parse().unwrap(),
+                            },
+                        ),
+                        record(
+                            "dash",
+                            ManagedRecordData::Aaaa {
+                                address: "fd00::10".parse().unwrap(),
+                            },
+                        ),
+                        record(
+                            "alias",
+                            ManagedRecordData::Cname {
+                                target: "dash".into(),
+                            },
+                        ),
+                        record(
+                            "note",
+                            ManagedRecordData::Txt {
+                                value: "hello".into(),
+                            },
+                        ),
+                        record(
+                            "10.1.168.192.in-addr",
+                            ManagedRecordData::Ptr {
+                                target: "dash".into(),
+                            },
+                        ),
+                        record(
+                            "@",
+                            ManagedRecordData::Mx {
+                                priority: 10,
+                                exchange: "mail".into(),
+                            },
+                        ),
+                        record(
+                            "_http._tcp",
+                            ManagedRecordData::Srv {
+                                priority: 0,
+                                weight: 5,
+                                port: 443,
+                                target: "dash".into(),
+                            },
+                        ),
+                        record(
+                            "@",
+                            ManagedRecordData::Caa {
+                                flags: 0,
+                                tag: "issue".into(),
+                                value: "ca.example".into(),
+                            },
+                        ),
+                        record(
+                            "_443._tcp.dash",
+                            ManagedRecordData::Tlsa {
+                                usage: 3,
+                                selector: 1,
+                                matching_type: 1,
+                                certificate_association_data: "aabb".into(),
+                            },
+                        ),
+                    ],
+                }),
+                ..Zone::default()
+            }],
+            ..Config::default()
+        };
+        config.validate().unwrap();
+
+        let toml = toml::to_string(&config).unwrap();
+        let json = serde_json::to_string(&config).unwrap();
+        for record_type in [
+            "a", "aaaa", "cname", "txt", "ptr", "mx", "srv", "caa", "tlsa",
+        ] {
+            assert!(toml.contains(&format!("type = \"{record_type}\"")));
+            assert!(json.contains(&format!("\"type\":\"{record_type}\"")));
+        }
+        let toml_round_trip: Config = toml::from_str(&toml).unwrap();
+        toml_round_trip.validate().unwrap();
+        let json_round_trip: Config = serde_json::from_str(&json).unwrap();
+        json_round_trip.validate().unwrap();
+
+        let mut bad = config.clone();
+        bad.zones[0].name = "Devices.LOCAL".into();
+        assert!(bad.validate().is_err());
+        let mut bad = config.clone();
+        bad.zones[0].text = Some("not allowed beside managed".into());
+        assert!(bad.validate().is_err());
+        let mut bad = config.clone();
+        bad.zones[0].managed.as_mut().unwrap().description = Some("é".repeat(201));
+        assert!(bad.validate().is_err());
+        let mut bad = config.clone();
+        bad.zones[0].views.push(ZoneView {
+            clients: vec!["10.0.0.0/8".parse().unwrap()],
+            text: Some("ignored".into()),
+            ..ZoneView::default()
+        });
+        assert!(bad.validate().is_err());
+        let mut bad = config.clone();
+        bad.zones[0].managed.as_mut().unwrap().records.push(record(
+            "alias",
+            ManagedRecordData::Txt {
+                value: "conflict".into(),
+            },
+        ));
+        assert!(bad.validate().is_err());
+        let mut bad = config.clone();
+        let mut duplicate = bad.zones[0].managed.as_ref().unwrap().records[0].clone();
+        duplicate.name = duplicate.name.to_ascii_uppercase();
+        duplicate.ttl = Some(123);
+        bad.zones[0]
+            .managed
+            .as_mut()
+            .unwrap()
+            .records
+            .push(duplicate);
+        assert!(bad.validate().is_err());
+        let mut bad = config;
+        if let ManagedRecordData::Txt { value } =
+            &mut bad.zones[0].managed.as_mut().unwrap().records[3].data
+        {
+            *value = "line\nbreak".into();
+        }
         assert!(bad.validate().is_err());
     }
 }

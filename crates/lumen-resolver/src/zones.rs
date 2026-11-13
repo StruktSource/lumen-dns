@@ -28,8 +28,11 @@ use hickory_server::{
     },
 };
 use ipnet::IpNet;
-use lumen_config::{Config, Forwarder, TsigKey, Upstream, UpstreamProtocol, Zone, read_bounded};
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use lumen_config::{
+    Config, Forwarder, ManagedRecordData, ManagedZone as ManagedZoneConfig, TsigKey, Upstream,
+    UpstreamProtocol, Zone, read_bounded,
+};
+use std::{fmt::Write, net::IpAddr, sync::Arc, time::Duration};
 
 /// Handlers to install, with each origin so callers can skip response caches for them.
 pub(crate) struct Built {
@@ -93,6 +96,69 @@ fn read_source(file: Option<&std::path::PathBuf>, text: Option<&String>) -> Resu
     }
 }
 
+fn quoted(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Turn a typed console-managed zone into ordinary bounded master-file data. Hickory then uses
+/// the same parser and handler as an advanced inline zone.
+fn managed_source(name: &str, managed: &ManagedZoneConfig) -> Result<String, String> {
+    let ttl = managed.default_ttl;
+    let mut source = format!(
+        "$ORIGIN {name}.\n@ {ttl} IN SOA ns.{name}. hostmaster.{name}. 1 3600 600 604800 {ttl}\n@ {ttl} IN NS ns.{name}.\n"
+    );
+    for record in &managed.records {
+        let ttl = record.ttl.unwrap_or(ttl);
+        write!(&mut source, "{} {ttl} IN ", record.name)
+            .map_err(|_| "cannot render managed zone")?;
+        match &record.data {
+            ManagedRecordData::A { address } => writeln!(&mut source, "A {address}"),
+            ManagedRecordData::Aaaa { address } => writeln!(&mut source, "AAAA {address}"),
+            ManagedRecordData::Cname { target } => writeln!(&mut source, "CNAME {target}"),
+            ManagedRecordData::Txt { value } => {
+                writeln!(&mut source, "TXT \"{}\"", quoted(value))
+            }
+            ManagedRecordData::Ptr { target } => writeln!(&mut source, "PTR {target}"),
+            ManagedRecordData::Mx { priority, exchange } => {
+                writeln!(&mut source, "MX {priority} {exchange}")
+            }
+            ManagedRecordData::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            } => writeln!(&mut source, "SRV {priority} {weight} {port} {target}"),
+            ManagedRecordData::Caa { flags, tag, value } => {
+                writeln!(&mut source, "CAA {flags} {tag} \"{}\"", quoted(value))
+            }
+            ManagedRecordData::Tlsa {
+                usage,
+                selector,
+                matching_type,
+                certificate_association_data,
+            } => writeln!(
+                &mut source,
+                "TLSA {usage} {selector} {matching_type} {certificate_association_data}"
+            ),
+        }
+        .map_err(|_| "cannot render managed zone")?;
+    }
+    if source.len() > lumen_config::MAX_ZONE_BYTES {
+        return Err(format!(
+            "managed zone {name} exceeds {} bytes",
+            lumen_config::MAX_ZONE_BYTES
+        ));
+    }
+    Ok(source)
+}
+
+fn zone_source(zone: &Zone) -> Result<String, String> {
+    match &zone.managed {
+        Some(managed) => managed_source(&zone.name, managed),
+        None => read_source(zone.file.as_ref(), zone.text.as_ref()),
+    }
+}
+
 /// Parse one zone copy. The SOA record and apex NS records must be present.
 fn static_zone(name: &str, source: &str) -> Result<Arc<dyn ZoneHandler>, String> {
     let origin =
@@ -150,21 +216,14 @@ fn zone_handler(
     resign: &mut Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
 ) -> Result<Arc<dyn ZoneHandler>, String> {
     if let Some(signing) = &zone.dnssec {
-        let handler = signed_zone(
-            &zone.name,
-            &read_source(zone.file.as_ref(), zone.text.as_ref())?,
-            signing,
-        )?;
+        let handler = signed_zone(&zone.name, &zone_source(zone)?, signing)?;
         resign.push(Arc::clone(&handler));
         return Ok(handler);
     }
     if zone.journal.is_some() || !zone.transfer_keys.is_empty() {
         return managed_zone(zone, signers, persist);
     }
-    let default = static_zone(
-        &zone.name,
-        &read_source(zone.file.as_ref(), zone.text.as_ref())?,
-    )?;
+    let default = static_zone(&zone.name, &zone_source(zone)?)?;
     if zone.views.is_empty() {
         return Ok(default);
     }
@@ -765,5 +824,89 @@ mod tests {
             &default
         ));
         assert_eq!(mux.axfr_policy(), AxfrPolicy::Deny);
+    }
+
+    #[test]
+    fn managed_records_render_as_valid_authoritative_zone_data() {
+        let record = |name: &str, data| lumen_config::ManagedRecord {
+            name: name.into(),
+            ttl: None,
+            data,
+        };
+        let managed = ManagedZoneConfig {
+            description: Some("Local names".into()),
+            default_ttl: 300,
+            records: vec![
+                record(
+                    "dash",
+                    ManagedRecordData::A {
+                        address: "192.0.2.10".parse().unwrap(),
+                    },
+                ),
+                record(
+                    "dash",
+                    ManagedRecordData::Aaaa {
+                        address: "2001:db8::10".parse().unwrap(),
+                    },
+                ),
+                record(
+                    "alias",
+                    ManagedRecordData::Cname {
+                        target: "dash".into(),
+                    },
+                ),
+                record(
+                    "note",
+                    ManagedRecordData::Txt {
+                        value: "quoted \"text\" and \\ slash".into(),
+                    },
+                ),
+                record(
+                    "10.2.0.192.in-addr",
+                    ManagedRecordData::Ptr {
+                        target: "dash".into(),
+                    },
+                ),
+                record(
+                    "@",
+                    ManagedRecordData::Mx {
+                        priority: 10,
+                        exchange: "mail".into(),
+                    },
+                ),
+                record(
+                    "_https._tcp",
+                    ManagedRecordData::Srv {
+                        priority: 0,
+                        weight: 5,
+                        port: 443,
+                        target: "dash".into(),
+                    },
+                ),
+                record(
+                    "@",
+                    ManagedRecordData::Caa {
+                        flags: 0,
+                        tag: "issue".into(),
+                        value: "ca.example".into(),
+                    },
+                ),
+                record(
+                    "_443._tcp.dash",
+                    ManagedRecordData::Tlsa {
+                        usage: 3,
+                        selector: 1,
+                        matching_type: 1,
+                        certificate_association_data: "aabb".into(),
+                    },
+                ),
+            ],
+        };
+        let source = managed_source("home.arpa", &managed).unwrap();
+        assert!(source.contains("@ 300 IN SOA ns.home.arpa."));
+        assert!(source.contains("@ 300 IN NS ns.home.arpa."));
+        assert!(source.contains("TXT \"quoted \\\"text\\\" and \\\\ slash\""));
+        assert!(source.contains("TLSA 3 1 1 aabb"));
+        assert!(static_zone("home.arpa", &source).is_ok());
     }
 }
