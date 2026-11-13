@@ -2,7 +2,7 @@
 
 use crate::{
     failover::{self, Failover, Wire},
-    relay,
+    ra, relay,
     store::Store,
     v4::{self, Change, Destination},
     v6::{self, Change6},
@@ -77,12 +77,29 @@ pub struct FailoverInfo {
     pub active: bool,
 }
 
+/// One interface Router Advertisements go out on, as the console shows it.
+#[derive(Clone, Debug)]
+pub struct AdvertisementInfo {
+    pub interface: String,
+    /// The advertised prefixes, such as `2001:db8:1::/64`.
+    pub prefixes: Vec<String>,
+    pub managed: bool,
+    pub other_config: bool,
+    /// Seconds hosts keep this machine as a default router; 0 means it is not one.
+    pub router_lifetime_secs: u32,
+    pub dns: Vec<Ipv6Addr>,
+    pub sent: u64,
+    /// Unix seconds of the last advertisement, 0 before the first.
+    pub last_sent: u64,
+}
+
 /// A view of the server for status pages. Taking it never blocks packet handling for long.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub scopes: Vec<ScopeInfo>,
     pub leases: Vec<LeaseInfo>,
     pub failover: Option<FailoverInfo>,
+    pub advertisements: Vec<AdvertisementInfo>,
 }
 
 /// The most leases a snapshot lists, so a status page stays small.
@@ -94,27 +111,55 @@ fn hex(bytes: &[u8]) -> String {
     text.join(if bytes.len() == 6 { ":" } else { "" })
 }
 
+/// Send one datagram from a synchronous caller. A socket that has just been created may not be
+/// marked writable yet, so a send that would block finishes in the background instead of
+/// failing.
+fn send_now(socket: &Arc<UdpSocket>, bytes: Vec<u8>, target: SocketAddr) -> Result<(), String> {
+    match socket.try_send_to(&bytes, target) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            let runtime = tokio::runtime::Handle::try_current()
+                .map_err(|_| "could not send: no runtime".to_owned())?;
+            let socket = socket.clone();
+            runtime.spawn(async move {
+                let _ = socket.send_to(&bytes, target).await;
+            });
+            Ok(())
+        }
+        Err(error) => Err(format!("could not send: {error}")),
+    }
+}
+
 /// A cheap, clonable view of the engines.
 #[derive(Clone)]
 pub struct Handle {
     engines4: Vec<Engine4>,
+    /// The socket of each IPv4 scope, in the same order as `engines4`.
+    sockets4: Vec<Arc<UdpSocket>>,
     engines6: Vec<Engine6>,
     failover: Option<Arc<Failover>>,
     role: Option<FailoverRole>,
     socket6: Option<Arc<UdpSocket>>,
+    client_port4: u16,
     client_port6: u16,
+    advertisements: Vec<(Arc<ra::Advertisement>, Arc<ra::Stats>)>,
 }
 
 impl Handle {
-    /// Ask the device that holds `ip` to renew now (or, with `info_only`, to ask for its
-    /// configuration again), with a signed Reconfigure message (RFC 8415 section 18.4).
+    /// Ask the device that holds `ip` to renew now.
+    ///
+    /// For IPv6 this is a signed Reconfigure message (RFC 8415 section 18.4); with `info_only`
+    /// the device is asked to fetch its configuration again instead. For IPv4 it is
+    /// `DHCPFORCERENEW` (RFC 3203, authenticated as RFC 6704 describes), and `info_only` does
+    /// not apply.
     ///
     /// # Errors
     /// The address is not a leased address of a client that agreed to be reconfigured, or the
     /// message could not be sent.
     pub fn reconfigure(&self, ip: IpAddr, info_only: bool) -> Result<(), String> {
-        let IpAddr::V6(ip) = ip else {
-            return Err("only DHCPv6 clients can be reconfigured".into());
+        let ip = match ip {
+            IpAddr::V4(ip) => return self.forcerenew(ip),
+            IpAddr::V6(ip) => ip,
         };
         let socket = self
             .socket6
@@ -130,10 +175,23 @@ impl Handle {
                 .reconfigure_message(&client, info_only, moment)
                 .ok_or("that device did not agree to be reconfigured")?;
             let bytes = message.to_vec().map_err(|error| error.to_string())?;
-            return socket
-                .try_send_to(&bytes, SocketAddr::new(ip.into(), self.client_port6))
-                .map(|_| ())
-                .map_err(|error| format!("could not send: {error}"));
+            return send_now(socket, bytes, SocketAddr::new(ip.into(), self.client_port6));
+        }
+        Err("no device that agreed to be reconfigured holds that address".into())
+    }
+
+    fn forcerenew(&self, ip: std::net::Ipv4Addr) -> Result<(), String> {
+        let moment = now();
+        for (engine, socket) in self.engines4.iter().zip(&self.sockets4) {
+            let mut engine = locked(engine);
+            let Some(client) = engine.forcerenewable_client(ip, moment) else {
+                continue;
+            };
+            let message = engine
+                .forcerenew_message(&client, moment.saturating_mul(1000))
+                .ok_or("that device did not agree to be reconfigured")?;
+            let bytes = message.to_vec().map_err(|error| error.to_string())?;
+            return send_now(socket, bytes, SocketAddr::new(ip.into(), self.client_port4));
         }
         Err("no device that agreed to be reconfigured holds that address".into())
     }
@@ -161,7 +219,7 @@ impl Handle {
                 ip: lease.ip.into(),
                 prefix_len: None,
                 temporary: false,
-                reconfigurable: false,
+                reconfigurable: engine.forcerenewable_client(lease.ip, moment).is_some(),
                 client: hex(&lease.client),
                 hostname: lease.hostname,
                 expires: lease.expires,
@@ -203,6 +261,24 @@ impl Handle {
                 }));
         }
         out.leases.truncate(SNAPSHOT_LEASES);
+        out.advertisements = self
+            .advertisements
+            .iter()
+            .map(|(advertisement, stats)| AdvertisementInfo {
+                interface: advertisement.interface.clone(),
+                prefixes: advertisement
+                    .prefixes
+                    .iter()
+                    .map(|item| item.prefix.to_string())
+                    .collect(),
+                managed: advertisement.managed,
+                other_config: advertisement.other_config,
+                router_lifetime_secs: u32::from(advertisement.router_lifetime),
+                dns: advertisement.dns.clone(),
+                sent: stats.sent.load(std::sync::atomic::Ordering::Relaxed),
+                last_sent: stats.last_sent.load(std::sync::atomic::Ordering::Relaxed),
+            })
+            .collect();
         out.failover = self
             .failover
             .as_ref()
@@ -226,6 +302,8 @@ pub struct Running {
     /// The addresses the sockets are bound to, for tests and logs.
     pub bound4: Vec<SocketAddr>,
     pub bound6: Option<SocketAddr>,
+    /// Withdraws this machine as a default router when the server stops.
+    goodbyes: Vec<ra::Goodbye>,
 }
 
 impl Running {
@@ -238,6 +316,9 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
+        for goodbye in &self.goodbyes {
+            goodbye.send();
+        }
         for task in &self.tasks {
             task.abort();
         }
@@ -288,6 +369,15 @@ impl Shared {
                     self.tell(Wire::End4 { ip });
                 }
             }
+        }
+    }
+
+    fn keep_forcerenew_key(&self, key: &v4::ForceKey) {
+        if let Err(error) = self
+            .store
+            .put_forcerenew_key(&key.client, &key.key, &key.chaddr)
+        {
+            eprintln!("dhcp: cannot save a forcerenew key ({error})");
         }
     }
 
@@ -497,7 +587,7 @@ impl Engines {
 }
 
 #[cfg(unix)]
-fn interface_index(name: &str) -> io::Result<u32> {
+pub(crate) fn interface_index(name: &str) -> io::Result<u32> {
     nix::net::if_::if_nametoindex(name)
         .map_err(|error| io::Error::other(format!("interface {name}: {error}")))
 }
@@ -614,7 +704,7 @@ fn target4(destination: Destination, source: SocketAddr, config: &Dhcp) -> Optio
     }
 }
 
-async fn serve4(socket: UdpSocket, engine: Engine4, shared: Arc<Shared>, config: Arc<Dhcp>) {
+async fn serve4(socket: Arc<UdpSocket>, engine: Engine4, shared: Arc<Shared>, config: Arc<Dhcp>) {
     let mut buffer = [0u8; 1500];
     loop {
         let Ok((length, source)) = socket.recv_from(&mut buffer).await else {
@@ -653,6 +743,9 @@ async fn serve4(socket: UdpSocket, engine: Engine4, shared: Arc<Shared>, config:
         };
         if let Some(change) = reply.change {
             shared.apply4(change, true);
+        }
+        if let Some(key) = &reply.key {
+            shared.keep_forcerenew_key(key);
         }
         let Some(target) = target4(reply.destination, source, &config) else {
             continue;
@@ -759,8 +852,15 @@ async fn expire(engines: Arc<Engines>, shared: Arc<Shared>) {
         tick.tick().await;
         let moment = now();
         for engine in &engines.v4 {
-            for ip in locked(engine).expire(moment) {
+            let mut engine = locked(engine);
+            for ip in engine.expire(moment) {
                 shared.end(ip.into());
+            }
+            // A client with no lease left has no use for its forcerenew nonce.
+            for client in engine.drop_idle_keys() {
+                if let Err(error) = shared.store.remove_forcerenew_key(&client) {
+                    eprintln!("dhcp: cannot delete a forcerenew key ({error})");
+                }
             }
         }
         for engine in &engines.v6 {
@@ -804,6 +904,7 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
     let restored6 = store.load6(moment).map_err(io::Error::other)?;
     let restored_prefixes = store.load_prefixes(moment).map_err(io::Error::other)?;
     let restored_keys = store.load_reconf_keys().map_err(io::Error::other)?;
+    let restored_force = store.load_forcerenew_keys().map_err(io::Error::other)?;
     let duid = store.server_duid(new_duid).map_err(io::Error::other)?;
     let link = config.failover.as_ref().map(Failover::new);
     let shared = Arc::new(Shared {
@@ -831,8 +932,14 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
         for lease in &mine {
             shared.publish(lease.hostname.as_deref(), lease.ip.into());
         }
-        let engine = Arc::new(Mutex::new(v4::Engine::new(scope, &domain, mine, moment)));
-        let socket = socket4(config.listen4, scope, config.scopes.len())?;
+        let mut engine = v4::Engine::new(scope, &domain, mine, moment);
+        engine.restore_forcerenew_keys(restored_force.clone());
+        // Nonces of clients that lost their lease while Lumen was stopped are not kept.
+        for client in engine.drop_idle_keys() {
+            let _ = shared.store.remove_forcerenew_key(&client);
+        }
+        let engine = Arc::new(Mutex::new(engine));
+        let socket = Arc::new(socket4(config.listen4, scope, config.scopes.len())?);
         bound4.push(socket.local_addr()?);
         sockets4.push((socket, engine.clone()));
         engines4.push(engine);
@@ -876,6 +983,17 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
         v4: engines4.clone(),
         v6: engines6.clone(),
     });
+    // Router Advertisements come first: they need a privileged socket, and a refusal must not
+    // leave other tasks running.
+    let mut advertisements = Vec::new();
+    let mut goodbyes = Vec::new();
+    for settings in &config.router_advertisements {
+        let index = interface_index(&settings.interface)?;
+        let started = ra::start(settings, &config, index)?;
+        tasks.push(started.task);
+        goodbyes.extend(started.goodbye);
+        advertisements.push((started.advertisement, started.stats));
+    }
     // The failover link comes up first, so a secondary never answers before it has listened.
     if let (Some(settings), Some(link)) = (config.failover.as_ref(), link.clone()) {
         let (for_snapshot, for_apply, apply_shared) =
@@ -890,6 +1008,7 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
             .await?,
         );
     }
+    let senders4: Vec<Arc<UdpSocket>> = sockets4.iter().map(|(socket, _)| socket.clone()).collect();
     for (socket, engine) in sockets4 {
         tasks.push(tokio::spawn(serve4(
             socket,
@@ -910,11 +1029,14 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
 
     let handle = Handle {
         engines4,
+        sockets4: senders4,
         engines6,
         failover: link,
         role: config.failover.as_ref().map(|settings| settings.role),
         socket6: socket6_shared,
+        client_port4: config.client_port4,
         client_port6: config.client_port6,
+        advertisements,
     };
     tasks.push(tokio::spawn(expire(engines, shared)));
     Ok(Running {
@@ -922,5 +1044,6 @@ pub async fn start(config: &Dhcp, hosts: Arc<Hosts>) -> io::Result<Running> {
         tasks,
         bound4,
         bound6,
+        goodbyes,
     })
 }

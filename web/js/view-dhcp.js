@@ -1,5 +1,5 @@
-/* DHCP module: the scopes Lumen serves and the leases it has handed out. Read-only; the
-   configuration file decides what is served. */
+/* DHCP module: the scopes Lumen serves, the router advertisements it sends, and the leases it
+   has handed out. Read-only; the configuration file decides what is served. */
 (() => {
 'use strict';
 const L = window.L, h = L.h;
@@ -18,6 +18,18 @@ const renew = async l => {
   catch (e) { L.toast(e.message, 'bad'); }
 };
 
+// Router advertisements: what devices on each network are told about IPv6.
+const adverts = d => !d.advertisements || !d.advertisements.length ? null :
+  h('div', { class: 'card', style: 'margin-top:16px' }, h('div', { class: 'card-h' }, h('strong', {}, 'Router advertisements')),
+    h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Interface', 'Prefixes', 'Asks DHCPv6 for', 'DNS servers', 'Default router', 'Last sent'].map(x => h('th', {}, x)))),
+      h('tbody', {}, d.advertisements.map(a => h('tr', {},
+        h('td', {}, h('strong', {}, a.interface)),
+        h('td', { class: 'mono-c' }, a.prefixes.length ? a.prefixes.join(', ') : '—'),
+        h('td', {}, a.managed || a.other_config ? [a.managed ? h('span', { class: 'chip' }, 'Addresses') : null, a.other_config ? [' ', h('span', { class: 'chip' }, 'Other settings')] : null] : h('span', { class: 'muted' }, '—')),
+        h('td', { class: 'mono-c' }, a.dns.length ? a.dns.join(', ') : '—'),
+        h('td', {}, a.router_lifetime_secs ? L.fmt.n(a.router_lifetime_secs) + ' s' : h('span', { class: 'muted' }, 'No')),
+        h('td', {}, a.last_sent ? L.fmt.ago(a.last_sent * 1000) : h('span', { class: 'muted' }, 'Not yet'))))))));
+
 L.views.dhcp = () => {
   const d = L.S.dhcp;
   const head = L.pageHead('DHCP', 'Addresses handed out on your network, and the DNS names they become.',
@@ -27,10 +39,11 @@ L.views.dhcp = () => {
   const leases = d.leases.filter(l => !q || (l.ip + l.client + (l.hostname || '')).toLowerCase().includes(q.toLowerCase()));
   const fo = d.failover ? h('div', { class: 'note', style: 'margin-top:16px' }, L.ic('info'), h('p', {}, L.t(d.failover.active ? 'Failover: this is the {role} server and it is answering clients.' : 'Failover: this is the {role} server and it is standing by.', { role: d.failover.role === 'primary' ? L.t('primary') : L.t('secondary') }))) : null;
   return [head, summary(d), fo,
-    h('div', { class: 'card', style: 'margin-top:16px' }, h('div', { class: 'card-h' }, h('strong', {}, 'Networks')),
+    d.scopes.length ? h('div', { class: 'card', style: 'margin-top:16px' }, h('div', { class: 'card-h' }, h('strong', {}, 'Networks')),
       h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Network', 'Range', 'In use'].map(x => h('th', {}, x)))),
         h('tbody', {}, d.scopes.map(s => h('tr', {}, h('td', {}, h('strong', {}, s.network), ' ', h('span', { class: 'chip' }, 'IPv' + s.family), s.interface ? [' ', h('span', { class: 'hint' }, s.interface)] : null),
-          h('td', { class: 'mono-c' }, s.range), h('td', {}, L.fmt.n(s.active) + ' / ' + L.fmt.n(s.capacity)))))))),
+          h('td', { class: 'mono-c' }, s.range), h('td', {}, L.fmt.n(s.active) + ' / ' + L.fmt.n(s.capacity)))))))) : null,
+    adverts(d),
     h('div', { class: 'card', style: 'margin-top:16px' },
       h('div', { class: 'card-h' }, h('input', { class: 'input', style: 'width:280px', placeholder: 'Search leases', 'aria-label': 'Search leases', value: q, oninput: e => { q = e.target.value; L.paintMain(); const i = L.$('input[aria-label="Search leases"]'); i.focus(); i.setSelectionRange(q.length, q.length); } }), h('span', { class: 'mono muted' }, L.fmt.n(d.leases.length))),
       leases.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Address', 'Name', 'Device', 'Expires', ''].map(x => h('th', {}, x)))),

@@ -845,5 +845,15 @@ L.i18n.add('de', {
 "This zone uses advanced file, view, signing, update, or transfer settings. Edit it in TOML.": "Diese Zone nutzt erweiterte Datei-, View-, Signatur-, Update- oder Transfer-Einstellungen. Bearbeite sie in TOML.",
 "No local zones": "Keine lokalen Zonen",
 "Add one to give devices stable names such as router.home.arpa.": "Füge eine Zone hinzu, um Geräten feste Namen wie router.home.arpa zu geben.",
-"Clients must use Lumen as their DNS server. Local records do not change router, DHCP, or device settings by themselves.": "Clients müssen Lumen als DNS-Server nutzen. Lokale Einträge ändern Router-, DHCP- oder Geräteeinstellungen nicht automatisch."
+"Clients must use Lumen as their DNS server. Local records do not change router, DHCP, or device settings by themselves.": "Clients müssen Lumen als DNS-Server nutzen. Lokale Einträge ändern Router-, DHCP- oder Geräteeinstellungen nicht automatisch.",
+"Router advertisements": "Router-Advertisements",
+"Interface": "Schnittstelle",
+"Prefixes": "Präfixe",
+"Asks DHCPv6 for": "Fragt DHCPv6 nach",
+"Other settings": "Weitere Einstellungen",
+"DNS servers": "DNS-Server",
+"Default router": "Standardrouter",
+"Last sent": "Zuletzt gesendet",
+"No": "Nein",
+"Not yet": "Noch nicht"
 });

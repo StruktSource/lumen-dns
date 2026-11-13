@@ -330,6 +330,9 @@ pub struct Dhcp {
     pub scopes6: Vec<DhcpScope6>,
     /// A second Lumen that takes over when this one stops answering.
     pub failover: Option<DhcpFailover>,
+    /// IPv6 Router Advertisements: how hosts on a network learn the prefix to build addresses
+    /// from, whether to use `DHCPv6`, and which DNS servers to use. Off unless listed.
+    pub router_advertisements: Vec<RouterAdvertisement>,
 }
 
 /// Which side of a failover pair this server is. The primary answers; the secondary stays quiet
@@ -386,6 +389,7 @@ impl Default for Dhcp {
             scopes: Vec::new(),
             scopes6: Vec::new(),
             failover: None,
+            router_advertisements: Vec::new(),
         }
     }
 }
@@ -415,6 +419,10 @@ pub struct DhcpScope {
     pub next_server: Option<std::net::Ipv4Addr>,
     /// Boot file name (`file` field and option 67), at most 128 printable characters.
     pub boot_file: Option<String>,
+    /// Let clients that ask for it be told to renew (`DHCPFORCERENEW`, RFC 3203 with the nonce
+    /// authentication of RFC 6704). Off by default.
+    #[serde(default)]
+    pub forcerenew: bool,
 }
 
 fn default_lease_secs() -> u32 {
@@ -476,6 +484,104 @@ pub struct PrefixDelegation {
 pub struct PrefixReservation {
     pub duid: String,
     pub prefix: ipnet::Ipv6Net,
+}
+
+/// How strongly hosts should prefer this router or route (RFC 4191).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RouterPreference {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+/// IPv6 Router Advertisements (RFC 4861) on one interface.
+///
+/// Lumen advertises; it does not route. With the default `router_lifetime_secs = 0` hosts learn
+/// the prefixes and DNS servers but are told this machine is **not** a default router.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouterAdvertisement {
+    /// The interface to advertise on (such as `eth0`).
+    pub interface: String,
+    /// Prefixes hosts may use on this network.
+    #[serde(default)]
+    pub prefixes: Vec<AdvertisedPrefix>,
+    /// The M flag: hosts should ask `DHCPv6` for addresses.
+    #[serde(default)]
+    pub managed: bool,
+    /// The O flag: hosts should ask `DHCPv6` for other settings, such as DNS servers.
+    #[serde(default)]
+    pub other_config: bool,
+    /// Seconds hosts keep this machine as a default router. `0` (default) means it is not one.
+    /// Set it only when this machine really forwards packets. `interval_secs` to 9000.
+    #[serde(default)]
+    pub router_lifetime_secs: u32,
+    #[serde(default)]
+    pub preference: RouterPreference,
+    /// Longest wait between unsolicited advertisements, 4 to 1800 seconds (RFC 4861).
+    #[serde(default = "default_ra_interval")]
+    pub interval_secs: u32,
+    /// Link MTU to advertise (1280 to 65535). Left out unless set.
+    pub mtu: Option<u32>,
+    /// DNS servers (RDNSS, RFC 8106). When left out, the DNS servers of the `DHCPv6` scope on the
+    /// same interface are used. `[]` advertises none.
+    pub dns: Option<Vec<std::net::Ipv6Addr>>,
+    /// DNS search domains (DNSSL, RFC 8106). When left out, `dhcp.domain` is used. `[]`
+    /// advertises none.
+    pub search: Option<Vec<String>>,
+    /// More specific routes hosts may use (RFC 4191).
+    #[serde(default)]
+    pub routes: Vec<AdvertisedRoute>,
+}
+
+/// A prefix in a Router Advertisement (RFC 4861 section 4.6.2).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvertisedPrefix {
+    pub prefix: ipnet::Ipv6Net,
+    /// The L flag: addresses in the prefix are reachable directly on this link.
+    #[serde(default = "default_true")]
+    pub on_link: bool,
+    /// The A flag: hosts may build their own addresses from it (SLAAC). Needs a /64.
+    #[serde(default = "default_true")]
+    pub autonomous: bool,
+    #[serde(default = "default_prefix_valid")]
+    pub valid_secs: u32,
+    #[serde(default = "default_prefix_preferred")]
+    pub preferred_secs: u32,
+}
+
+/// A route in a Router Advertisement (RFC 4191).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvertisedRoute {
+    pub prefix: ipnet::Ipv6Net,
+    #[serde(default)]
+    pub preference: RouterPreference,
+    #[serde(default = "default_route_lifetime")]
+    pub lifetime_secs: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_ra_interval() -> u32 {
+    600
+}
+
+fn default_prefix_valid() -> u32 {
+    2_592_000
+}
+
+fn default_prefix_preferred() -> u32 {
+    604_800
+}
+
+fn default_route_lifetime() -> u32 {
+    1800
 }
 
 fn default_preferred_secs() -> u32 {
@@ -1847,8 +1953,13 @@ impl Config {
         if dhcp.lease_file.is_none() {
             return Err("dhcp.lease_file is required".into());
         }
-        if dhcp.scopes.is_empty() && dhcp.scopes6.is_empty() {
-            return Err("dhcp needs at least one scope or scopes6 entry".into());
+        if dhcp.scopes.is_empty()
+            && dhcp.scopes6.is_empty()
+            && dhcp.router_advertisements.is_empty()
+        {
+            return Err(
+                "dhcp needs at least one scope, scopes6 or router_advertisements entry".into(),
+            );
         }
         if dhcp.scopes.len() > MAX_DHCP_SCOPES || dhcp.scopes6.len() > MAX_DHCP_SCOPES {
             return Err("too many dhcp scopes".into());
@@ -2034,6 +2145,83 @@ impl Config {
                 if other.prefix.contains(&net.network()) || net.contains(&other.prefix.network()) {
                     return Err("dhcp scopes6 must not overlap".into());
                 }
+            }
+        }
+        Self::validate_router_advertisements(dhcp, label_ok)?;
+        Ok(())
+    }
+
+    fn validate_router_advertisements(
+        dhcp: &Dhcp,
+        label_ok: impl Fn(&str) -> bool,
+    ) -> Result<(), String> {
+        if dhcp.router_advertisements.len() > MAX_DHCP_SCOPES {
+            return Err("too many dhcp.router_advertisements entries".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (index, ra) in dhcp.router_advertisements.iter().enumerate() {
+            let bad = |why: &str| format!("dhcp.router_advertisements entry {index}: {why}");
+            if ra.interface.is_empty() || ra.interface.len() > 15 || !seen.insert(&ra.interface) {
+                return Err(bad("needs its own interface name (1 to 15 characters)"));
+            }
+            if !(4..=1800).contains(&ra.interval_secs) {
+                return Err(bad("interval_secs must be 4 to 1800"));
+            }
+            if ra.router_lifetime_secs != 0
+                && !(ra.interval_secs..=9000).contains(&ra.router_lifetime_secs)
+            {
+                return Err(bad(
+                    "router_lifetime_secs must be 0 or from interval_secs to 9000",
+                ));
+            }
+            if ra.mtu.is_some_and(|mtu| !(1280..=65_535).contains(&mtu)) {
+                return Err(bad("mtu must be 1280 to 65535"));
+            }
+            if ra.prefixes.len() > 8 || ra.routes.len() > 8 {
+                return Err(bad("at most 8 prefixes and 8 routes"));
+            }
+            for item in &ra.prefixes {
+                let net = item.prefix;
+                let first = net.network();
+                if net != net.trunc()
+                    || first.is_multicast()
+                    || first.is_loopback()
+                    || first.is_unspecified()
+                    || (first.segments()[0] & 0xffc0) == 0xfe80
+                    || (item.autonomous && net.prefix_len() != 64)
+                    || item.preferred_secs > item.valid_secs
+                    || item.valid_secs == 0
+                {
+                    return Err(bad(
+                        "a prefix must be a plain network address (not link-local), an autonomous one a /64, with preferred_secs not above valid_secs",
+                    ));
+                }
+            }
+            for route in &ra.routes {
+                let net = route.prefix;
+                if net != net.trunc()
+                    || net.network().is_multicast()
+                    || net.network().is_loopback()
+                    || route.lifetime_secs > 604_800
+                {
+                    return Err(bad("a route must be a plain network address"));
+                }
+            }
+            if ra.dns.as_ref().is_some_and(|dns| {
+                dns.len() > 4
+                    || dns
+                        .iter()
+                        .any(|ip| ip.is_unspecified() || ip.is_multicast())
+            }) {
+                return Err(bad("dns takes up to 4 unicast addresses"));
+            }
+            if ra.search.as_ref().is_some_and(|search| {
+                search.len() > 4
+                    || search.iter().any(|name| {
+                        name.len() > 100 || name.is_empty() || !name.split('.').all(&label_ok)
+                    })
+            }) {
+                return Err(bad("search takes up to 4 DNS names without a trailing dot"));
             }
         }
         Ok(())
@@ -2616,6 +2804,7 @@ mod tests {
             lease_secs: 43_200,
             next_server: None,
             boot_file: None,
+            forcerenew: false,
             reservations: vec![Reservation4 {
                 mac: "aa:bb:cc:dd:ee:01".into(),
                 ip: "192.168.1.10".parse().unwrap(),
@@ -2844,6 +3033,151 @@ mod tests {
             mutate(&mut config);
             assert!(config.validate_dhcp().is_err(), "mutation {index}");
         }
+    }
+
+    fn advertisement() -> RouterAdvertisement {
+        RouterAdvertisement {
+            interface: "eth0".into(),
+            prefixes: vec![AdvertisedPrefix {
+                prefix: "2001:db8:1::/64".parse().unwrap(),
+                on_link: true,
+                autonomous: true,
+                valid_secs: 86_400,
+                preferred_secs: 14_400,
+            }],
+            managed: false,
+            other_config: true,
+            router_lifetime_secs: 0,
+            preference: RouterPreference::Medium,
+            interval_secs: 200,
+            mtu: Some(1500),
+            dns: Some(vec!["2001:db8:1::53".parse().unwrap()]),
+            search: Some(vec!["home.example".into()]),
+            routes: vec![AdvertisedRoute {
+                prefix: "fd00:10::/48".parse().unwrap(),
+                preference: RouterPreference::Low,
+                lifetime_secs: 1800,
+            }],
+        }
+    }
+
+    #[test]
+    fn router_advertisements_alone_make_a_valid_dhcp_section() {
+        let mut config = Config::default();
+        config.dhcp.enabled = true;
+        config.dhcp.domain = Some("home.example".into());
+        config.dhcp.lease_file = Some("leases.db".into());
+        // With nothing to advertise or hand out, DHCP has no job.
+        assert!(config.validate_dhcp().is_err());
+        config.dhcp.router_advertisements = vec![advertisement()];
+        assert!(config.validate_dhcp().is_ok());
+        // A default router needs a lifetime at least as long as the interval.
+        config.dhcp.router_advertisements[0].router_lifetime_secs = 1800;
+        assert!(config.validate_dhcp().is_ok());
+    }
+
+    #[test]
+    fn router_advertisement_settings_are_checked() {
+        let mutations: Vec<fn(&mut RouterAdvertisement)> = vec![
+            |a| a.interface = String::new(),
+            |a| a.interface = "an-interface-name-too-long".into(),
+            |a| a.interval_secs = 3,
+            |a| a.interval_secs = 1801,
+            |a| a.router_lifetime_secs = 100,
+            |a| a.router_lifetime_secs = 9001,
+            |a| a.mtu = Some(1279),
+            |a| a.mtu = Some(70_000),
+            |a| a.prefixes[0].prefix = "2001:db8:1::/60".parse().unwrap(),
+            |a| a.prefixes[0].prefix = "2001:db8:1::5/64".parse().unwrap(),
+            |a| a.prefixes[0].prefix = "fe80::/64".parse().unwrap(),
+            |a| a.prefixes[0].prefix = "ff02::/64".parse().unwrap(),
+            |a| a.prefixes[0].preferred_secs = 90_000,
+            |a| a.prefixes[0].valid_secs = 0,
+            |a| {
+                let copy = a.prefixes[0].clone();
+                a.prefixes = vec![copy; 9];
+            },
+            |a| a.routes[0].prefix = "ff00::/8".parse().unwrap(),
+            |a| a.dns = Some(vec!["::".parse().unwrap()]),
+            |a| a.dns = Some(vec!["ff02::1".parse().unwrap()]),
+            |a| a.dns = Some(vec!["2001:db8::1".parse().unwrap(); 5]),
+            |a| a.search = Some(vec!["bad domain".into()]),
+            |a| a.search = Some(vec!["home.example.".into()]),
+            |a| a.search = Some(vec!["a.example".into(); 5]),
+        ];
+        for (index, mutate) in mutations.into_iter().enumerate() {
+            let mut config = dhcp_config();
+            config.dhcp.router_advertisements = vec![advertisement()];
+            mutate(&mut config.dhcp.router_advertisements[0]);
+            assert!(config.validate_dhcp().is_err(), "mutation {index}");
+        }
+        // A prefix that is not autonomous may be any length (for DHCPv6 or routing).
+        let mut config = dhcp_config();
+        let mut relaxed = advertisement();
+        relaxed.prefixes[0].prefix = "2001:db8:1::/56".parse().unwrap();
+        relaxed.prefixes[0].autonomous = false;
+        config.dhcp.router_advertisements = vec![relaxed];
+        assert!(config.validate_dhcp().is_ok());
+        // One entry per interface.
+        let mut twice = dhcp_config();
+        twice.dhcp.router_advertisements = vec![advertisement(), advertisement()];
+        assert!(twice.validate_dhcp().is_err());
+    }
+
+    #[test]
+    fn router_advertisements_and_forcerenew_parse_from_toml() {
+        let config: Config = toml::from_str(
+            r#"
+schema_version = 1
+[dhcp]
+enabled = true
+domain = "home.example"
+lease_file = "leases.db"
+
+[[dhcp.scopes]]
+interface = "eth0"
+subnet = "192.168.1.0/24"
+server_address = "192.168.1.2"
+range_start = "192.168.1.100"
+range_end = "192.168.1.199"
+forcerenew = true
+
+[[dhcp.router_advertisements]]
+interface = "eth0"
+managed = true
+other_config = true
+router_lifetime_secs = 1800
+preference = "high"
+interval_secs = 200
+mtu = 1500
+dns = ["2001:db8:1::53"]
+search = ["home.example"]
+
+[[dhcp.router_advertisements.prefixes]]
+prefix = "2001:db8:1::/64"
+autonomous = false
+
+[[dhcp.router_advertisements.routes]]
+prefix = "fd00:10::/48"
+preference = "low"
+"#,
+        )
+        .unwrap();
+        assert!(config.dhcp.scopes[0].forcerenew);
+        let ra = &config.dhcp.router_advertisements[0];
+        assert!(ra.managed && ra.other_config);
+        assert_eq!(ra.preference, RouterPreference::High);
+        assert!(ra.prefixes[0].on_link && !ra.prefixes[0].autonomous);
+        assert_eq!(ra.prefixes[0].valid_secs, 2_592_000, "defaults");
+        assert_eq!(ra.routes[0].lifetime_secs, 1800);
+        assert!(config.validate_dhcp().is_ok());
+        // Unknown settings are rejected, as everywhere else.
+        assert!(
+            toml::from_str::<Config>(
+                "schema_version = 1\n[dhcp]\n[[dhcp.router_advertisements]]\ninterface = \"eth0\"\nbogus = 1\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]

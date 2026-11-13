@@ -156,7 +156,7 @@ Principles that shape every decision:
 - [x] Regular-expression blocking with explicit syntax, compile limits, linear-time matching, and explainable matches (0.7.0)
 - [x] CNAME-based tracker blocking that inspects upstream answer chains without bypassing DNSSEC or response bounds (0.7.0)
 - [x] SafeSearch with explicit opt-in, per-profile scope, documented providers (Google, Bing, YouTube), and no hidden logging (0.7.0). Wider child-safety categories shipped as per-list categories (0.7.0)
-- [x] Optional DHCP server module with bounded leases, reservations, DNS integration, and no default network authority (0.7.0): IPv4 and stateful IPv6, SQLite leases, names published to DNS, console module. Relay agents, prefix delegation, network boot options, and Lumen-to-Lumen failover are included. Temporary addresses and DHCPv6 Reconfigure are included. Open: ISC-compatible failover, and real-hardware tests of the Windows and BSD socket paths
+- [x] Optional DHCP server module with bounded leases, reservations, DNS integration, and no default network authority (0.7.0): IPv4 and stateful IPv6, SQLite leases, names published to DNS, console module. Relay agents, prefix delegation, network boot options, and Lumen-to-Lumen failover are included. Temporary addresses, DHCPv6 Reconfigure and IPv4 FORCERENEW are included, and so are IPv6 Router Advertisements with DNS options (RFC 8106). Open: ISC-compatible failover, and real-hardware tests of the Windows and BSD socket paths
 
 ### Phase 6: Customization
 

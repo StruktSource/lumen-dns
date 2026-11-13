@@ -31,6 +31,7 @@ fn config(lease_file: std::path::PathBuf) -> Dhcp {
             lease_secs: 3600,
             next_server: None,
             boot_file: None,
+            forcerenew: false,
             reservations: Vec::new(),
         }],
         scopes6: vec![DhcpScope6 {
@@ -649,11 +650,122 @@ async fn a_client_that_accepted_is_told_to_renew_with_a_signed_reconfigure() {
         message.opts().get(v6::OptionCode::ReconfMsg),
         Some(v6::DhcpOption::ReconfMsg(v6::MessageType::Renew))
     ));
-    // IPv4 leases cannot be reconfigured.
+    // An IPv4 address that holds no lease cannot be sent anything.
     assert!(
         server
             .handle()
             .reconfigure("192.168.50.100".parse().unwrap(), false)
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn an_ipv4_client_that_accepted_is_sent_a_signed_forcerenew() {
+    use hmac::{Hmac, Mac};
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path().join("leases.db"));
+    config.scopes6.clear();
+    // The device's address is the loopback address, so the message can reach the test client.
+    config.scopes[0].subnet = "127.0.0.0/24".parse().unwrap();
+    config.scopes[0].server_address = "127.0.0.254".parse().unwrap();
+    config.scopes[0].range_start = "127.0.0.1".parse().unwrap();
+    config.scopes[0].range_end = "127.0.0.1".parse().unwrap();
+    config.scopes[0].router = None;
+    config.scopes[0].forcerenew = true;
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    config.client_port4 = client.local_addr().unwrap().port();
+    let server = lumen_dhcp::start(&config, Arc::new(Hosts::new(Some("home.lan"))))
+        .await
+        .unwrap();
+    let address = server.bound4[0];
+    let capable = |mut message: v4::Message| {
+        message
+            .opts_mut()
+            .insert(DhcpOption::Unknown(v4::UnknownOption::new(
+                OptionCode::Unknown(145),
+                vec![1],
+            )));
+        message
+    };
+
+    let offer = ask4(
+        &client,
+        address,
+        &capable(v4_message(MessageType::Discover, None)),
+    )
+    .await;
+    let ip = offer.yiaddr();
+    assert_eq!(ip, "127.0.0.1".parse::<std::net::Ipv4Addr>().unwrap());
+    // Before the client agreed there is nothing to send.
+    assert!(server.handle().reconfigure(ip.into(), false).is_err());
+    let ack = ask4(
+        &client,
+        address,
+        &capable(v4_message(MessageType::Request, Some(ip))),
+    )
+    .await;
+    assert_eq!(kind4(&ack), MessageType::Ack);
+    let Some(DhcpOption::Unknown(auth)) = ack.opts().get(OptionCode::Unknown(90)) else {
+        panic!("the ACK carries the nonce");
+    };
+    assert_eq!(auth.data()[..3], [3, 1, 0]);
+    assert_eq!(auth.data()[11], 1);
+    let nonce: Vec<u8> = auth.data()[12..].to_vec();
+
+    assert!(
+        server
+            .handle()
+            .snapshot()
+            .leases
+            .iter()
+            .any(|l| l.reconfigurable)
+    );
+    server.handle().reconfigure(ip.into(), false).unwrap();
+    let mut buffer = [0u8; 1500];
+    let (length, from) = timeout(Duration::from_secs(3), client.recv_from(&mut buffer))
+        .await
+        .expect("a FORCERENEW arrived")
+        .unwrap();
+    assert_eq!(from, address, "it comes from the server port");
+    let message = v4::Message::decode(&mut Decoder::new(&buffer[..length])).unwrap();
+    assert_eq!(kind4(&message), MessageType::ForceRenew);
+    assert_eq!(message.chaddr(), &[2, 0, 0, 0, 0, 9]);
+    let Some(DhcpOption::Unknown(signed)) = message.opts().get(OptionCode::Unknown(90)) else {
+        panic!("FORCERENEW is authenticated");
+    };
+    assert_eq!(signed.data()[11], 2);
+    // Verify as a client would: zero the digest, then HMAC-MD5 with the nonce from the ACK.
+    let mut zeroed = message.clone();
+    let mut data = signed.data()[..12].to_vec();
+    data.extend_from_slice(&[0u8; 16]);
+    zeroed
+        .opts_mut()
+        .insert(DhcpOption::Unknown(v4::UnknownOption::new(
+            OptionCode::Unknown(90),
+            data,
+        )));
+    let mut mac = <Hmac<md5::Md5> as Mac>::new_from_slice(&nonce).unwrap();
+    mac.update(&zeroed.to_vec().unwrap());
+    assert_eq!(mac.finalize().into_bytes().as_slice(), &signed.data()[12..]);
+
+    // The nonce survives a restart, so a client can still be told to renew.
+    drop(server);
+    let server = lumen_dhcp::start(&config, Arc::new(Hosts::new(Some("home.lan"))))
+        .await
+        .unwrap();
+    assert!(
+        server
+            .handle()
+            .snapshot()
+            .leases
+            .iter()
+            .any(|l| l.reconfigurable)
+    );
+    server.handle().reconfigure(ip.into(), false).unwrap();
+    let (length, _) = timeout(Duration::from_secs(3), client.recv_from(&mut buffer))
+        .await
+        .expect("a FORCERENEW after the restart")
+        .unwrap();
+    let again = v4::Message::decode(&mut Decoder::new(&buffer[..length])).unwrap();
+    assert_eq!(kind4(&again), MessageType::ForceRenew);
 }

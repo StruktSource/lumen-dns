@@ -11,6 +11,9 @@ use std::{
     sync::Mutex,
 };
 
+/// A client, its `DHCPFORCERENEW` nonce, and the hardware address the message goes to.
+pub type ForceRenewRow = (Vec<u8>, [u8; 16], Vec<u8>);
+
 /// A lease database. Calls are short single-row statements.
 pub struct Store {
     connection: Mutex<Connection>,
@@ -46,6 +49,8 @@ impl Store {
                  prefix TEXT PRIMARY KEY, client BLOB NOT NULL, iaid INTEGER NOT NULL,
                  expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS reconf_keys (client BLOB PRIMARY KEY, key BLOB NOT NULL);
+             CREATE TABLE IF NOT EXISTS forcerenew_keys (
+                 client BLOB PRIMARY KEY, key BLOB NOT NULL, chaddr BLOB NOT NULL);
              CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);",
         )?;
         // Databases made before temporary addresses existed have no such column.
@@ -191,6 +196,60 @@ impl Store {
         self.connection().execute(
             "INSERT OR REPLACE INTO reconf_keys (client, key) VALUES (?1, ?2)",
             params![client, key.as_slice()],
+        )?;
+        Ok(())
+    }
+
+    /// The `DHCPFORCERENEW` nonces of IPv4 clients: `(client, nonce, hardware address)`.
+    ///
+    /// # Errors
+    /// The database cannot be read.
+    pub fn load_forcerenew_keys(&self) -> rusqlite::Result<Vec<ForceRenewRow>> {
+        let connection = self.connection();
+        let mut statement =
+            connection.prepare("SELECT client, key, chaddr FROM forcerenew_keys")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (client, key, chaddr) = row?;
+            if let Ok(key) = <[u8; 16]>::try_from(key.as_slice()) {
+                out.push((client, key, chaddr));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Keep the `DHCPFORCERENEW` nonce of an IPv4 client.
+    ///
+    /// # Errors
+    /// The database cannot be written.
+    pub fn put_forcerenew_key(
+        &self,
+        client: &[u8],
+        key: &[u8; 16],
+        chaddr: &[u8],
+    ) -> rusqlite::Result<()> {
+        self.connection().execute(
+            "INSERT OR REPLACE INTO forcerenew_keys (client, key, chaddr) VALUES (?1, ?2, ?3)",
+            params![client, key.as_slice(), chaddr],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the nonce of a client that no longer holds a lease.
+    ///
+    /// # Errors
+    /// The database cannot be written.
+    pub fn remove_forcerenew_key(&self, client: &[u8]) -> rusqlite::Result<()> {
+        self.connection().execute(
+            "DELETE FROM forcerenew_keys WHERE client = ?1",
+            params![client],
         )?;
         Ok(())
     }

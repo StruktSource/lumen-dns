@@ -570,6 +570,20 @@ impl lumen_web::Host for Service {
                 })
                 .collect(),
             failover: snapshot.failover.map(|f| (f.role.to_owned(), f.active)),
+            advertisements: snapshot
+                .advertisements
+                .into_iter()
+                .map(|a| lumen_web::DhcpAdvertisementInfo {
+                    interface: a.interface,
+                    prefixes: a.prefixes,
+                    managed: a.managed,
+                    other_config: a.other_config,
+                    router_lifetime_secs: a.router_lifetime_secs,
+                    dns: a.dns.into_iter().map(std::net::IpAddr::V6).collect(),
+                    sent: a.sent,
+                    last_sent: a.last_sent,
+                })
+                .collect(),
         })
     }
 

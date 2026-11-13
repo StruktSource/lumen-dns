@@ -1767,7 +1767,7 @@ impl Console {
         let Some(info) = self.host.dhcp() else {
             return reply(
                 StatusCode::OK,
-                &json!({ "running": false, "scopes": [], "leases": [] }),
+                &json!({ "running": false, "scopes": [], "leases": [], "advertisements": [] }),
             );
         };
         let scopes: Vec<_> = info
@@ -1791,10 +1791,22 @@ impl Console {
                 })
             })
             .collect();
+        let advertisements: Vec<_> = info
+            .advertisements
+            .iter()
+            .map(|a| {
+                let dns: Vec<String> = a.dns.iter().map(ToString::to_string).collect();
+                json!({
+                    "interface": a.interface, "prefixes": a.prefixes, "managed": a.managed,
+                    "other_config": a.other_config, "router_lifetime_secs": a.router_lifetime_secs,
+                    "dns": dns, "sent": a.sent, "last_sent": a.last_sent,
+                })
+            })
+            .collect();
         reply(
             StatusCode::OK,
             &json!({
-                "running": true, "scopes": scopes, "leases": leases,
+                "running": true, "scopes": scopes, "leases": leases, "advertisements": advertisements,
                 "failover": info.failover.as_ref().map(|(role, active)| json!({ "role": role, "active": active })),
             }),
         )

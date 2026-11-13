@@ -166,6 +166,13 @@ max_message_bytes = 4096
 # range_start = "192.168.1.100"
 # range_end = "192.168.1.199"
 # router = "192.168.1.1"
+# IPv6 Router Advertisements (needs root or CAP_NET_RAW). See docs/guides/dhcp.md.
+# [[dhcp.router_advertisements]]
+# interface = "eth0"
+# managed = true
+# [[dhcp.router_advertisements.prefixes]]
+# prefix = "fd00:1::/64"
+# autonomous = false
 
 # Filtering is empty by default. See filtering.example.toml to opt in.
 

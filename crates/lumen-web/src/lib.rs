@@ -9,8 +9,8 @@ mod host;
 mod oidc;
 pub use console::Console;
 pub use host::{
-    Counters, DhcpInfo, DhcpLeaseInfo, DhcpScopeInfo, Explained, HistoryDetail, HistoryMode,
-    HistorySettings, Host, ListInfo, QueryRecord,
+    Counters, DhcpAdvertisementInfo, DhcpInfo, DhcpLeaseInfo, DhcpScopeInfo, Explained,
+    HistoryDetail, HistoryMode, HistorySettings, Host, ListInfo, QueryRecord,
 };
 
 use bytes::Bytes;

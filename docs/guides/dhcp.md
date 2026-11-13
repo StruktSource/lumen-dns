@@ -9,7 +9,8 @@ Lumen can hand out addresses on your network, and turn every lease into a DNS na
 | Part | Behavior |
 | :--- | :--- |
 | IPv4 | DISCOVER, OFFER, REQUEST, ACK/NAK, RELEASE, DECLINE and INFORM (RFC 2131), with relay agents (`giaddr`). Subnet mask, broadcast address, router, DNS servers, domain name, lease time, and renew/rebind timers. |
-| IPv6 | Stateful `IA_NA` addresses (RFC 8415): Solicit, Advertise, Request, Renew, Rebind, Confirm, Release, Decline and Information-request, Rapid Commit, a stable server DUID, and the DNS servers option (RFC 3646). Relay agents are supported, and so are [prefix delegation](#prefix-delegation-ia_pd), [temporary addresses](#temporary-addresses-ia_ta) and [Reconfigure](#reconfigure). |
+| IPv6 | Stateful `IA_NA` addresses (RFC 8415): Solicit, Advertise, Request, Renew, Rebind, Confirm, Release, Decline and Information-request, Rapid Commit, a stable server DUID, and the DNS servers option (RFC 3646). Relay agents are supported, and so are [prefix delegation](#prefix-delegation-ia_pd), [temporary addresses](#temporary-addresses-ia_ta) and [Reconfigure](#reconfigure). IPv4 has the matching [FORCERENEW](#reconfigure). |
+| Router Advertisements | On an IPv6 network Lumen can tell devices which prefix to use, whether to ask DHCPv6, and which DNS servers to use ([Router Advertisements](#router-advertisements-ipv6)). |
 | Network boot | An IPv4 scope can send a boot server and file name (`next_server`, `boot_file`) for PXE and similar. |
 | Failover | Two Lumen servers can cover for each other ([failover](#failover)). |
 | Reservations | A device by hardware address (IPv4) or DUID (IPv6) always gets the same address. Nobody else is ever given a reserved address. |
@@ -95,18 +96,86 @@ A device that asks for temporary addresses (RFC 8415 `IA_TA`, for outgoing conne
 
 ## Reconfigure
 
-Normally a client decides when to renew. With Reconfigure (RFC 8415 section 18.4) the server can tell a device to renew **now**, for example after you change the DNS servers in a scope. It is **off by default**: turn it on per IPv6 scope with `reconfigure = true`.
+Normally a client decides when to renew. The server can tell a device to renew **now**, for example after you change the DNS servers in a scope. It is **off by default**, and it works for IPv6 (Reconfigure, RFC 8415 section 18.4) and for IPv4 (FORCERENEW, RFC 3203). Turn it on per scope:
 
 ```toml
 [[dhcp.scopes6]]
 # ...
-reconfigure = true
+reconfigure = true      # IPv6
+
+[[dhcp.scopes]]
+# ...
+forcerenew = true       # IPv4
 ```
+
+### IPv6: Reconfigure
 
 - A client that sends the Reconfigure Accept option is told in the Reply to accept it and receives a random 16-byte key (the Reconfigure Key authentication protocol, section 20.4). Keys are saved with the leases.
 - In the console, **DHCP** lists a button **Ask to renew** next to every lease of such a device. It sends a Reconfigure message to the device's address and port 546, from port 547, signed with that key. The device then sends a Renew and picks up the new settings. An Information-request instead of a Renew is available through the API (`info_only`).
 - The signature is **HMAC-MD5**, because the protocol requires it. It only proves that the message comes from the server that issued the key; it does not hide anything. Do not rely on it against an attacker who can read the DHCP exchange: that attacker can also learn the key.
-- Only IPv6 devices with a permanent address can be reconfigured. IPv4 FORCERENEW (RFC 3203) is **not** offered: almost no client honors it, and RFC 6704 restricts it to authenticated setups that Lumen cannot arrange for you.
+- Only IPv6 devices with a permanent address can be reconfigured.
+
+### IPv4: FORCERENEW
+
+- A client that sends the *Forcerenew Nonce Capable* option (145, RFC 6704) with algorithm 1 gets a random 16-byte nonce in the Authentication option (90) of its ACK. The nonce is saved with the leases and dropped when the client has no lease left.
+- **Ask to renew** then sends a `DHCPFORCERENEW` message (type 9) to the device's address, port 68, from port 67. It is authenticated as RFC 6704 describes: an HMAC-MD5 over the whole message, keyed with the nonce, with a replay counter that only goes up. The device checks it and sends a normal renewal.
+- It protects the same way the IPv6 key does: it proves the message came from the server that handed out the nonce, and does not hide anything.
+- **Many clients do not support it.** A client that never sends option 145 is never given a nonce, so Lumen cannot force it and the button is not shown. The messages are built to the RFC and checked against the RFC's construction in tests, but they have not been tried against real clients. Try your devices before you rely on it.
+- A failover partner does not copy nonces. After a takeover, devices that got their nonce from the other server renew normally; they just cannot be forced until they ask again.
+
+## Router Advertisements (IPv6)
+
+An IPv6 device finds its network by listening for **Router Advertisements** (RA, RFC 4861), not by DHCP. DHCPv6 gives addresses, but it cannot say which prefix is on the link, and it does not tell a device where the default router is. Lumen can send the advertisements itself.
+
+```toml
+[[dhcp.router_advertisements]]
+interface = "eth0"
+managed = true                   # devices ask DHCPv6 for their address (the M flag)
+other_config = true              # and for other settings (the O flag)
+# router_lifetime_secs = 0       # 0 (default): this machine is NOT a default router
+# preference = "medium"          # low, medium or high, only if it is a default router
+# interval_secs = 600            # longest wait between advertisements, 4 to 1800
+# mtu = 1500
+# dns = ["fd00:1::2"]            # left out: the DNS servers of the DHCPv6 scope on this interface
+# search = ["home.lan"]          # left out: dhcp.domain
+
+[[dhcp.router_advertisements.prefixes]]
+prefix = "fd00:1::/64"
+autonomous = false               # DHCPv6 gives the addresses, so devices should not also build their own
+# on_link = true
+# valid_secs = 2592000           # 30 days
+# preferred_secs = 604800        # 7 days
+
+# [[dhcp.router_advertisements.routes]]    # more specific routes (RFC 4191)
+# prefix = "fd00:20::/48"
+# preference = "medium"
+# lifetime_secs = 1800
+```
+
+Pick one way for devices to get an address:
+
+| Goal | `managed` | `autonomous` | What happens |
+| :--- | :--- | :--- | :--- |
+| DHCPv6 only | `true` | `false` | Devices ask DHCPv6, so leases and DNS names work. Android does not do DHCPv6 and gets no IPv6 address. |
+| SLAAC only | `false` | `true` | Devices make their own address from the prefix. No lease and no DNS name, but every device works. |
+| Both | `true` | `true` | Devices have both. Convenient and noisy: each device has two addresses. |
+
+What Lumen sends:
+
+- The prefixes with their lifetimes and the on-link and autonomous flags, an optional MTU, the interface's hardware address, route information (RFC 4191), **DNS servers** (RDNSS) and **search domains** (DNSSL), both from RFC 8106. Devices that read the DNS options need no DHCPv6 to learn the DNS servers. Android, which has no DHCPv6, learns them this way.
+- **When:** three advertisements in the first seconds, then at random times up to `interval_secs` (never closer than a third of it, at least 3 seconds), as RFC 4861 asks. A device that has just joined and sends a Router Solicitation gets an answer after a short random wait, and never more than one every 3 seconds, however many devices ask at once.
+- **On stop,** an advertisement with router lifetime 0 withdraws this machine as a default router, if it advertised itself as one.
+
+Things to know:
+
+- **Lumen advertises; it does not route.** With the default `router_lifetime_secs = 0` devices learn the prefix and the DNS servers but are told this machine is **not** their router. That is right when your router does the routing and Lumen only adds DHCPv6 and DNS. Set `router_lifetime_secs` only on a machine that really forwards packets, otherwise devices will send their traffic to a host that drops it. Two machines advertising a prefix is fine; two *default* routers must both be real.
+- **Turn off the RA of your router for the same prefix**, or make them agree. Devices follow every RA they hear.
+- The prefix is configured, not learned. A prefix that your provider changes (a dynamic delegated prefix) is not picked up automatically.
+- It needs a **raw ICMPv6 socket**: give the service only the `CAP_NET_RAW` capability (systemd: `AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE`, the second one for the DHCP ports; containers: `--cap-add NET_RAW`, with host networking), or run as root. Do not use a wider privilege than that. It works on Linux, macOS and the BSDs, not on Windows. A refusal is reported at startup and nothing else starts.
+- Only Router Solicitations from the link (source `::` or link-local) are answered. The kernel's ICMPv6 filter cannot be set from safe code, so the socket also hears other ICMPv6 traffic on the interface and drops it at once.
+- The console's **DHCP** module lists each interface, its prefixes, the DNS servers, whether it is a default router, and when it last sent.
+
+**How it was checked.** The packet is built byte by byte in unit tests. On a real Linux link (a veth pair) a test hears the advertisements, sends a solicitation and gets an answer in under a second, and hears the withdrawal when the server stops. The Linux kernel on the other end accepted an advertisement and configured a SLAAC address with the advertised lifetimes, the default route and the MTU, and `rdisc6` (an independent decoder) read every option back correctly. Not tried: macOS and BSD on real hardware (the code compiles and the socket options are the standard ones), and clients other than Linux.
 
 ## Network boot
 
@@ -162,11 +231,11 @@ Clients that send a host name (DHCP option 12, or the `FQDN` option on IPv6) get
 
 ## Not included
 
-IPv4 FORCERENEW, failover with servers other than Lumen (the ISC protocol), dynamic DNS updates to other servers (the names are served by Lumen itself), and per-client boot options such as separate BIOS and UEFI files in one scope. Say so on the [roadmap](../project/roadmap.md) if you need one.
+Failover with servers other than Lumen (the ISC protocol), dynamic DNS updates to other servers (the names are served by Lumen itself), and per-client boot options such as separate BIOS and UEFI files in one scope. Say so on the [roadmap](../project/roadmap.md) if you need one.
 
 ## The console module
 
-Switch **DHCP** on under **Modules** (administrators only). The page lists each network with how many addresses are in use, every current lease and delegated prefix with its name, device and expiry, and, for a failover pair, whether this server is answering or standing by. It is read-only: the configuration file decides what is served. The module shows nothing while the server is not enabled in the configuration.
+Switch **DHCP** on under **Modules** (administrators only). The page lists each network with how many addresses are in use, the router advertisements Lumen sends, every current lease and delegated prefix with its name, device and expiry, and, for a failover pair, whether this server is answering or standing by. It is read-only: the configuration file decides what is served. The module shows nothing while the server is not enabled in the configuration.
 
 ## Related
 
