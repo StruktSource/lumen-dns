@@ -7,7 +7,7 @@ use cache::ResponseCache;
 use hickory_server::{
     dnssec::NxProofKind,
     net::{
-        NetError,
+        DnsError, NetError,
         runtime::{TokioRuntimeProvider, TokioTime},
         xfer::Protocol,
     },
@@ -145,6 +145,7 @@ pub struct Metrics {
     recursive_retries: AtomicU64,
     recursive_timeouts: AtomicU64,
     recursive_failures: AtomicU64,
+    forward_insecure_recoveries: AtomicU64,
     attempt_latency: [AtomicU64; 11],
     attempt_latency_sum_micros: AtomicU64,
     attempts: AtomicU64,
@@ -324,6 +325,11 @@ impl Metrics {
                 "recursive_retries_total",
                 "Recursive walks retried after a timeout.",
                 &self.recursive_retries,
+            ),
+            (
+                "forward_insecure_recoveries_total",
+                "Forward lookups answered without validation because an ancestor zone is provably unsigned.",
+                &self.forward_insecure_recoveries,
             ),
             (
                 "recursive_attempt_timeouts_total",
@@ -611,7 +617,10 @@ impl Resolver {
         options.positive_max_ttl = Some(Duration::from_secs(u64::from(settings.positive_ttl_secs)));
         options.negative_max_ttl = Some(Duration::from_secs(u64::from(settings.negative_ttl_secs)));
         let (handler, background) = match settings.mode {
-            Mode::Forward => (forward_zone(settings, &options, anchors.as_ref())?, None),
+            Mode::Forward => (
+                forward_zone(settings, &options, anchors.as_ref(), Arc::clone(&metrics))?,
+                None,
+            ),
             Mode::Recursive => {
                 let (handler, background) =
                     recursive_zone(settings, &options, anchors, Arc::clone(&metrics))?;
@@ -850,7 +859,35 @@ fn forward_zone(
     settings: &lumen_config::Resolver,
     options: &ResolverOpts,
     anchors: Option<&Arc<TrustAnchors>>,
+    metrics: Arc<Metrics>,
 ) -> Result<Arc<dyn ZoneHandler>, String> {
+    let pool = forward_pool(settings, options, anchors)?;
+    // A small second pool without validation, used only below zones already proven unsigned.
+    let plain = if settings.dnssec {
+        let mut plain_options = options.clone();
+        plain_options.validate = false;
+        plain_options.cache_size = (plain_options.cache_size / 8).max(64);
+        Some(forward_pool(settings, &plain_options, None)?)
+    } else {
+        None
+    };
+    Ok(Arc::new(ResolutionZone {
+        origin: Name::root().into(),
+        backend: Backend::Forward(Box::new(ForwardBackend {
+            pool,
+            plain,
+            budget: Duration::from_millis(u64::from(settings.upstream_timeout_ms)),
+            metrics: Some(metrics),
+        })),
+    }))
+}
+
+/// The forwarders of every provider and custom upstream, and how a query picks among them.
+fn forward_pool(
+    settings: &lumen_config::Resolver,
+    options: &ResolverOpts,
+    anchors: Option<&Arc<TrustAnchors>>,
+) -> Result<forward::ForwardPool<TokioRuntimeProvider>, String> {
     // Without a strategy the older behavior stays: one forwarder over every address.
     let (strategy, groups) = match settings.strategy {
         Some(strategy) => (
@@ -876,12 +913,7 @@ fn forward_zone(
         start += size;
     }
     let penalty = Duration::from_millis(u64::from(settings.upstream_timeout_ms));
-    Ok(Arc::new(ResolutionZone {
-        origin: Name::root().into(),
-        backend: Backend::Forward(Box::new(forward::ForwardPool::new(
-            members, strategy, penalty,
-        ))),
-    }))
+    Ok(forward::ForwardPool::new(members, strategy, penalty))
 }
 
 /// Sizes of the groups that `count` upstreams form, one group per provider and then one per
@@ -1169,7 +1201,29 @@ enum Backend<P: hickory_server::net::runtime::RuntimeProvider> {
         accel: Arc<Accel>,
         policy: RecursivePolicy,
     },
-    Forward(Box<forward::ForwardPool<P>>),
+    Forward(Box<ForwardBackend<P>>),
+}
+
+/// Forward mode: the pool that answers queries and, when local validation is on, a second pool
+/// without validation for names below a zone that is provably unsigned.
+pub(crate) struct ForwardBackend<P: hickory_server::net::runtime::RuntimeProvider> {
+    pub(crate) pool: forward::ForwardPool<P>,
+    plain: Option<forward::ForwardPool<P>>,
+    /// One budget for the ancestor walk and the retry together.
+    budget: Duration,
+    metrics: Option<Arc<Metrics>>,
+}
+
+impl<P: hickory_server::net::runtime::RuntimeProvider> ForwardBackend<P> {
+    /// A forwarder with no recovery, for conditional forwarders.
+    pub(crate) fn plain(pool: forward::ForwardPool<P>) -> Self {
+        Self {
+            pool,
+            plain: None,
+            budget: Duration::ZERO,
+            metrics: None,
+        }
+    }
 }
 #[derive(Clone, Copy)]
 struct RecursivePolicy {
@@ -1204,7 +1258,7 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
     fn can_validate_dnssec(&self) -> bool {
         match &self.backend {
             Backend::Recursive { recursor, .. } => recursor.is_validating(),
-            Backend::Forward(pool) => pool.validates(),
+            Backend::Forward(backend) => backend.pool.validates(),
         }
     }
     fn origin(&self) -> &LowerName {
@@ -1341,11 +1395,20 @@ impl<P: hickory_server::net::runtime::RuntimeProvider> ZoneHandler for Resolutio
                     }
                 }
             },
-            Backend::Forward(pool) => pool
-                .lookup(Name::from(name), rtype)
-                .await
-                .map(AuthLookup::from)
-                .map_err(LookupError::from),
+            Backend::Forward(backend) => {
+                match backend.pool.lookup(Name::from(name), rtype).await {
+                    Ok(lookup) => Ok(AuthLookup::from(lookup)),
+                    // A failed validation is final unless a zone above the name is provably
+                    // unsigned, which makes validating anything below it meaningless.
+                    Err(NetError::Dns(DnsError::DnssecBogus)) => {
+                        match forward_insecure_retry(backend, name, rtype).await {
+                            Some(lookup) => Ok(AuthLookup::from(lookup)),
+                            None => Err(LookupError::from(NetError::Dns(DnsError::DnssecBogus))),
+                        }
+                    }
+                    Err(error) => Err(LookupError::from(error)),
+                }
+            }
         };
         LookupControlFlow::Continue(result)
     }
@@ -1441,6 +1504,68 @@ async fn recursive_lookup<P: hickory_server::net::runtime::RuntimeProvider>(
     };
     accel.metrics.observe(lookup_started.elapsed(), false);
     result
+}
+
+/// Forward mode's counterpart of `insecure_retry`: after a DNSSEC failure, walk the ancestors
+/// from the top-level domain down with validating lookups. The first one that validates as
+/// provably insecure (a zone with no DS record, proven) means nothing below it can be secure, so
+/// the lookup is repeated once without validation. A secure ancestor sends the walk one level
+/// down; a bogus or unanswered one ends it, and the failure stands. The walk and the retry share
+/// one budget and are cancelled with the query.
+async fn forward_insecure_retry<P: hickory_server::net::runtime::RuntimeProvider>(
+    backend: &ForwardBackend<P>,
+    name: &LowerName,
+    rtype: RecordType,
+) -> Option<hickory_server::resolver::lookup::Lookup> {
+    let plain = backend.plain.as_ref()?;
+    let mut chain = Vec::new();
+    let mut current = Name::from(name.clone()).base_name();
+    while !current.is_root() {
+        chain.push(current.clone());
+        current = current.base_name();
+    }
+    chain.reverse(); // from the top-level domain downwards
+    let deadline = Instant::now() + backend.budget;
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+    for ancestor in chain {
+        // Which name server answers can vary, so the apex is looked at twice (SOA, then NS).
+        let mut verdict = None;
+        for probe in [RecordType::SOA, RecordType::NS] {
+            let left = remaining();
+            if left.is_zero() {
+                return None;
+            }
+            let result = timeout(left, backend.pool.lookup(ancestor.clone(), probe))
+                .await
+                .ok()?;
+            verdict = match &result {
+                Ok(lookup) => Some(DnssecSummary::from_records(lookup.answers().iter())),
+                Err(NetError::Dns(DnsError::DnssecBogus)) => Some(DnssecSummary::Bogus),
+                // Not answered: there is nothing to base a decision on.
+                Err(_) => return None,
+            };
+            if !matches!(verdict, Some(DnssecSummary::Bogus)) {
+                break;
+            }
+        }
+        match verdict? {
+            DnssecSummary::Insecure => {
+                let lookup = timeout(remaining(), plain.lookup(Name::from(name.clone()), rtype))
+                    .await
+                    .ok()?
+                    .ok()?;
+                if let Some(metrics) = &backend.metrics {
+                    metrics
+                        .forward_insecure_recoveries
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                return Some(lookup);
+            }
+            DnssecSummary::Secure => {} // a signed zone: look one level down
+            DnssecSummary::Bogus => return None,
+        }
+    }
+    None
 }
 
 /// Some operators answer DS queries for a child zone from the child itself, which strict

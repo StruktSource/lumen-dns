@@ -2888,3 +2888,475 @@ async fn dhcp_leases_become_dns_names_and_are_off_by_default() {
     );
     server.shutdown().await;
 }
+
+/// What an authority that serves a parent and its child from the same servers sends for a DS
+/// query at the child (Google's `l.google.com` does this).
+#[derive(Clone, Copy)]
+enum OddDs {
+    /// `NOERROR` with only the child's own SOA in the authority section.
+    ChildSoa = 0,
+    /// `NOERROR` with an empty authority section (Cloudflare's resolver does this).
+    Empty = 1,
+}
+
+/// A signed root with an unsigned `google.` below it (no DS, proven by NSEC), a separate
+/// unsigned `google.` zone with a CNAME into `l.google.`, and a front end that answers the DS
+/// query for `l.google.` in an odd shape. Returns the front end's address, the trust anchor file,
+/// and the shape switch.
+struct OddDsAuthority {
+    address: SocketAddr,
+    anchor: std::path::PathBuf,
+    shape: Arc<std::sync::atomic::AtomicU8>,
+    ds_queries: Arc<AtomicUsize>,
+    _directory: tempfile::TempDir,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for OddDsAuthority {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+async fn odd_ds_authority() -> OddDsAuthority {
+    use hickory_server::{
+        dnssec::NxProofKind,
+        proto::{
+            dnssec::{Algorithm, DnssecSigner, SigningKey, crypto::EcdsaSigningKey, rdata::DNSKEY},
+            serialize::txt::Parser,
+        },
+        server::Server,
+        store::in_memory::InMemoryZoneHandler,
+        zone_handler::{AxfrPolicy, Catalog, ZoneType},
+    };
+    let roots = Name::root();
+    let root_text = ". 60 IN SOA ns. hostmaster. 1 60 60 60 60\n. 60 IN NS ns.\nns. 60 IN A 127.0.0.1\ngoogle. 60 IN NS ns.\nbroken. 60 IN NS ns.\nbroken. 60 IN DS 12345 13 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nvalid.example. 60 IN A 192.0.2.1\nbogus.example. 60 IN A 192.0.2.2\n";
+    let (_, records) = Parser::new(root_text, None, Some(roots.clone()))
+        .parse()
+        .unwrap();
+    let mut root: InMemoryZoneHandler = InMemoryZoneHandler::new(
+        roots.clone(),
+        records,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        Some(NxProofKind::Nsec),
+    )
+    .unwrap();
+    let der = EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP256SHA256).unwrap();
+    let key = EcdsaSigningKey::from_pkcs8(&der, Algorithm::ECDSAP256SHA256).unwrap();
+    let dnskey = DNSKEY::new(true, true, false, key.to_public_key().unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    let anchor = directory.path().join("root.key");
+    std::fs::write(&anchor, format!(". 60 IN DNSKEY {dnskey}\n")).unwrap();
+    root.add_zone_signing_key_mut(DnssecSigner::new(
+        dnskey,
+        Box::new(key),
+        roots.clone(),
+        Duration::from_secs(3600),
+    ))
+    .unwrap();
+    root.upsert_mut(
+        Record::from_rdata(
+            Name::from_ascii("svcb.example.").unwrap(),
+            60,
+            RData::HTTPS(hickory_proto::rr::rdata::HTTPS(
+                hickory_proto::rr::rdata::SVCB::new(
+                    1,
+                    Name::from_ascii("pool.example.").unwrap(),
+                    vec![
+                        (
+                            SvcParamKey::Alpn,
+                            SvcParamValue::Alpn(Alpn(vec!["h2".into(), "h3".into()])),
+                        ),
+                        (
+                            SvcParamKey::EchConfigList,
+                            SvcParamValue::EchConfigList(EchConfigList(ECH_CONFIG.to_vec())),
+                        ),
+                    ],
+                ),
+            )),
+        ),
+        1,
+    );
+    root.secure_zone_mut().unwrap();
+    // A record changed after signing keeps its old signature: bogus.
+    root.upsert_mut(
+        Record::from_rdata(
+            Name::from_ascii("bogus.example.").unwrap(),
+            60,
+            RData::A(A::new(192, 0, 2, 99)),
+        ),
+        1,
+    );
+
+    let google_text = "google. 60 IN SOA ns.google. hostmaster.google. 1 60 60 60 60\ngoogle. 60 IN NS ns.google.\nns.google. 60 IN A 127.0.0.1\nwww.google. 60 IN A 192.0.2.10\nclients4.google. 60 IN CNAME clients.l.google.\nclients1.google. 60 IN CNAME clients.l.google.\nl.google. 60 IN NS ns.google.\n";
+    let google = Name::from_ascii("google.").unwrap();
+    let (_, records) = Parser::new(google_text, None, Some(google.clone()))
+        .parse()
+        .unwrap();
+    let child: InMemoryZoneHandler = InMemoryZoneHandler::new(
+        google.clone(),
+        records,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        None,
+    )
+    .unwrap();
+
+    let child_text = "l.google. 60 IN SOA ns.google. hostmaster.google. 1 60 60 60 60\nl.google. 60 IN NS ns.google.\nclients.l.google. 60 IN A 192.0.2.20\n";
+    let l_google = Name::from_ascii("l.google.").unwrap();
+    let (_, records) = Parser::new(child_text, None, Some(l_google.clone()))
+        .parse()
+        .unwrap();
+    let l_google_zone: InMemoryZoneHandler = InMemoryZoneHandler::new(
+        l_google.clone(),
+        records,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        None,
+    )
+    .unwrap();
+    let broken_text = "broken. 60 IN SOA ns.broken. hostmaster.broken. 1 60 60 60 60\nbroken. 60 IN NS ns.broken.\nns.broken. 60 IN A 127.0.0.1\nwww.broken. 60 IN A 192.0.2.30\nclients.l.broken. 60 IN A 192.0.2.31\n";
+    let broken = Name::from_ascii("broken.").unwrap();
+    let (_, records) = Parser::new(broken_text, None, Some(broken.clone()))
+        .parse()
+        .unwrap();
+    // Unsigned, although the root says it must be signed: everything in it is bogus.
+    let broken_zone: InMemoryZoneHandler = InMemoryZoneHandler::new(
+        broken.clone(),
+        records,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        None,
+    )
+    .unwrap();
+
+    let serve = |zones: Vec<(Name, InMemoryZoneHandler)>| async move {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let mut catalog = Catalog::new();
+        for (origin, zone) in zones {
+            catalog.upsert(origin.into(), vec![Arc::new(zone)]);
+        }
+        let mut server = Server::new(catalog);
+        server.register_socket(socket);
+        let task = tokio::spawn(async move {
+            server.block_until_done().await.unwrap();
+        });
+        (address, task)
+    };
+    let (root_address, root_task) = serve(vec![(roots, root)]).await;
+    let (google_address, google_task) =
+        serve(vec![(google, child), (l_google, l_google_zone)]).await;
+    let (broken_address, broken_task) = serve(vec![(broken, broken_zone)]).await;
+
+    let front = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = front.local_addr().unwrap();
+    let shape = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let ds_queries = Arc::new(AtomicUsize::new(0));
+    let (switch, counter) = (Arc::clone(&shape), Arc::clone(&ds_queries));
+    let front_task = tokio::spawn(async move {
+        let mut buffer = vec![0u8; 4096];
+        loop {
+            let Ok((size, from)) = front.recv_from(&mut buffer).await else {
+                continue;
+            };
+            let Ok(request) = Message::from_vec(&buffer[..size]) else {
+                continue;
+            };
+            let Some(question) = request.queries.first() else {
+                continue;
+            };
+            let name = question.name().to_ascii().to_ascii_lowercase();
+            let kind = question.query_type();
+            // Every DS query inside the child zone gets the odd answer.
+            let child = ["l.google.", "l.broken."]
+                .into_iter()
+                .find(|child| name == *child || name.ends_with(&format!(".{child}")));
+            if let (RecordType::DS, Some(child)) = (kind, child) {
+                counter.fetch_add(1, Ordering::Relaxed);
+                let mut reply = Message::response(request.metadata.id, request.metadata.op_code);
+                reply.metadata.response_code = ResponseCode::NoError;
+                reply.metadata.authoritative = true;
+                reply.metadata.recursion_desired = request.metadata.recursion_desired;
+                reply.add_query(question.clone());
+                if switch.load(Ordering::Relaxed) == OddDs::ChildSoa as u8 {
+                    reply.add_authority(Record::from_rdata(
+                        Name::from_ascii(child).unwrap(),
+                        60,
+                        RData::SOA(SOA::new(
+                            Name::from_ascii("ns.google.").unwrap(),
+                            Name::from_ascii("hostmaster.google.").unwrap(),
+                            1,
+                            60,
+                            60,
+                            60,
+                            60,
+                        )),
+                    ));
+                }
+                if request.edns.is_some() {
+                    let mut edns = Edns::new();
+                    edns.set_dnssec_ok(true).set_max_payload(1232);
+                    reply.edns = Some(edns);
+                }
+                let _ = front.send_to(&reply.to_vec().unwrap(), from).await;
+                continue;
+            }
+            // Everything under google. except the parent's DS answer comes from the child zone.
+            let below = |zone: &str| {
+                (name == zone || name.ends_with(&format!(".{zone}")))
+                    && !(kind == RecordType::DS && name == zone)
+            };
+            let backend = if below("google.") {
+                google_address
+            } else if below("broken.") {
+                broken_address
+            } else {
+                root_address
+            };
+            let forward = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            forward.send_to(&buffer[..size], backend).await.unwrap();
+            let mut answer = vec![0u8; 4096];
+            if let Ok(Ok((length, _))) =
+                timeout(Duration::from_secs(2), forward.recv_from(&mut answer)).await
+            {
+                let _ = front.send_to(&answer[..length], from).await;
+            }
+        }
+    });
+    OddDsAuthority {
+        address,
+        anchor,
+        shape,
+        ds_queries,
+        _directory: directory,
+        tasks: vec![root_task, google_task, broken_task, front_task],
+    }
+}
+
+async fn answer_for(bind: SocketAddr, name: &str) -> Message {
+    udp(bind, &dnssec_query(name, RecordType::A)).await
+}
+
+#[tokio::test]
+async fn forward_mode_recovers_names_below_an_unsigned_zone_with_an_odd_ds_answer() {
+    for shape in [OddDs::ChildSoa, OddDs::Empty] {
+        let authority = odd_ds_authority().await;
+        authority.shape.store(shape as u8, Ordering::Relaxed);
+        let bind = address("127.0.0.1");
+        let mut cfg = config(authority.address, bind);
+        cfg.resolver.dnssec = true;
+        cfg.resolver.trust_anchor = Some(authority.anchor.clone());
+        cfg.resolver.diagnostics = true;
+        let metrics = address("127.0.0.1");
+        cfg.metrics = Some(metrics);
+        let mut server = RunningServer::start(cfg).await.unwrap();
+
+        // The name and a CNAME into the child zone both resolve, and are not marked validated.
+        for alias in ["clients4.google.", "clients1.google."] {
+            let chain = answer_for(bind, alias).await;
+            assert_eq!(
+                chain.metadata.response_code,
+                ResponseCode::NoError,
+                "{alias}"
+            );
+            assert!(!chain.metadata.authentic_data);
+            assert!(
+                chain
+                    .answers
+                    .iter()
+                    .any(|r| r.record_type() == RecordType::CNAME)
+            );
+            assert!(
+                chain
+                    .answers
+                    .iter()
+                    .any(|r| r.record_type() == RecordType::A)
+            );
+        }
+        let direct = answer_for(bind, "clients.l.google.").await;
+        assert_eq!(direct.metadata.response_code, ResponseCode::NoError);
+        assert!(!direct.metadata.authentic_data);
+        assert!(
+            direct
+                .answers
+                .iter()
+                .any(|r| r.record_type() == RecordType::A)
+        );
+        assert!(
+            authority.ds_queries.load(Ordering::Relaxed) > 0,
+            "the odd DS answer was really sent"
+        );
+        // Names that never failed are untouched, and the metric counted the recoveries.
+        assert_eq!(
+            answer_for(bind, "www.google.").await.metadata.response_code,
+            ResponseCode::NoError
+        );
+        let mut stream = TcpStream::connect(metrics).await.unwrap();
+        stream
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut text = String::new();
+        stream.read_to_string(&mut text).await.unwrap();
+        let counted = text
+            .lines()
+            .find(|line| line.starts_with("lumen_dns_forward_insecure_recoveries_total "))
+            .expect("the recovery counter is exported");
+        assert!(!counted.ends_with(" 0"), "{counted}");
+        assert!(!text.contains("google"), "no names in metrics");
+
+        // A signed zone keeps its protection: valid is validated, tampered data still fails.
+        let valid = answer_for(bind, "valid.example.").await;
+        assert_eq!(valid.metadata.response_code, ResponseCode::NoError);
+        assert!(valid.metadata.authentic_data);
+        assert_eq!(
+            answer_for(bind, "bogus.example.")
+                .await
+                .metadata
+                .response_code,
+            ResponseCode::ServFail
+        );
+        assert_eq!(
+            answer_for(bind, "absent.example.")
+                .await
+                .metadata
+                .response_code,
+            ResponseCode::NXDomain
+        );
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn forward_mode_does_not_recover_below_a_bogus_ancestor_or_when_validation_is_off() {
+    let authority = odd_ds_authority().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(authority.address, bind);
+    cfg.resolver.dnssec = true;
+    cfg.resolver.trust_anchor = Some(authority.anchor.clone());
+    let mut server = RunningServer::start(cfg.clone()).await.unwrap();
+    // `broken.` has a DS in the signed root but is not signed itself: bogus. Nothing below it may
+    // be rescued, whether or not the child zone answers DS oddly.
+    for name in ["www.broken.", "clients.l.broken."] {
+        assert_eq!(
+            answer_for(bind, name).await.metadata.response_code,
+            ResponseCode::ServFail,
+            "{name}"
+        );
+    }
+    server.shutdown().await;
+    // With validation off nothing is checked, so nothing needs recovering.
+    cfg.resolver.dnssec = false;
+    cfg.resolver.trust_anchor = None;
+    let mut plain = RunningServer::start(cfg).await.unwrap();
+    assert_eq!(
+        answer_for(bind, "clients.l.google.")
+            .await
+            .metadata
+            .response_code,
+        ResponseCode::NoError
+    );
+    plain.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_usable_forward_answer_is_never_asked_again_elsewhere_and_recovery_is_bounded() {
+    let authority = odd_ds_authority().await;
+    // A second provider that counts what it is asked and never answers.
+    let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let other_address = other.local_addr().unwrap();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&asked);
+    let counting = tokio::spawn(async move {
+        let mut buffer = [0u8; 512];
+        loop {
+            if other.recv_from(&mut buffer).await.is_ok() {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+    let bind = address("127.0.0.1");
+    let mut cfg = config(authority.address, bind);
+    cfg.resolver.dnssec = true;
+    cfg.resolver.trust_anchor = Some(authority.anchor.clone());
+    cfg.resolver.strategy = Some(ForwardStrategy::Failover);
+    cfg.resolver.upstreams.push(Upstream {
+        address: other_address,
+        protocol: UpstreamProtocol::Udp,
+        server_name: None,
+        doh_path: None,
+    });
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    for name in [
+        "absent.example.",
+        "valid.example.",
+        "clients.l.google.",
+        "bogus.example.",
+    ] {
+        answer_for(bind, name).await;
+    }
+    assert_eq!(
+        asked.load(Ordering::Relaxed),
+        0,
+        "the first provider's answers are final"
+    );
+    // Many concurrent recoveries finish together and leave the server answering.
+    let mut set = JoinSet::new();
+    for _ in 0..40 {
+        set.spawn(async move {
+            answer_for(bind, "clients4.google.")
+                .await
+                .metadata
+                .response_code
+        });
+    }
+    while let Some(code) = set.join_next().await {
+        assert_eq!(code.unwrap(), ResponseCode::NoError);
+    }
+    assert_eq!(
+        answer_for(bind, "www.google.").await.metadata.response_code,
+        ResponseCode::NoError
+    );
+    server.shutdown().await;
+    counting.abort();
+}
+
+#[tokio::test]
+async fn validated_forwarded_https_records_keep_ech_and_are_marked_authentic() {
+    let authority = odd_ds_authority().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(authority.address, bind);
+    cfg.resolver.dnssec = true;
+    cfg.resolver.trust_anchor = Some(authority.anchor.clone());
+    let mut server = RunningServer::start(cfg).await.unwrap();
+    // First live, then from the cache: the signed record is the same each time.
+    for _ in 0..3 {
+        let reply = udp(bind, &dnssec_query("svcb.example.", RecordType::HTTPS)).await;
+        assert_eq!(reply.metadata.response_code, ResponseCode::NoError);
+        assert!(
+            reply.metadata.authentic_data,
+            "validated against the trust anchor"
+        );
+        let svcb = reply
+            .answers
+            .iter()
+            .find_map(|record| match &record.data {
+                RData::HTTPS(https) => Some(&https.0),
+                _ => None,
+            })
+            .expect("an HTTPS record");
+        assert!(svcb.svc_params.iter().any(|(key, value)| {
+            *key == SvcParamKey::EchConfigList
+                && matches!(value, SvcParamValue::EchConfigList(list) if list.0 == ECH_CONFIG)
+        }));
+        assert!(svcb.svc_params.iter().any(|(key, value)| {
+            *key == SvcParamKey::Alpn
+                && matches!(value, SvcParamValue::Alpn(list) if list.0 == ["h2", "h3"])
+        }));
+    }
+    server.shutdown().await;
+}

@@ -4,7 +4,7 @@
 //! Each zone is an in-memory Hickory handler installed in the shared catalog, which routes by
 //! the longest matching origin. These names never reach the recursive or forwarding resolver.
 
-use super::{Backend, ResolutionZone, forward, forward_provider};
+use super::{Backend, ForwardBackend, ResolutionZone, forward, forward_provider};
 use async_trait::async_trait;
 use hickory_server::{
     dnssec::NxProofKind,
@@ -619,11 +619,11 @@ fn forwarder_handler(
     let penalty = Duration::from_millis(u64::from(settings.upstream_timeout_ms));
     Ok(Arc::new(ResolutionZone {
         origin: origin.into(),
-        backend: Backend::Forward(Box::new(forward::ForwardPool::new(
+        backend: Backend::Forward(Box::new(ForwardBackend::plain(forward::ForwardPool::new(
             vec![provider],
             lumen_config::ForwardStrategy::Failover,
             penalty,
-        ))),
+        )))),
     }))
 }
 
