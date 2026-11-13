@@ -22,7 +22,7 @@ Lumen 0.7.0 adds optional stale answers, a persistent cache, stronger filtering,
 
 ## Not in this release
 
-Zone key rollover and NSEC3, TLS-ALPN-01 ACME challenges, native ECH, DNSCrypt upstreams, and Anonymized DNSCrypt. DNSCrypt has not been tested against a third-party client.
+Automatic (timer-driven) zone key rollover, TLS-ALPN-01 ACME challenges, native ECH, DNSCrypt upstreams, and Anonymized DNSCrypt. DNSCrypt has not been tested against a third-party client.
 
 ## Check the download
 

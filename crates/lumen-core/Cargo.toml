@@ -39,6 +39,7 @@ hickory-server.workspace = true
 hickory-proto.workspace = true
 tempfile = "3"
 dhcproto = "0.15"
+data-encoding = "2"
 
 [lints]
 workspace = true

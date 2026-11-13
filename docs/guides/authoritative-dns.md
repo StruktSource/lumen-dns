@@ -111,14 +111,56 @@ file = "zones/home.example.zone"
   key_file = "zones/home.example.pem"
   # algorithm = "ed25519"        # or "ecdsap256sha256"
   # signature_days = 14          # 2 to 90
+  # denial = "nsec"              # or "nsec3"
 ```
 
 - Give the **`DS` line to the operator of the parent zone** (your registrar, or your own parent zone). Until the parent publishes it, validators treat the zone as unsigned, which is safe. A public name needs this step. A private zone needs a trust anchor on each validating client instead.
-- Lumen uses one combined key for the zone and key-signing roles, and NSEC for proving that a name does not exist. Signatures are served to clients that ask for DNSSEC data (the DO bit) and are renewed every day, with the validity set by `signature_days`. Each renewal also raises the zone's SOA serial.
+- Lumen uses one combined key for the zone and key-signing roles, and NSEC (or [NSEC3](#nsec3)) for proving that a name does not exist. Signatures are served to clients that ask for DNSSEC data (the DO bit) and are renewed every day, with the validity set by `signature_days`. Each renewal also raises the zone's SOA serial.
 - The key file must be PKCS#8 PEM and not readable by group or others. Startup fails otherwise. Back it up with your config: losing it means a new `DS` at the parent.
 - A signed zone must be plain: no `views`, no `journal`, no `transfer_keys`. A zone you change rarely suits signing; edit the file and restart to publish changes.
-- **Not built:** key rollover (replacing a key needs a new `DS` and a manual change), NSEC3, separate key- and zone-signing keys, and signing for dynamic or split-horizon zones.
+- **Not built:** separate key- and zone-signing keys, automatic (timer-driven) rollover, and signing for dynamic or split-horizon zones.
 - Lumen does not validate its own operator zones against the parent. It serves what you configured.
+
+### NSEC3
+
+`NSEC` proves that a name does not exist by naming its neighbors, so anyone can walk the whole zone. `NSEC3` names hashed neighbors instead, which makes listing the zone harder (not impossible: short names can still be guessed).
+
+```toml
+  [zones.dnssec]
+  key_file = "zones/home.example.pem"
+  denial = "nsec3"
+  # nsec3_salt = "aabbccdd"   # hex, at most 8 bytes. RFC 9276 advises no salt, which is the default
+  # nsec3_opt_out = false     # no records for unsigned delegations
+```
+
+Lumen uses SHA-1 (the only NSEC3 hash defined) and **zero extra iterations**, as RFC 9276 asks: more iterations cost every validating resolver and protect nothing. `NSEC3PARAM` is published at the apex. A missing name returns the closest-encloser and next-closer `NSEC3` records with their signatures. The records are tested for the RFC 5155 cover proof and their signatures verify; a full validating-resolver run against a real parent is not part of the tests.
+
+### Key rollover
+
+Replace a key without a gap with a **double-signature rollover**: for a while the zone is signed with both keys and both are published, so the parent can move its `DS` from the old key to the new one while every resolver can validate with either. Lumen signs with both while `next_key_file` is set.
+
+1. **Create the new key** and note its `DS`: `lumen --zone-key zones/home.example-next.pem --zone home.example`.
+2. **Start the rollover.** Add the key to the zone and restart (or reload):
+
+   ```toml
+     [zones.dnssec]
+     key_file = "zones/home.example.pem"
+     next_key_file = "zones/home.example-next.pem"
+     # next_algorithm = "ecdsap256sha256"   # only when the new key uses another algorithm
+   ```
+
+   The `DNSKEY` set now holds both keys and every record set carries two signatures. Responses are larger for the time this lasts.
+3. **Add the new `DS` at the parent**, next to the old one. Wait until it has been published and the old `DNSKEY` set and `DS` have expired from caches: at least their TTLs, plus the longest signature lifetime you care about (`signature_days` bounds it).
+4. **Finish.** Make the new key the only one:
+
+   ```toml
+     [zones.dnssec]
+     key_file = "zones/home.example-next.pem"
+   ```
+
+   Restart. Then remove the old `DS` at the parent, and keep the old key file until you are sure nothing still needs it.
+
+The same steps change the algorithm: set `next_algorithm` in step 2. Lumen checks that the two keys differ and that both files are private to their owner. It does not time the steps for you and cannot see the parent, so the waits in step 3 are yours to keep: moving on too early leaves resolvers with cached data they cannot validate. Tested with real signatures: both keys are published, every record set verifies under both keys, and after the finish step only the new key remains. Not tested against a real parent or registrar.
 
 ## Dynamic updates (RFC 2136)
 

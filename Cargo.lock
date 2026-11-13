@@ -1446,6 +1446,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "crypto_box",
+ "data-encoding",
  "dhcproto",
  "ed25519-dalek",
  "h2",

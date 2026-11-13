@@ -111,8 +111,9 @@ fn static_zone(name: &str, source: &str) -> Result<Arc<dyn ZoneHandler>, String>
     Ok(Arc::new(handler))
 }
 
-/// A plain zone signed with one combined key and NSEC denial of existence. The caller renews the
-/// signatures by calling `secure_zone` again before they expire.
+/// A plain zone signed with one combined key (two during a rollover) and `NSEC` or `NSEC3`
+/// denial of existence. The caller renews the signatures by calling `secure_zone` again before
+/// they expire.
 fn signed_zone(
     name: &str,
     source: &str,
@@ -128,12 +129,14 @@ fn signed_zone(
         records,
         ZoneType::Primary,
         AxfrPolicy::Deny,
-        Some(NxProofKind::Nsec),
+        Some(crate::signing::proof_kind(signing)?),
     )
     .map_err(|_| format!("zone {name} needs a SOA record at its apex"))?;
-    handler
-        .add_zone_signing_key_mut(crate::signing::signer(signing, &origin)?)
-        .map_err(|_| format!("cannot use the signing key for zone {name}"))?;
+    for signer in crate::signing::signers(signing, &origin)? {
+        handler
+            .add_zone_signing_key_mut(signer)
+            .map_err(|_| format!("cannot use the signing key for zone {name}"))?;
+    }
     handler
         .secure_zone_mut()
         .map_err(|_| format!("cannot sign zone {name}"))?;

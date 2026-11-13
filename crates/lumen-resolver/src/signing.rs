@@ -1,9 +1,10 @@
 //! DNSSEC signing keys for operator zones: loading, creation, and the DS record for the parent.
 
 use base64::Engine as _;
+use hickory_server::dnssec::NxProofKind;
 use hickory_server::proto::{
     dnssec::{
-        Algorithm, DigestType, DnssecSigner, PublicKey, SigningKey,
+        Algorithm, DigestType, DnssecSigner, Nsec3HashAlgorithm, PublicKey, SigningKey,
         crypto::{EcdsaSigningKey, Ed25519SigningKey, signing_key_from_der},
         rdata::DNSKEY,
     },
@@ -41,10 +42,13 @@ fn private_key(path: &Path, choice: SigningAlgorithm) -> Result<Box<dyn SigningK
         .map_err(|_| "zone signing key does not match its algorithm".to_string())
 }
 
-/// Build the signer for `origin`: one combined key (zone and key signing), signatures valid
-/// for `signature_days`.
-pub(crate) fn signer(signing: &ZoneSigning, origin: &Name) -> Result<DnssecSigner, String> {
-    let key = private_key(&signing.key_file, signing.algorithm)?;
+fn signer_for(
+    path: &Path,
+    choice: SigningAlgorithm,
+    signing: &ZoneSigning,
+    origin: &Name,
+) -> Result<DnssecSigner, String> {
+    let key = private_key(path, choice)?;
     let public = key
         .to_public_key()
         .map_err(|_| "zone signing key has no usable public key")?;
@@ -55,6 +59,57 @@ pub(crate) fn signer(signing: &ZoneSigning, origin: &Name) -> Result<DnssecSigne
         origin.clone(),
         Duration::from_secs(u64::from(signing.signature_days) * 24 * 3600),
     ))
+}
+
+/// The signers for `origin`: one combined key (zone and key signing), or two while a rollover is
+/// under way (`next_key_file`). With two, every record set is signed by both and both keys are
+/// published, so the parent's `DS` can move from one to the other. Signatures are valid for
+/// `signature_days`.
+pub(crate) fn signers(signing: &ZoneSigning, origin: &Name) -> Result<Vec<DnssecSigner>, String> {
+    let mut out = vec![signer_for(
+        &signing.key_file,
+        signing.algorithm,
+        signing,
+        origin,
+    )?];
+    if let Some(next) = &signing.next_key_file {
+        let choice = signing.next_algorithm.unwrap_or(signing.algorithm);
+        let second = signer_for(next, choice, signing, origin)?;
+        if second
+            .key()
+            .to_public_key()
+            .ok()
+            .map(|k| k.public_bytes().to_vec())
+            == out[0]
+                .key()
+                .to_public_key()
+                .ok()
+                .map(|k| k.public_bytes().to_vec())
+        {
+            return Err("next_key_file holds the same key as key_file".into());
+        }
+        out.push(second);
+    }
+    Ok(out)
+}
+
+/// The denial-of-existence setting of a signed zone.
+pub(crate) fn proof_kind(signing: &ZoneSigning) -> Result<NxProofKind, String> {
+    Ok(match signing.denial {
+        lumen_config::Denial::Nsec => NxProofKind::Nsec,
+        lumen_config::Denial::Nsec3 => NxProofKind::Nsec3 {
+            algorithm: Nsec3HashAlgorithm::SHA1,
+            salt: match &signing.nsec3_salt {
+                Some(salt) => lumen_config::parse_hex(salt)
+                    .ok_or("invalid nsec3_salt")?
+                    .into(),
+                None => Vec::new().into(),
+            },
+            // RFC 9276: extra iterations only cost resolvers and add no protection.
+            iterations: 0,
+            opt_out: signing.nsec3_opt_out,
+        },
+    })
 }
 
 /// The DNSKEY and DS lines for a zone, in zone-file form.

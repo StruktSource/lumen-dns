@@ -26,6 +26,8 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Added (continued)
 
+- **NSEC3 and zone key rollover for signed zones.** `[zones.dnssec] denial = "nsec3"` proves absence with hashed names (SHA-1, zero extra iterations, optional salt and opt-out, per RFC 9276). `next_key_file` (and `next_algorithm`) starts a double-signature rollover: both keys are published and every record set is signed twice until you drop the old key, so the parent's `DS` can move without a gap. Operator-driven, not timer-driven. See [Your own DNS zones](docs/guides/authoritative-dns.md#key-rollover).
+
 - **DoH3 in the automatic provider list.** `transport_priority` accepts `h3`, and `protocol = "h3"` selects it explicitly. Freifunk Munich, dns.sb, Quad9, UncensoredDNS, Cloudflare and Google have an `h3` entry (their own DoH endpoints advertise HTTP/3); the others are not documented. Automatic order is QUIC, HTTPS, HTTP/3, TLS, since HTTP/3 shares QUIC's UDP path. Catalog status is `not_tested`.
 
 - **Child-safety categories in Quick install.** A **Child safety** group installs one list per category (`adult`, `gambling`, `social`, `drugs`, `piracy`, `torrent`, `tiktok`, `youtube`, `facebook`). Each list carries its category, so it applies only to profiles that select it; installing creates or extends a `child-safe` profile. The adult and gambling lists moved here from Extras, so new installs no longer apply them to everyone. Existing installs are unchanged. See [Filtering](docs/guides/filtering.md#child-safety-categories).
@@ -41,7 +43,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ### Not included
 
-Zone key rollover and NSEC3, TLS-ALPN-01 ACME challenges, native ECH, DNSCrypt upstreams, and Anonymized DNSCrypt are **not** available in this release.
+Automatic (timer-driven) zone key rollover, TLS-ALPN-01 ACME challenges, native ECH, DNSCrypt upstreams, and Anonymized DNSCrypt are **not** available in this release.
 
 ## [0.6.0] - 2026-11-09
 

@@ -3367,3 +3367,234 @@ async fn validated_forwarded_https_records_keep_ech_and_are_marked_authentic() {
     }
     server.shutdown().await;
 }
+
+/// A signed zone `signed.test` served by one Lumen.
+async fn signed_authority(signing: lumen_config::ZoneSigning) -> (RunningServer, SocketAddr) {
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    cfg.zones = vec![lumen_config::Zone {
+        name: "signed.test".into(),
+        text: Some(zone_text("signed.test", "192.0.2.1")),
+        dnssec: Some(signing),
+        ..Default::default()
+    }];
+    (RunningServer::start(cfg).await.unwrap(), bind)
+}
+
+/// Check every signature on the answers in `reply` against the DNSKEYs the zone publishes.
+/// Returns the key tags that signed `kind`, sorted.
+fn verified_signers(
+    reply: &Message,
+    published: &[hickory_proto::dnssec::rdata::DNSKEY],
+    owner: &str,
+    kind: RecordType,
+) -> Vec<u16> {
+    use hickory_proto::dnssec::{Verifier, rdata::DNSSECRData};
+    use hickory_proto::rr::DNSClass;
+    let set: Vec<_> = reply
+        .answers
+        .iter()
+        .filter(|r| r.record_type() == kind)
+        .collect();
+    assert!(!set.is_empty(), "no {kind:?} records in the answer");
+    let mut tags = Vec::new();
+    for record in &reply.answers {
+        let RData::DNSSEC(DNSSECRData::RRSIG(sig)) = &record.data else {
+            continue;
+        };
+        if sig.input().type_covered != kind {
+            continue;
+        }
+        let key = published
+            .iter()
+            .find(|key| key.calculate_key_tag().unwrap() == sig.input().key_tag)
+            .expect("a signature by a key that is not published");
+        key.verify_rrsig(
+            &Name::from_ascii(owner).unwrap(),
+            DNSClass::IN,
+            sig,
+            set.iter().copied(),
+        )
+        .expect("the signature verifies against its published key");
+        tags.push(sig.input().key_tag);
+    }
+    tags.sort_unstable();
+    tags
+}
+
+fn published_keys(reply: &Message) -> Vec<hickory_proto::dnssec::rdata::DNSKEY> {
+    use hickory_proto::dnssec::rdata::DNSSECRData;
+    reply
+        .answers
+        .iter()
+        .filter_map(|record| match &record.data {
+            RData::DNSSEC(DNSSECRData::DNSKEY(key)) => Some(key.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn nsec3_signed_zones_prove_absence_with_hashed_names() {
+    use hickory_proto::dnssec::{Nsec3HashAlgorithm, rdata::DNSSECRData};
+    use hickory_proto::rr::RecordType as T;
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("zone.pem");
+    lumen_resolver::zone_key(&key, "signed.test", lumen_config::SigningAlgorithm::Ed25519).unwrap();
+    let (mut server, bind) = signed_authority(lumen_config::ZoneSigning {
+        key_file: key,
+        denial: lumen_config::Denial::Nsec3,
+        ..Default::default()
+    })
+    .await;
+    let keys = published_keys(&udp(bind, &dnssec_query("signed.test.", T::DNSKEY)).await);
+    assert_eq!(keys.len(), 1);
+
+    // A missing name is answered with NSEC3 records, their signatures, and no NSEC.
+    let missing = udp(bind, &dnssec_query("nope.signed.test.", T::A)).await;
+    assert_eq!(missing.metadata.response_code, ResponseCode::NXDomain);
+    let kinds: Vec<T> = missing
+        .authorities
+        .iter()
+        .map(hickory_proto::rr::Record::record_type)
+        .collect();
+    assert!(
+        kinds.contains(&T::NSEC3) && kinds.contains(&T::RRSIG),
+        "{kinds:?}"
+    );
+    assert!(!kinds.contains(&T::NSEC));
+    // The closest encloser (the apex) has an NSEC3 record, and the next closer name's hash falls
+    // between one record's hash and its successor: the proof of RFC 5155 section 8.4.
+    let hash = |name: &str| {
+        Nsec3HashAlgorithm::SHA1
+            .hash(&[], &Name::from_ascii(name).unwrap(), 0)
+            .unwrap()
+            .as_ref()
+            .to_vec()
+    };
+    let chain: Vec<(Vec<u8>, Vec<u8>)> = missing
+        .authorities
+        .iter()
+        .filter_map(|record| match &record.data {
+            RData::DNSSEC(DNSSECRData::NSEC3(nsec3)) => {
+                let label = record.name.iter().next().unwrap();
+                Some((
+                    data_encoding::BASE32_DNSSEC.decode(label).unwrap(),
+                    nsec3.next_hashed_owner_name().to_vec(),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    let apex = hash("signed.test.");
+    let next_closer = hash("nope.signed.test.");
+    assert!(
+        chain.iter().any(|(owner, _)| *owner == apex),
+        "closest encloser matched"
+    );
+    assert!(
+        chain.iter().any(|(owner, next)| {
+            if owner < next {
+                *owner < next_closer && next_closer < *next
+            } else {
+                // The last record wraps around to the first.
+                next_closer > *owner || next_closer < *next
+            }
+        }),
+        "next closer name covered"
+    );
+    let params = udp(bind, &dnssec_query("signed.test.", T::NSEC3PARAM)).await;
+    assert!(
+        params
+            .answers
+            .iter()
+            .any(|r| r.record_type() == T::NSEC3PARAM)
+    );
+    // A name that exists without the asked type is proven the same way.
+    let nodata = udp(bind, &dnssec_query("host.signed.test.", T::AAAA)).await;
+    assert_eq!(nodata.metadata.response_code, ResponseCode::NoError);
+    assert!(
+        nodata
+            .authorities
+            .iter()
+            .any(|r| r.record_type() == T::NSEC3)
+    );
+    // And the data itself is signed and verifies.
+    let host = udp(bind, &dnssec_query("host.signed.test.", T::A)).await;
+    assert_eq!(
+        verified_signers(&host, &keys, "host.signed.test.", T::A).len(),
+        1
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_double_signature_rollover_publishes_both_keys_and_signs_with_both() {
+    use hickory_proto::rr::RecordType as T;
+    let dir = tempfile::tempdir().unwrap();
+    let (old_key, new_key) = (dir.path().join("old.pem"), dir.path().join("new.pem"));
+    for path in [&old_key, &new_key] {
+        lumen_resolver::zone_key(path, "signed.test", lumen_config::SigningAlgorithm::Ed25519)
+            .unwrap();
+    }
+    let tag = |path: &std::path::Path| {
+        // The key's tag, as the zone publishes it.
+        let text =
+            lumen_resolver::zone_key(path, "signed.test", lumen_config::SigningAlgorithm::Ed25519)
+                .unwrap();
+        text.lines()
+            .find(|line| line.contains(" IN DS "))
+            .and_then(|line| line.split_whitespace().nth(3))
+            .and_then(|tag| tag.parse::<u16>().ok())
+            .unwrap()
+    };
+    let (old_tag, new_tag) = (tag(&old_key), tag(&new_key));
+    assert_ne!(old_tag, new_tag);
+
+    // Stage 1: both keys are published, and every record set carries both signatures, so a
+    // parent whose DS names either key can vouch for the zone.
+    let (mut server, bind) = signed_authority(lumen_config::ZoneSigning {
+        key_file: old_key.clone(),
+        next_key_file: Some(new_key.clone()),
+        ..Default::default()
+    })
+    .await;
+    let key_reply = udp(bind, &dnssec_query("signed.test.", T::DNSKEY)).await;
+    let keys = published_keys(&key_reply);
+    let mut published: Vec<u16> = keys
+        .iter()
+        .map(|k| k.calculate_key_tag().unwrap())
+        .collect();
+    published.sort_unstable();
+    let mut both = vec![old_tag, new_tag];
+    both.sort_unstable();
+    assert_eq!(published, both, "both keys are published");
+    assert_eq!(
+        verified_signers(&key_reply, &keys, "signed.test.", T::DNSKEY),
+        both
+    );
+    let host = udp(bind, &dnssec_query("host.signed.test.", T::A)).await;
+    assert_eq!(
+        verified_signers(&host, &keys, "host.signed.test.", T::A),
+        both
+    );
+    server.shutdown().await;
+
+    // Stage 2: the old key is gone. One key is published and signs everything.
+    let (mut server, bind) = signed_authority(lumen_config::ZoneSigning {
+        key_file: new_key,
+        ..Default::default()
+    })
+    .await;
+    let key_reply = udp(bind, &dnssec_query("signed.test.", T::DNSKEY)).await;
+    let keys = published_keys(&key_reply);
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].calculate_key_tag().unwrap(), new_tag);
+    let host = udp(bind, &dnssec_query("host.signed.test.", T::A)).await;
+    assert_eq!(
+        verified_signers(&host, &keys, "host.signed.test.", T::A),
+        vec![new_tag]
+    );
+    server.shutdown().await;
+}

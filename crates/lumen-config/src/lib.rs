@@ -78,8 +78,20 @@ pub enum SigningAlgorithm {
     Ecdsap256sha256,
 }
 
-/// How Lumen signs one zone: a single combined signing key, NSEC denial of existence, and
-/// signatures that are renewed every day.
+/// How a signed zone proves that a name does not exist.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Denial {
+    /// `NSEC`: a chain of the zone's own names. Simple, but it lets anyone list the zone.
+    #[default]
+    Nsec,
+    /// `NSEC3`: a chain of hashed names (SHA-1, no extra iterations, as RFC 9276 asks), which
+    /// makes listing the zone harder.
+    Nsec3,
+}
+
+/// How Lumen signs one zone: one combined signing key (or two during a rollover), `NSEC` or
+/// `NSEC3` denial of existence, and signatures that are renewed every day.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ZoneSigning {
@@ -88,6 +100,18 @@ pub struct ZoneSigning {
     pub algorithm: SigningAlgorithm,
     /// How long each signature stays valid, in days (2 to 90).
     pub signature_days: u16,
+    /// A second key for a rollover. While it is set, the zone is signed with **both** keys
+    /// (double signature) and both are published, so a parent can switch its `DS` record from
+    /// one key to the other without a gap. See the zone-signing guide for the steps.
+    pub next_key_file: Option<PathBuf>,
+    /// Algorithm of `next_key_file`. Defaults to `algorithm`; set it to change algorithm.
+    pub next_algorithm: Option<SigningAlgorithm>,
+    pub denial: Denial,
+    /// `NSEC3` salt in hex, at most 8 bytes. RFC 9276 advises against a salt, so none is the
+    /// default. Only with `denial = "nsec3"`.
+    pub nsec3_salt: Option<String>,
+    /// `NSEC3` opt-out: unsigned delegations get no record. Only with `denial = "nsec3"`.
+    pub nsec3_opt_out: bool,
 }
 
 impl Default for ZoneSigning {
@@ -96,6 +120,11 @@ impl Default for ZoneSigning {
             key_file: PathBuf::new(),
             algorithm: SigningAlgorithm::default(),
             signature_days: 14,
+            next_key_file: None,
+            next_algorithm: None,
+            denial: Denial::Nsec,
+            nsec3_salt: None,
+            nsec3_opt_out: false,
         }
     }
 }
@@ -1075,10 +1104,14 @@ impl Config {
             }
         }
         for zone in &mut config.zones {
-            if let Some(signing) = &mut zone.dnssec
-                && signing.key_file.is_relative()
-            {
-                signing.key_file = base.join(&signing.key_file);
+            if let Some(signing) = &mut zone.dnssec {
+                for path in
+                    std::iter::once(&mut signing.key_file).chain(signing.next_key_file.as_mut())
+                {
+                    if path.is_relative() {
+                        *path = base.join(&*path);
+                    }
+                }
             }
             for path in std::iter::once(&mut zone.file)
                 .chain(std::iter::once(&mut zone.journal))
@@ -1349,6 +1382,27 @@ impl Config {
                     || !(2..=90).contains(&signing.signature_days)
                 {
                     return Err("zone dnssec needs a key_file and 2..=90 signature_days".into());
+                }
+                if signing
+                    .next_key_file
+                    .as_ref()
+                    .is_some_and(|next| next == &signing.key_file || next.as_os_str().is_empty())
+                {
+                    return Err("zone dnssec next_key_file must be a different key".into());
+                }
+                if signing.next_algorithm.is_some() && signing.next_key_file.is_none() {
+                    return Err("zone dnssec next_algorithm needs next_key_file".into());
+                }
+                let nsec3 = signing.denial == Denial::Nsec3;
+                if !nsec3 && (signing.nsec3_salt.is_some() || signing.nsec3_opt_out) {
+                    return Err("nsec3_salt and nsec3_opt_out need denial = \"nsec3\"".into());
+                }
+                if signing
+                    .nsec3_salt
+                    .as_deref()
+                    .is_some_and(|salt| parse_hex(salt).is_none_or(|bytes| bytes.len() > 8))
+                {
+                    return Err("nsec3_salt must be 1 to 8 bytes in hex".into());
                 }
                 if zone.journal.is_some()
                     || !zone.views.is_empty()
@@ -2466,7 +2520,51 @@ mod tests {
             .is_err()
         );
         assert!(ok(ZoneSigning::default(), false).is_err());
-        assert!(ok(signing, true).is_err());
+        assert!(ok(signing.clone(), true).is_err());
+
+        // A rollover needs a different second key, and its algorithm only makes sense with one.
+        let with = |change: fn(&mut ZoneSigning)| {
+            let mut value = signing.clone();
+            change(&mut value);
+            ok(value, false)
+        };
+        assert!(with(|s| s.next_key_file = Some("n.pem".into())).is_ok());
+        assert!(with(|s| s.next_key_file = Some("k.pem".into())).is_err());
+        assert!(with(|s| s.next_algorithm = Some(SigningAlgorithm::Ecdsap256sha256)).is_err());
+        assert!(
+            with(|s| {
+                s.next_key_file = Some("n.pem".into());
+                s.next_algorithm = Some(SigningAlgorithm::Ecdsap256sha256);
+            })
+            .is_ok()
+        );
+        // NSEC3 settings need NSEC3, and the salt is short hex.
+        assert!(with(|s| s.denial = Denial::Nsec3).is_ok());
+        assert!(with(|s| s.nsec3_opt_out = true).is_err());
+        assert!(with(|s| s.nsec3_salt = Some("aabb".into())).is_err());
+        assert!(
+            with(|s| {
+                s.denial = Denial::Nsec3;
+                s.nsec3_salt = Some("aabbccdd".into());
+                s.nsec3_opt_out = true;
+            })
+            .is_ok()
+        );
+        assert!(
+            with(|s| {
+                s.denial = Denial::Nsec3;
+                s.nsec3_salt = Some("00112233445566778899".into());
+            })
+            .is_err(),
+            "more than 8 bytes"
+        );
+        assert!(
+            with(|s| {
+                s.denial = Denial::Nsec3;
+                s.nsec3_salt = Some("xyz".into());
+            })
+            .is_err()
+        );
     }
 
     #[test]
