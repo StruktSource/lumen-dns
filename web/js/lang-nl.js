@@ -802,5 +802,7 @@ L.i18n.add('nl', {
 "secondary": "secundaire",
 "Temporary": "Tijdelijk",
 "Ask to renew": "Vragen te vernieuwen",
-"{ip} was asked to renew.": "{ip} is gevraagd te vernieuwen."
+"{ip} was asked to renew.": "{ip} is gevraagd te vernieuwen.",
+"Child safety": "Kinderveiligheid",
+"Each list has its own category and applies only to profiles that select it, so adults on the network are not affected. Installing creates or extends a profile called child-safe. Put a child’s device or group in that profile (Devices) for it to apply.": "Elke lijst heeft een eigen categorie en geldt alleen voor profielen die haar kiezen, zodat volwassenen op het netwerk niet worden geraakt. Bij het installeren wordt een profiel child-safe gemaakt of uitgebreid. Zet het apparaat of de groep van een kind in dat profiel (Apparaten) zodat het geldt."
 });

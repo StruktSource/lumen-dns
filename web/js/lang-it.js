@@ -802,5 +802,7 @@ L.i18n.add('it', {
 "secondary": "secondario",
 "Temporary": "Temporaneo",
 "Ask to renew": "Chiedi di rinnovare",
-"{ip} was asked to renew.": "A {ip} è stato chiesto di rinnovare."
+"{ip} was asked to renew.": "A {ip} è stato chiesto di rinnovare.",
+"Child safety": "Sicurezza dei minori",
+"Each list has its own category and applies only to profiles that select it, so adults on the network are not affected. Installing creates or extends a profile called child-safe. Put a child’s device or group in that profile (Devices) for it to apply.": "Ogni elenco ha una propria categoria e vale solo per i profili che la selezionano, quindi gli adulti in rete non sono coinvolti. L'installazione crea o amplia un profilo chiamato child-safe. Assegna il dispositivo o il gruppo di un bambino a quel profilo (Dispositivi) perché venga applicato."
 });

@@ -35,7 +35,8 @@ lumen --config config/filtering.example.toml
 
 Open **Filtering → Lists** and use **Quick install**. It offers the large public lists, checked against their publishers:
 
-- Hagezi: Light, Normal, Pro, Pro++, Ultimate, Threat Intelligence (three sizes), fake shops, pop-up ads, adult, gambling, DoH/VPN bypass, and Apple and Windows telemetry
+- Hagezi: Light, Normal, Pro, Pro++, Ultimate, Threat Intelligence (three sizes), fake shops, pop-up ads, DoH/VPN bypass, and Apple and Windows telemetry
+- **Child safety**, with one category per list (see below)
 - OISD small and big
 - AdGuard DNS filter
 - StevenBlack
@@ -45,6 +46,22 @@ Open **Filtering → Lists** and use **Quick install**. It offers the large publ
 Three bundles (**Recommended**, **Light**, **Strict**) install a sensible combination in one click. A list installs as an ordinary list with a daily refresh, and nothing downloads until you apply. Profiles that limit themselves to named lists get the new lists added so they take effect. The page also flags any list the default profile does not use.
 
 Installing and removing lists takes effect **right away, in the background**. You confirm, Lumen downloads, and blocking starts when the lists are ready. DNS keeps working, and lists you already have are not downloaded again. You can cancel from the progress panel; nothing changes if you do.
+
+#### Child-safety categories
+
+The **Child safety** group installs lists that each carry their own category, so they apply only to profiles that select the category and adults on the network are not affected:
+
+| Category | List | Source |
+| :--- | :--- | :--- |
+| `adult` | Adult content | Hagezi |
+| `gambling` | Betting and casino sites (large, about 627,000 rules) | Hagezi |
+| `social` | Social networks and messengers | Hagezi |
+| `drugs` | Drug sales and promotion | BlocklistProject |
+| `piracy` | Pirate streaming and download sites | Hagezi |
+| `torrent` | Torrent trackers and sites | BlocklistProject |
+| `tiktok`, `youtube`, `facebook` | One platform each, so a child can keep one and lose another | BlocklistProject |
+
+Installing one creates a profile called `child-safe` (or extends it) and adds the category to it. **Nothing applies to a device until it is in that profile**: put the child's device in a group whose profile is `child-safe`, or assign the profile on the Devices page. A schedule on the profile limits the categories to certain hours. Use **Explain** to see which list and category blocked a name. Rule counts are approximate, and the lists are community-maintained: they reduce what a child meets by accident, but they do not replace supervision.
 
 ### In the config file
 
