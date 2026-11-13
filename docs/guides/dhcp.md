@@ -9,7 +9,7 @@ Lumen can hand out addresses on your network, and turn every lease into a DNS na
 | Part | Behavior |
 | :--- | :--- |
 | IPv4 | DISCOVER, OFFER, REQUEST, ACK/NAK, RELEASE, DECLINE and INFORM (RFC 2131), with relay agents (`giaddr`). Subnet mask, broadcast address, router, DNS servers, domain name, lease time, and renew/rebind timers. |
-| IPv6 | Stateful `IA_NA` addresses (RFC 8415): Solicit, Advertise, Request, Renew, Rebind, Confirm, Release, Decline and Information-request, Rapid Commit, a stable server DUID, and the DNS servers option (RFC 3646). Relay agents are supported, and so is [prefix delegation](#prefix-delegation-ia_pd). |
+| IPv6 | Stateful `IA_NA` addresses (RFC 8415): Solicit, Advertise, Request, Renew, Rebind, Confirm, Release, Decline and Information-request, Rapid Commit, a stable server DUID, and the DNS servers option (RFC 3646). Relay agents are supported, and so are [prefix delegation](#prefix-delegation-ia_pd), [temporary addresses](#temporary-addresses-ia_ta) and [Reconfigure](#reconfigure). |
 | Network boot | An IPv4 scope can send a boot server and file name (`next_server`, `boot_file`) for PXE and similar. |
 | Failover | Two Lumen servers can cover for each other ([failover](#failover)). |
 | Reservations | A device by hardware address (IPv4) or DUID (IPv6) always gets the same address. Nobody else is ever given a reserved address. |
@@ -89,6 +89,25 @@ prefix = "2001:db8:100:4200::/56"
 
 Prefixes are tracked like addresses: held for 60 seconds when offered, kept in the lease file, extended on renewal, freed on release or expiry, and given back to the same router when it asks again. A reserved prefix goes only to its router. `length` is at most 64 and at most 16 bits longer than the pool (at most 65,536 prefixes). The pool must not overlap the scope's own `prefix`. Lumen does **not** add routes for delegated prefixes: the router that delegates to is yours to set up (a static route to the requesting router is the usual way). Delegated prefixes appear in the console with their length and publish no DNS names.
 
+## Temporary addresses (IA_TA)
+
+A device that asks for temporary addresses (RFC 8415 `IA_TA`, for outgoing connections only) gets one from the scope's normal range. Unlike a permanent address it is picked **at random** from the free ones each time, so connections from different moments are harder to tie together. It is advertised and held like any lease, saved in the lease file, and freed on release or expiry. It is **never renewed** (clients ask again when it runs out) and **never published in DNS**, whatever name the device sent. A device with a reservation takes only its reserved address and gets no temporary one. There is nothing to configure: a client that asks gets one while the range has room.
+
+## Reconfigure
+
+Normally a client decides when to renew. With Reconfigure (RFC 8415 section 18.4) the server can tell a device to renew **now**, for example after you change the DNS servers in a scope. It is **off by default**: turn it on per IPv6 scope with `reconfigure = true`.
+
+```toml
+[[dhcp.scopes6]]
+# ...
+reconfigure = true
+```
+
+- A client that sends the Reconfigure Accept option is told in the Reply to accept it and receives a random 16-byte key (the Reconfigure Key authentication protocol, section 20.4). Keys are saved with the leases.
+- In the console, **DHCP** lists a button **Ask to renew** next to every lease of such a device. It sends a Reconfigure message to the device's address and port 546, from port 547, signed with that key. The device then sends a Renew and picks up the new settings. An Information-request instead of a Renew is available through the API (`info_only`).
+- The signature is **HMAC-MD5**, because the protocol requires it. It only proves that the message comes from the server that issued the key; it does not hide anything. Do not rely on it against an attacker who can read the DHCP exchange: that attacker can also learn the key.
+- Only IPv6 devices with a permanent address can be reconfigured. IPv4 FORCERENEW (RFC 3203) is **not** offered: almost no client honors it, and RFC 6704 restricts it to authenticated setups that Lumen cannot arrange for you.
+
 ## Network boot
 
 ```toml
@@ -143,7 +162,7 @@ Clients that send a host name (DHCP option 12, or the `FQDN` option on IPv6) get
 
 ## Not included
 
-DHCPv6 temporary addresses (`IA_TA`, little used since privacy extensions) and Reconfigure, failover with servers other than Lumen (the ISC protocol), dynamic DNS updates to other servers (the names are served by Lumen itself), and per-client boot options such as separate BIOS and UEFI files in one scope. Say so on the [roadmap](../project/roadmap.md) if you need one.
+IPv4 FORCERENEW, failover with servers other than Lumen (the ISC protocol), dynamic DNS updates to other servers (the names are served by Lumen itself), and per-client boot options such as separate BIOS and UEFI files in one scope. Say so on the [roadmap](../project/roadmap.md) if you need one.
 
 ## The console module
 
