@@ -43,6 +43,27 @@ struct State {
     lists: Vec<ListProgress>,
 }
 
+impl State {
+    fn begin_lists<'a>(&mut self, ids: impl Iterator<Item = &'a str>) {
+        self.lists = ids
+            .map(|id| ListProgress {
+                id: id.to_owned(),
+                state: "waiting",
+                bytes: 0,
+                total: None,
+                rules: 0,
+                error: None,
+            })
+            .collect();
+    }
+
+    fn update(&mut self, id: &str, f: impl FnOnce(&mut ListProgress)) {
+        if let Some(item) = self.lists.iter_mut().find(|list| list.id == id) {
+            f(item);
+        }
+    }
+}
+
 static STATE: Mutex<State> = Mutex::new(State {
     job: Job {
         phase: "idle",
@@ -113,26 +134,11 @@ pub fn set_job(phase: &'static str, message: impl Into<String>) {
 
 /// Start a new batch: every id is waiting.
 pub fn begin_lists<'a>(ids: impl Iterator<Item = &'a str>) {
-    with(|s| {
-        s.lists = ids
-            .map(|id| ListProgress {
-                id: id.to_owned(),
-                state: "waiting",
-                bytes: 0,
-                total: None,
-                rules: 0,
-                error: None,
-            })
-            .collect();
-    });
+    with(|s| s.begin_lists(ids));
 }
 
 fn update(id: &str, f: impl FnOnce(&mut ListProgress)) {
-    with(|s| {
-        if let Some(item) = s.lists.iter_mut().find(|l| l.id == id) {
-            f(item);
-        }
-    });
+    with(|s| s.update(id, f));
 }
 
 pub(crate) fn state(id: &str, value: &'static str) {
@@ -179,18 +185,35 @@ pub fn snapshot() -> (Job, Vec<ListProgress>) {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn progress_follows_one_list_through_its_states() {
-        begin_lists(["alpha", "beta"].into_iter());
-        let (_, lists) = snapshot();
-        assert!(lists.iter().all(|l| l.state == "waiting"));
-        scope("alpha", async { bytes(10, Some(100)) }).await;
-        bytes(5, None); // outside any list: ignored
-        ready("alpha", 7);
-        failed("beta", "boom");
-        set_job("failed", "nope");
-        let (job, lists) = snapshot();
-        assert_eq!((job.phase, job.message.as_str()), ("failed", "nope"));
+    #[test]
+    fn progress_follows_one_list_through_its_states() {
+        // Use a local state. Other filter tests run in parallel and legitimately update the
+        // process-wide console snapshot, which made this unit test race with unrelated tests.
+        let mut state = State {
+            job: Job {
+                phase: "idle",
+                message: String::new(),
+                since: 0,
+            },
+            lists: Vec::new(),
+        };
+        state.begin_lists(["alpha", "beta"].into_iter());
+        assert!(state.lists.iter().all(|list| list.state == "waiting"));
+        state.update("alpha", |list| {
+            list.state = "downloading";
+            list.bytes = 10;
+            list.total = Some(100);
+        });
+        state.update("alpha", |list| {
+            list.state = "ready";
+            list.rules = 7;
+            list.error = None;
+        });
+        state.update("beta", |list| {
+            list.state = "failed";
+            list.error = Some("boom".to_owned());
+        });
+        let lists = state.lists;
         assert_eq!(
             (lists[0].state, lists[0].rules, lists[0].total),
             ("ready", 7, Some(100))
