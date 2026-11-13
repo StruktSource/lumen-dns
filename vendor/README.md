@@ -9,8 +9,11 @@ unrelated validations and made `google.com` and `safebrowsing.google.com` return
 in about half of fresh processes (validation order is randomized per process). The SOA is
 now skipped, and the delegation is judged from the parent side.
 
-Remove this patch and the `[patch.crates-io]` entry in the root `Cargo.toml` once the fix is
-in an upstream hickory release.
+This patch covers the validator's handling of the SOA. It does not cover every reply shape
+with every provider; forward mode has its own recovery in Lumen (`forward_insecure_retry`,
+Issue #35) for names below a provably unsigned zone. Remove this patch and the
+`[patch.crates-io]` entry in the root `Cargo.toml` once the fix is in an upstream hickory
+release.
 
 ## `hickory-server` 0.26.3
 

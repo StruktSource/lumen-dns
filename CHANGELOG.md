@@ -24,6 +24,10 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 - **CNAME-based blocking.** Filter rules now also check CNAME targets in upstream answers and replace the answer with the block action.
 - **SafeSearch, per profile, opt-in.** `safe_search = true` rewrites Google, Bing, and YouTube names to their restricted endpoints.
 
+### Fixed
+
+- **Forward mode with local DNSSEC validation no longer returns `SERVFAIL` below zones that are provably unsigned** (Issue #35, for example `clients4.google.com` and `clients.l.google.com`). After a validation failure Lumen checks the ancestors from the top down; if one is proven insecure it repeats the lookup once without validation, with the authenticated-data flag cleared. A secure or bogus ancestor, or a signed zone with a bad signature, still fails. One shared `upstream_timeout_ms` budget covers the check and the retry, and `lumen_dns_forward_insecure_recoveries_total` counts it (with `resolver.diagnostics`). Tested with local fixtures only; see [DNSSEC and trust](docs/reference/dnssec-and-trust.md).
+
 ### Changed
 
 - HTTPS and SVCB target names are lowercased like CNAME targets, keeping the other record data intact.

@@ -146,6 +146,8 @@ to recover a proven unsigned ancestor has one shared attempt-sized budget, rathe
 unbounded wait per ancestor. The outer query deadline remains the final cap. This is a bounded
 failure-recovery change, not a claim that public cold-query speed is now proven.
 
+Forward mode has the same recovery for names below a provably unsigned zone (see [DNSSEC and trust](../reference/dnssec-and-trust.md#edge-case-parent-and-child-on-the-same-servers)). It uses a second, small forwarder without validation that is built only when `resolver.dnssec` is on, and it shares one `upstream_timeout_ms` budget between the ancestor walk and the retry.
+
 Set `diagnostics = true` for aggregate recursive-attempt timing and outcome metrics. They have
 fixed labels and contain no query names, authority IPs, or client data. Hickory does not expose
 safe per-authority timing through its stable recursor API, so Lumen does not turn on Hickory's

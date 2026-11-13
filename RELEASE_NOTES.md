@@ -16,6 +16,10 @@ Lumen 0.7.0 adds optional stale answers, a persistent cache, stronger filtering,
 - **DHCP server for IPv4 and IPv6 (off by default).** `[dhcp]` hands out addresses with reservations and bounded ranges, keeps leases in SQLite, and publishes every named lease as a DNS name, forward and reverse. Relay agents, prefix delegation, temporary addresses, Reconfigure, network boot options, and a hot-standby failover between two Lumen servers are included. The console gets an optional DHCP module. See [DHCP server](docs/guides/dhcp.md).
 - **Certificate renewal without restart.** Renewed DoT, DoH, DoH3, and DoQ certificates are picked up within 30 seconds; a bad file keeps the old pair serving.
 
+## Fixed
+
+- **Forward mode and unsigned child zones (Issue #35).** With local DNSSEC validation on, names such as `clients4.google.com` no longer return `SERVFAIL`: Lumen proves an unsigned ancestor and repeats the lookup once without validation. Signed zones with bad signatures and bogus ancestors still fail.
+
 ## Not in this release
 
 Zone key rollover and NSEC3, TLS-ALPN-01 ACME challenges, native ECH, DNSCrypt upstreams, and Anonymized DNSCrypt. DNSCrypt has not been tested against a third-party client.

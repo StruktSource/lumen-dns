@@ -258,6 +258,22 @@ delegation, and cancellation cleanup. Only timeouts retry; existing negative-ans
 DNSSEC-failure policy stays final. The SOA/NS unsigned-zone recovery loop now has one shared
 attempt-sized deadline.
 
+Forward mode (Issue #35) is covered by local fixtures only, with no public DNS: a signed root,
+an unsigned `google.` below it with a separate `l.google.` child zone on the same server, and a
+front end that answers every DS query inside the child either with the child's own SOA or with
+an empty authority section. Names below the unsigned zone (a CNAME into the child, the child
+name itself) resolve with validation on and without the authenticated-data flag; a signed
+name resolves with it; tampered data, and names below a zone whose DS exists but which is not
+signed, still return `SERVFAIL`; validation off needs no recovery; a first provider's usable
+answer is never asked of the second; and forty concurrent recoveries finish together. The
+fixtures do not prove how the public `google.com` behaves.
+
+HTTPS and SVCB records with `alpn` and `ech` (Issue #36) are proven byte-identical from an
+operator zone, from forwarded answers over UDP, TCP and the cache, from forward mode with
+local validation on (marked authentic, live and from the cache), and from recursive mode with
+validation off and on against a signed local root. An unsigned HTTPS record under a signed
+root is refused. Native ECH for Lumen's own listeners remains blocked.
+
 Local-zone unit tests cover authoritative apex SOA and NS, NXDOMAIN with SOA for names below
 empty zones, NODATA for resolver discovery, the `home.arpa` DS+DO public-proof exception,
 `.local` leak prevention, private/shared IPv4 reverse zones, local IPv6 reverse zones, and
