@@ -3598,3 +3598,144 @@ async fn a_double_signature_rollover_publishes_both_keys_and_signs_with_both() {
     );
     server.shutdown().await;
 }
+
+/// A pretend mDNS device answers whoever asked, from a fresh socket.
+async fn mdns_reply(from: SocketAddr, reply: &Message) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket
+        .send_to(&reply.to_vec().unwrap(), from)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_mdns_discovery_proxy_answers_dns_questions_from_what_devices_announce() {
+    use hickory_proto::rr::rdata::{PTR, SRV, TXT};
+    // A pretend device on loopback. It answers mDNS questions about two names, to whoever asked.
+    let device = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let device_address = device.local_addr().unwrap();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&asked);
+    let responder = tokio::spawn(async move {
+        let mut buffer = vec![0u8; 2048];
+        loop {
+            let (size, from) = device.recv_from(&mut buffer).await.unwrap();
+            let Ok(request) = Message::from_vec(&buffer[..size]) else {
+                continue;
+            };
+            let Some(question) = request.queries.first() else {
+                continue;
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+            let name = question.name().to_ascii().to_lowercase();
+            let mut reply = Message::response(0, hickory_proto::op::OpCode::Query);
+            reply.metadata.authoritative = true;
+            let address = |host: &str, last: u8| {
+                let mut record = Record::from_rdata(
+                    Name::from_ascii(host).unwrap(),
+                    120,
+                    RData::A(A::new(192, 168, 1, last)),
+                );
+                record.mdns_cache_flush = true;
+                record
+            };
+            match (name.as_str(), question.query_type()) {
+                ("tv.local.", RecordType::A) => {
+                    reply.add_answer(address("tv.local.", 60));
+                }
+                ("_http._tcp.local.", RecordType::PTR) => {
+                    reply.add_answer(Record::from_rdata(
+                        Name::from_ascii("_http._tcp.local.").unwrap(),
+                        4500,
+                        RData::PTR(PTR(Name::from_ascii("Wiki._http._tcp.local.").unwrap())),
+                    ));
+                    reply.add_additional(Record::from_rdata(
+                        Name::from_ascii("Wiki._http._tcp.local.").unwrap(),
+                        120,
+                        RData::SRV(SRV::new(
+                            0,
+                            0,
+                            8080,
+                            Name::from_ascii("box.local.").unwrap(),
+                        )),
+                    ));
+                    reply.add_additional(Record::from_rdata(
+                        Name::from_ascii("Wiki._http._tcp.local.").unwrap(),
+                        4500,
+                        RData::TXT(TXT::new(vec!["path=/wiki".into()])),
+                    ));
+                    reply.add_additional(address("box.local.", 70));
+                }
+                _ => continue,
+            }
+            mdns_reply(from, &reply).await;
+        }
+    });
+
+    let upstream = fixture().await;
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    cfg.mdns = lumen_config::Mdns {
+        enabled: true,
+        interfaces: vec!["lo0".into()],
+        domain: Some("mdns.home.test".into()),
+        wait_ms: 800,
+        group4: Some(device_address),
+        ipv6: false,
+        ..lumen_config::Mdns::default()
+    };
+    let mut server = RunningServer::start(cfg).await.unwrap();
+
+    // A name only a device knows: asked of the network, answered under the domain, flagged
+    // authoritative, with a TTL no longer than the cap.
+    let tv = udp(bind, &query("TV.mdns.home.test.", RecordType::A)).await;
+    assert_eq!(tv.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(tv.answers.len(), 1);
+    assert_eq!(tv.answers[0].data, RData::A(A::new(192, 168, 1, 60)));
+    assert_eq!(
+        tv.answers[0].name.to_ascii().to_lowercase(),
+        "tv.mdns.home.test."
+    );
+    assert!(tv.answers[0].ttl <= 120);
+    let asked_once = asked.load(Ordering::Relaxed);
+    assert!(asked_once >= 1);
+    // The second time it comes from memory: nothing more is asked.
+    let again = udp(bind, &query("tv.mdns.home.test.", RecordType::A)).await;
+    assert_eq!(again.answers.len(), 1);
+    assert_eq!(asked.load(Ordering::Relaxed), asked_once);
+
+    // Browsing: the service type lists the instance, with its service, text and address alongside.
+    let browse = udp(bind, &query("_http._tcp.mdns.home.test.", RecordType::PTR)).await;
+    assert_eq!(browse.answers.len(), 1);
+    let RData::PTR(target) = &browse.answers[0].data else {
+        panic!("not a PTR");
+    };
+    assert_eq!(
+        target.0.to_ascii().to_lowercase(),
+        "wiki._http._tcp.mdns.home.test."
+    );
+    let kinds: Vec<RecordType> = browse.additionals.iter().map(Record::record_type).collect();
+    assert!(
+        kinds.contains(&RecordType::SRV)
+            && kinds.contains(&RecordType::TXT)
+            && kinds.contains(&RecordType::A),
+        "{kinds:?}"
+    );
+
+    // Nobody answers for this name: a clean NXDOMAIN, and the apex has a SOA.
+    let ghost = udp(bind, &query("ghost.mdns.home.test.", RecordType::A)).await;
+    assert_eq!(ghost.metadata.response_code, ResponseCode::NXDomain);
+    assert!(
+        ghost
+            .authorities
+            .iter()
+            .any(|r| r.record_type() == RecordType::SOA)
+    );
+    let apex = udp(bind, &query("mdns.home.test.", RecordType::SOA)).await;
+    assert_eq!(apex.answers.len(), 1);
+    // Names outside the domain still go the normal way.
+    let outside = udp(bind, &query("www.example.", RecordType::A)).await;
+    assert_ne!(outside.metadata.response_code, ResponseCode::NXDomain);
+    server.shutdown().await;
+    responder.abort();
+}

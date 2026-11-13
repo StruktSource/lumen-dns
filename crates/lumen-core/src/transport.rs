@@ -32,6 +32,8 @@ pub struct RunningServer {
     certificates: Option<Credentials>,
     /// Keeps the DHCP server's sockets open for as long as the service runs.
     _dhcp: Option<lumen_dhcp::Running>,
+    /// Keeps the multicast DNS bridge running for as long as the service does.
+    _mdns: Option<lumen_mdns::Running>,
 }
 
 /// Optional managed-mode inputs for the web console.
@@ -326,6 +328,11 @@ impl RunningServer {
         } else {
             None
         };
+        let mdns = if config.mdns.enabled {
+            Some(lumen_mdns::start(&config.mdns, &service.resolver).await?)
+        } else {
+            None
+        };
         if let Some(listener) = metrics_listener {
             tasks.spawn(serve_metrics(listener, Arc::clone(&service)));
         }
@@ -341,6 +348,7 @@ impl RunningServer {
             setup_code,
             certificates: tls_handle,
             _dhcp: dhcp,
+            _mdns: mdns,
         })
     }
 

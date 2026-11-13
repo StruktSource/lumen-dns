@@ -49,6 +49,7 @@ use std::{
 use tokio::time::timeout;
 
 mod accel;
+mod bridge;
 mod cache;
 mod challenge;
 mod forward;
@@ -56,6 +57,7 @@ mod hosts;
 mod notify;
 mod rollover;
 mod signing;
+pub use bridge::{Bridge, BridgeAnswer};
 pub use challenge::Challenges;
 pub use hosts::Hosts;
 pub use signing::zone_key;
@@ -114,6 +116,8 @@ pub struct Resolver {
     notifications: Vec<(Name, Vec<SocketAddr>)>,
     challenges: Arc<Challenges>,
     hosts: Arc<Hosts>,
+    /// A multicast DNS bridge, set once after startup when `[mdns]` is on.
+    bridge: std::sync::OnceLock<Arc<dyn Bridge>>,
     resigners: Resigners,
     metrics: Arc<Metrics>,
     background: Option<Background>,
@@ -646,6 +650,7 @@ impl Resolver {
             notifications,
             challenges: Arc::default(),
             hosts: Arc::new(Hosts::new(config.dhcp.domain.as_deref())),
+            bridge: std::sync::OnceLock::new(),
             resigners: Resigners::default(),
             metrics,
             background,
@@ -670,6 +675,11 @@ impl Resolver {
         if let Some(background) = &self.background {
             background.accel.clear_prefetch();
         }
+    }
+
+    /// Install the multicast DNS bridge. Only the first call has an effect.
+    pub fn set_bridge(&self, bridge: Arc<dyn Bridge>) {
+        let _ = self.bridge.set(bridge);
     }
 
     /// The names DHCP leases publish, answered by this resolver.
@@ -705,6 +715,19 @@ impl Resolver {
             return response
                 .to_vec()
                 .map_err(|_| "cannot encode host response".into());
+        }
+        if let Some(bridge) = self.bridge.get()
+            && let Some(question) = query.message.queries.first()
+            && let Some(answer) = bridge.answer(question.name(), question.query_type()).await
+        {
+            let mut response = response_base(query, true);
+            response.metadata.response_code = answer.rcode;
+            response.answers = answer.answers;
+            response.authorities = answer.authorities;
+            response.additionals = answer.additionals;
+            return response
+                .to_vec()
+                .map_err(|_| "cannot encode bridge response".into());
         }
         if let Some(response) = self.challenges.answer(query) {
             return response

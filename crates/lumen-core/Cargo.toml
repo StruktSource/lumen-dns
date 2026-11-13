@@ -13,6 +13,7 @@ lumen-proto = { path = "../lumen-proto" }
 lumen-resolver = { path = "../lumen-resolver" }
 lumen-web = { path = "../lumen-web" }
 lumen-dhcp = { path = "../lumen-dhcp" }
+lumen-mdns = { path = "../lumen-mdns" }
 tokio.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true

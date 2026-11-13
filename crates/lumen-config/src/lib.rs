@@ -29,6 +29,7 @@ pub struct Config {
     pub acme: Acme,
     /// Optional DHCP server (IPv4 and IPv6) that also feeds Lumen's DNS. Off by default.
     pub dhcp: Dhcp,
+    pub mdns: Mdns,
     /// Authoritative zones served from operator-managed records.
     pub zones: Vec<Zone>,
     /// Conditional forwarding: names under `domain` go to these resolvers.
@@ -180,6 +181,53 @@ pub struct Forwarder {
 ///
 /// The long-term Ed25519 provider key is stored in `key_file` (created with mode `0600` on first
 /// start if missing). Short-lived resolver keys and certificates rotate automatically in memory.
+/// Multicast DNS bridge. Off by default. Two independent jobs: a *discovery proxy* answers
+/// ordinary DNS questions under `domain` from what devices announce with mDNS (`printer.local`
+/// is `printer.<domain>`), and a *reflector* repeats mDNS between the listed interfaces so
+/// devices on separate networks see each other.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Mdns {
+    pub enabled: bool,
+    /// Interfaces to listen and ask on (such as `eth0`). One network segment each.
+    pub interfaces: Vec<String>,
+    /// DNS domain that mirrors `.local`, for example `mdns.home.example` (no trailing dot).
+    /// Unset turns the discovery proxy off.
+    pub domain: Option<String>,
+    /// Repeat mDNS between all listed interfaces. Needs at least two. Crosses network
+    /// boundaries by design: read the guide before turning it on.
+    pub reflect: bool,
+    /// Also use IPv6 (`ff02::fb`) next to IPv4.
+    pub ipv6: bool,
+    /// How long a question waits for devices to answer, in milliseconds (100 to 3000).
+    pub wait_ms: u32,
+    /// Longest TTL given to a unicast answer, in seconds (1 to 3600).
+    pub ttl_cap_secs: u32,
+    /// Most records remembered (64 to 65536).
+    pub max_records: u32,
+    /// Where to send and receive multicast. Only for testing: the standard groups are used when
+    /// unset.
+    pub group4: Option<SocketAddr>,
+    pub group6: Option<SocketAddr>,
+}
+
+impl Default for Mdns {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interfaces: Vec::new(),
+            domain: None,
+            reflect: false,
+            ipv6: true,
+            wait_ms: 700,
+            ttl_cap_secs: 120,
+            max_records: 4096,
+            group4: None,
+            group6: None,
+        }
+    }
+}
+
 /// Optional DHCP server. It never starts on its own: nothing is served until `enabled` is true,
 /// and every scope names the network and addresses it may hand out.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1261,6 +1309,7 @@ impl Config {
         self.validate_dnscrypt()?;
         self.validate_acme()?;
         self.validate_dhcp()?;
+        self.validate_mdns()?;
         self.validate_zones()?;
         if self.listen.allow_clients.is_empty() || self.listen.allow_clients.len() > 128 {
             return Err("allow_clients must contain 1..128 CIDRs".into());
@@ -1444,6 +1493,74 @@ impl Config {
                         zone.name, UPDATABLE_TYPES
                     ));
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_mdns(&self) -> Result<(), String> {
+        let mdns = &self.mdns;
+        if !mdns.enabled {
+            return Ok(());
+        }
+        if mdns.interfaces.is_empty()
+            || mdns.interfaces.len() > 8
+            || mdns
+                .interfaces
+                .iter()
+                .any(|name| name.is_empty() || name.len() > 15)
+        {
+            return Err("mdns.interfaces needs 1 to 8 interface names".into());
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !mdns
+            .interfaces
+            .iter()
+            .all(|name| seen.insert(name.as_str()))
+        {
+            return Err("mdns.interfaces must not repeat an interface".into());
+        }
+        if mdns.domain.is_none() && !mdns.reflect {
+            return Err("mdns needs a domain (discovery proxy), reflect = true, or both".into());
+        }
+        if mdns.reflect && mdns.interfaces.len() < 2 {
+            return Err("mdns.reflect needs at least two interfaces".into());
+        }
+        if !(100..=3000).contains(&mdns.wait_ms)
+            || !(1..=3600).contains(&mdns.ttl_cap_secs)
+            || !(64..=65_536).contains(&mdns.max_records)
+        {
+            return Err("mdns wait_ms, ttl_cap_secs or max_records is out of range".into());
+        }
+        if let Some(domain) = &mdns.domain {
+            let lower = domain.to_ascii_lowercase();
+            let label_ok = |label: &str| {
+                (1..=63).contains(&label.len())
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+            };
+            if domain.len() > 200
+                || domain.ends_with('.')
+                || !lower.split('.').all(label_ok)
+                || matches!(lower.rsplit('.').next(), Some("local" | "arpa"))
+            {
+                return Err(
+                    "mdns.domain must be a DNS name that is not .local or under .arpa".into(),
+                );
+            }
+            let overlaps = |other: &str| {
+                let other = other.to_ascii_lowercase();
+                other == lower
+                    || other.ends_with(&format!(".{lower}"))
+                    || lower.ends_with(&format!(".{other}"))
+            };
+            if self.zones.iter().any(|zone| overlaps(&zone.name))
+                || (self.dhcp.enabled && self.dhcp.domain.as_deref().is_some_and(overlaps))
+            {
+                return Err("mdns.domain overlaps a zone or the dhcp.domain".into());
             }
         }
         Ok(())
@@ -2345,6 +2462,63 @@ mod tests {
         timing.takeover_secs = 1;
         pair.dhcp.failover = Some(timing);
         assert!(pair.validate_dhcp().is_err());
+    }
+
+    #[test]
+    fn mdns_is_off_by_default_and_validates_its_interfaces_domain_and_limits() {
+        let on = || {
+            let mut config = Config::default();
+            config.mdns.enabled = true;
+            config.mdns.interfaces = vec!["eth0".into()];
+            config.mdns.domain = Some("mdns.home.example".into());
+            config
+        };
+        assert!(Config::default().validate_mdns().is_ok());
+        assert!(!Config::default().mdns.enabled);
+        assert!(on().validate_mdns().is_ok());
+        let bad: Vec<fn(&mut Config)> = vec![
+            |c| c.mdns.interfaces.clear(),
+            |c| c.mdns.interfaces = vec!["eth0".into(), "eth0".into()],
+            |c| c.mdns.interfaces = vec!["a-very-long-interface".into()],
+            |c| c.mdns.interfaces = (0..9).map(|i| format!("eth{i}")).collect(),
+            |c| c.mdns.domain = None,
+            |c| c.mdns.domain = Some("local".into()),
+            |c| c.mdns.domain = Some("x.local".into()),
+            |c| c.mdns.domain = Some("x.arpa".into()),
+            |c| c.mdns.domain = Some("trailing.dot.".into()),
+            |c| c.mdns.domain = Some("bad domain".into()),
+            |c| c.mdns.reflect = true,
+            |c| c.mdns.wait_ms = 10,
+            |c| c.mdns.ttl_cap_secs = 0,
+            |c| c.mdns.max_records = 5,
+            |c| {
+                c.zones = vec![Zone {
+                    name: "home.example".into(),
+                    text: Some("x".into()),
+                    ..Default::default()
+                }];
+            },
+        ];
+        for mutate in bad {
+            let mut config = on();
+            mutate(&mut config);
+            assert!(config.validate_mdns().is_err());
+        }
+        // A reflector alone is fine with two interfaces, and a proxy alone with one.
+        let mut reflect = on();
+        reflect.mdns.domain = None;
+        reflect.mdns.reflect = true;
+        assert!(
+            reflect.validate_mdns().is_err(),
+            "one interface cannot reflect"
+        );
+        reflect.mdns.interfaces = vec!["eth0".into(), "eth1".into()];
+        assert!(reflect.validate_mdns().is_ok());
+        // The domain must not overlap the DHCP domain.
+        let mut dhcp = on();
+        dhcp.dhcp.enabled = true;
+        dhcp.dhcp.domain = Some("home.example".into());
+        assert!(dhcp.validate_mdns().is_err());
     }
 
     #[test]

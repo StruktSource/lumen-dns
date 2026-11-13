@@ -1459,6 +1459,7 @@ dependencies = [
  "lumen-config",
  "lumen-dhcp",
  "lumen-filter",
+ "lumen-mdns",
  "lumen-proto",
  "lumen-resolver",
  "lumen-store",
@@ -1516,6 +1517,19 @@ dependencies = [
  "tokio-rustls",
  "toml",
  "webpki-roots",
+]
+
+[[package]]
+name = "lumen-mdns"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "hickory-proto",
+ "lumen-config",
+ "lumen-resolver",
+ "nix",
+ "socket2",
+ "tokio",
 ]
 
 [[package]]
