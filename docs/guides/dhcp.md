@@ -9,7 +9,9 @@ Lumen can hand out addresses on your network, and turn every lease into a DNS na
 | Part | Behavior |
 | :--- | :--- |
 | IPv4 | DISCOVER, OFFER, REQUEST, ACK/NAK, RELEASE, DECLINE and INFORM (RFC 2131), with relay agents (`giaddr`). Subnet mask, broadcast address, router, DNS servers, domain name, lease time, and renew/rebind timers. |
-| IPv6 | Stateful `IA_NA` addresses (RFC 8415): Solicit, Advertise, Request, Renew, Rebind, Confirm, Release, Decline and Information-request, Rapid Commit, a stable server DUID, and the DNS servers option (RFC 3646). |
+| IPv6 | Stateful `IA_NA` addresses (RFC 8415): Solicit, Advertise, Request, Renew, Rebind, Confirm, Release, Decline and Information-request, Rapid Commit, a stable server DUID, and the DNS servers option (RFC 3646). Relay agents are supported, and so is [prefix delegation](#prefix-delegation-ia_pd). |
+| Network boot | An IPv4 scope can send a boot server and file name (`next_server`, `boot_file`) for PXE and similar. |
+| Failover | Two Lumen servers can cover for each other ([failover](#failover)). |
 | Reservations | A device by hardware address (IPv4) or DUID (IPv6) always gets the same address. Nobody else is ever given a reserved address. |
 | DNS names | The host name a device sends (or the reservation's name) is published under `domain` as an `A`/`AAAA` record and a `PTR` record. Names are sanitized to one safe label. |
 | Storage | Leases live in a SQLite file (mode `0600`) and survive restarts. Expired leases are removed every 30 seconds, together with their DNS names. |
@@ -54,7 +56,75 @@ ip = "fd00:1::10"
 
 Check it with `lumen --config lumen.toml --check`. Every address is checked against its network: the range must be inside the subnet and must not contain the server address, reservations must be unique and inside the subnet, and scopes must not overlap.
 
-Binding to port 67 (IPv4) and 547 (IPv6) needs privileges. Use the capability `CAP_NET_BIND_SERVICE` (the native packages and the container examples already grant it for DNS on port 53), or run as root. On Linux and macOS each IPv4 scope is tied to its interface so a request on one network is never answered from another. With more than one IPv4 scope, each needs its own `interface`. Other systems can serve a single scope.
+Binding to port 67 (IPv4) and 547 (IPv6) needs privileges. Use the capability `CAP_NET_BIND_SERVICE` (the native packages and the container examples already grant it for DNS on port 53), or run as root.
+
+Each IPv4 scope is tied to its network so a request on one is never answered from another. With more than one IPv4 scope, each needs its own `interface`. How it is tied depends on the system:
+
+| System | How |
+| :--- | :--- |
+| Linux | The socket is bound to the interface. Several scopes work. |
+| macOS | The socket is bound to the interface index. Several scopes work. |
+| Windows | The socket is bound to the scope's `server_address`, which receives that network's broadcasts. Name IPv6 interfaces by their index (`interface = "12"`; see `netsh interface ipv6 show interfaces`). Several scopes work. |
+| Other Unix (BSD) | One IPv4 scope only. Requests that plainly come from another network are dropped. |
+
+The Windows and BSD paths are written for those systems' socket rules but have **not been tried on real hardware**; Linux and macOS have. Test them on a spare network before relying on them.
+
+## Relay agents
+
+Clients on a network with no Lumen interface of their own are reached through a relay agent (a router's DHCP relay). IPv4 scopes already answer relayed requests (`giaddr`). For IPv6, leave `interface` out of the scope: Lumen picks the scope whose `prefix` contains the relay's link address, and answers inside a Relay-reply that echoes the relay's interface-id. Chained relays work up to eight deep. Replies go back to the relay that sent the message, so the relay must be able to reach Lumen on UDP port 547.
+
+## Prefix delegation (IA_PD)
+
+A home or office router can ask Lumen for a whole prefix to give to its own network. Add a `delegation` to the IPv6 scope:
+
+```toml
+[dhcp.scopes6.delegation]
+pool = "2001:db8:100::/40"   # the prefixes to give out
+length = 56                  # each router gets a /56
+
+[[dhcp.scopes6.delegation.reservations]]
+duid = "00010001aabbccdd"
+prefix = "2001:db8:100:4200::/56"
+```
+
+Prefixes are tracked like addresses: held for 60 seconds when offered, kept in the lease file, extended on renewal, freed on release or expiry, and given back to the same router when it asks again. A reserved prefix goes only to its router. `length` is at most 64 and at most 16 bits longer than the pool (at most 65,536 prefixes). The pool must not overlap the scope's own `prefix`. Lumen does **not** add routes for delegated prefixes: the router that delegates to is yours to set up (a static route to the requesting router is the usual way). Delegated prefixes appear in the console with their length and publish no DNS names.
+
+## Network boot
+
+```toml
+[[dhcp.scopes]]
+# ...
+next_server = "192.168.1.9"   # the TFTP or boot server
+boot_file = "undionly.kpxe"   # printable characters, at most 128
+```
+
+The server address goes into `siaddr` and option 66, the file name into the `file` field and option 67. Both settings go together. Boot menus that depend on the client type (UEFI and BIOS need different files) need one scope per network today.
+
+## Failover
+
+Two Lumen servers with the same `[dhcp]` scopes can cover for each other. This is a **hot standby**, not the full ISC failover protocol: it only works between two Lumen servers.
+
+```toml
+# On the primary
+[dhcp.failover]
+role = "primary"
+peer = "192.168.1.3:647"          # the secondary
+secret_file = "dhcp-failover.secret"
+
+# On the secondary
+[dhcp.failover]
+role = "secondary"
+listen = "0.0.0.0:647"
+secret_file = "dhcp-failover.secret"
+# takeover_secs = 30              # silence before it answers (5 to 3600)
+# reserve_percent = 20            # share of each range it may use while covering (5 to 50)
+```
+
+- The primary connects to the secondary. Both copy every lease change to each other and send a heartbeat every two seconds. When the link comes up they exchange everything they hold.
+- The **secondary stays silent** while it hears the primary. After `takeover_secs` of silence it answers. It renews every lease it knows, and gives **new** leases only from the last `reserve_percent` of each range (and of each prefix pool), so it cannot hand out an address the primary gave just before it failed but could not copy. A request for another free address is refused, and the client starts over.
+- When the primary returns, the secondary goes quiet again and the two merge what they know. If both gave the same address to different devices while apart, each keeps its own client and the address stays in conflict until a lease ends. A bigger `reserve_percent` makes that rarer.
+- Every frame is signed with `secret_file` (at least 16 characters, readable only by its owner), and each connection derives a fresh key from random values both sides contribute, so frames cannot be forged, replayed, or reflected. The link is **not encrypted**: leases and device names cross it in the clear. Run it on a trusted network or through a VPN.
+- Failover covers leases and prefixes. It does not copy the configuration: keep both `[dhcp]` sections the same (use the same `domain` and scopes).
 
 ## Names in DNS
 
@@ -67,16 +137,17 @@ Clients that send a host name (DHCP option 12, or the `FQDN` option on IPv6) get
 - At most 16 scopes of each family, 65,536 addresses per range, and 512 reservations per scope.
 - An offered address is held for 60 seconds for the device it was offered to. A declined address (the device found it already in use) rests for 10 minutes. A device that asks again keeps its address.
 - A request that names another server is ignored, and an unknown device never gets a reserved address.
+- An IPv6 client without a name still gets an address and no DNS entry.
 - Packets are small and parsed with bounds. Malformed packets are dropped without an answer.
 - Nothing is sent from `0.0.0.0` unless a client without an address asked. IPv4 replies to such a client are broadcast, as the protocol requires.
 
 ## Not included
 
-DHCPv6 prefix delegation (`IA_PD`) and temporary addresses (`IA_TA`), DHCPv6 relay agents, Reconfigure, failover between two servers, dynamic DNS updates to other servers (the names are served by Lumen itself), and BOOTP/PXE options. Say so on the [roadmap](../project/roadmap.md) if you need one.
+DHCPv6 temporary addresses (`IA_TA`, little used since privacy extensions) and Reconfigure, failover with servers other than Lumen (the ISC protocol), dynamic DNS updates to other servers (the names are served by Lumen itself), and per-client boot options such as separate BIOS and UEFI files in one scope. Say so on the [roadmap](../project/roadmap.md) if you need one.
 
 ## The console module
 
-Switch **DHCP** on under **Modules** (administrators only). The page lists each network with how many addresses are in use, and every current lease with its name, device and expiry. It is read-only: the configuration file decides what is served. The module shows nothing while the server is not enabled in the configuration.
+Switch **DHCP** on under **Modules** (administrators only). The page lists each network with how many addresses are in use, every current lease and delegated prefix with its name, device and expiry, and, for a failover pair, whether this server is answering or standing by. It is read-only: the configuration file decides what is served. The module shows nothing while the server is not enabled in the configuration.
 
 ## Related
 

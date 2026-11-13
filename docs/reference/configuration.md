@@ -93,9 +93,11 @@ Off unless `enabled = true`. See [DHCP server](../guides/dhcp.md).
 | `listen4` / `listen6` | `0.0.0.0:67` / `[::]:547` | Socket address | Server sockets. Change only for testing or behind a relay |
 | `client_port4` / `client_port6` | `68` / `546` | 1 to 65535 | Ports clients listen on |
 
-`[[dhcp.scopes]]` (IPv4, up to 16): `interface` (needed when there are several), `subnet`, `server_address`, `range_start`, `range_end` (at most 65,536 addresses), `router`, `dns` (defaults to `server_address`), `lease_secs` (default `43200`, 60 to 2,592,000), and `[[dhcp.scopes.reservations]]` with `mac`, `ip`, `hostname` (up to 512).
+`[[dhcp.scopes]]` (IPv4, up to 16): `interface` (needed when there are several), `subnet`, `server_address`, `range_start`, `range_end` (at most 65,536 addresses), `router`, `dns` (defaults to `server_address`), `lease_secs` (default `43200`, 60 to 2,592,000), `next_server` and `boot_file` (network boot, together), and `[[dhcp.scopes.reservations]]` with `mac`, `ip`, `hostname` (up to 512).
 
-`[[dhcp.scopes6]]` (IPv6, up to 16): `interface` (required), `prefix`, `range_start`, `range_end`, `dns` (required), `preferred_secs` (default `21600`, at least 60), `valid_secs` (default `43200`, at least `preferred_secs`, at most 2,592,000), and `[[dhcp.scopes6.reservations]]` with `duid` (hex), `ip`, `hostname`.
+`[[dhcp.scopes6]]` (IPv6, up to 16): `interface` (omit for a network reached through a relay), `prefix`, `range_start`, `range_end`, `dns` (required), `preferred_secs` (default `21600`, at least 60), `valid_secs` (default `43200`, at least `preferred_secs`, at most 2,592,000), `[dhcp.scopes6.delegation]` with `pool`, `length` and `[[...reservations]]` (`duid`, `prefix`) for prefix delegation, and `[[dhcp.scopes6.reservations]]` with `duid` (hex), `ip`, `hostname`.
+
+`[dhcp.failover]`: `role` (`primary` or `secondary`), `peer` (the primary connects here), `listen` (the secondary accepts here), `secret_file` (at least 16 characters, mode `0600`), `takeover_secs` (default `30`, 5 to 3600), `reserve_percent` (default `20`, 5 to 50). See [Failover](../guides/dhcp.md#failover).
 
 ## Authoritative zones, forwarders, and TSIG keys
 
