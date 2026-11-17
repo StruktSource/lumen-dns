@@ -1,6 +1,10 @@
 //! The safety rules around repeating multicast: do not repeat the same packet twice, do not
 //! repeat faster than a limit, and only trust packets whose source could be on the link.
 
+use hickory_proto::{
+    op::Message,
+    rr::{Name, RData},
+};
 use std::{
     collections::VecDeque,
     net::{Ipv4Addr, Ipv6Addr},
@@ -80,6 +84,79 @@ impl Limiter {
     }
 }
 
+/// Which services may be repeated between networks.
+///
+/// A service type is written like `_airplay._tcp`. Packets that mention no service at all (plain
+/// host lookups such as `tv.local` A) always pass, because a client that found a service on
+/// another network must still be able to resolve its host. A packet that mentions a service is
+/// repeated only if the service is not blocked and, when an allow list exists, is on it.
+#[derive(Clone, Debug, Default)]
+pub struct ServiceFilter {
+    allow: Vec<String>,
+    block: Vec<String>,
+}
+
+fn service_suffix(service: &str) -> String {
+    format!("{}.local.", service.trim_matches('.').to_ascii_lowercase())
+}
+
+fn is_service_name(name: &Name) -> bool {
+    name.iter().any(|label| label.first() == Some(&b'_'))
+}
+
+fn under(name: &Name, suffix: &str) -> bool {
+    let text = name.to_ascii().to_ascii_lowercase();
+    text == suffix || text.ends_with(&format!(".{suffix}"))
+}
+
+impl ServiceFilter {
+    #[must_use]
+    pub fn new(allow: &[String], block: &[String]) -> Self {
+        Self {
+            allow: allow.iter().map(|s| service_suffix(s)).collect(),
+            block: block.iter().map(|s| service_suffix(s)).collect(),
+        }
+    }
+
+    /// True for a filter that repeats everything.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.allow.is_empty() && self.block.is_empty()
+    }
+
+    #[must_use]
+    pub fn permits(&self, message: &Message) -> bool {
+        if self.is_open() {
+            return true;
+        }
+        let mut names: Vec<&Name> = message
+            .queries
+            .iter()
+            .map(hickory_proto::op::Query::name)
+            .collect();
+        for record in message
+            .answers
+            .iter()
+            .chain(&message.authorities)
+            .chain(&message.additionals)
+        {
+            names.push(&record.name);
+            if let RData::PTR(target) = &record.data {
+                names.push(&target.0);
+            }
+        }
+        for name in names.into_iter().filter(|name| is_service_name(name)) {
+            if self.block.iter().any(|suffix| under(name, suffix)) {
+                return false;
+            }
+            if !self.allow.is_empty() && !self.allow.iter().any(|suffix| under(name, suffix)) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// RFC 6762 section 11: a packet whose source is not on the link is ignored.
 #[must_use]
 pub fn on_link_v4(source: Ipv4Addr, local: Ipv4Addr, mask: Ipv4Addr) -> bool {
@@ -133,5 +210,33 @@ mod tests {
         assert!(!on_link_v4("8.8.8.8".parse().unwrap(), local, mask));
         assert!(on_link_v6("fe80::1".parse().unwrap()));
         assert!(!on_link_v6("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn service_filters_allow_block_and_let_plain_host_lookups_through() {
+        use hickory_proto::{op::Query, rr::RecordType};
+        let ask = |name: &str| {
+            let mut message = Message::query();
+            message.add_query(Query::query(
+                Name::from_ascii(name).unwrap(),
+                RecordType::PTR,
+            ));
+            message
+        };
+        let open = ServiceFilter::default();
+        assert!(open.permits(&ask("_ssh._tcp.local.")));
+        let only = ServiceFilter::new(&["_airplay._tcp".into()], &[]);
+        assert!(only.permits(&ask("_airplay._tcp.local.")));
+        assert!(only.permits(&ask("Living-Room._airplay._tcp.local.")));
+        assert!(!only.permits(&ask("_ssh._tcp.local.")));
+        assert!(!only.permits(&ask("_services._dns-sd._udp.local.")));
+        assert!(only.permits(&ask("tv.local.")), "host lookups pass");
+        let blocked = ServiceFilter::new(&[], &["_ssh._tcp".into()]);
+        assert!(!blocked.permits(&ask("_ssh._tcp.local.")));
+        assert!(blocked.permits(&ask("_ipp._tcp.local.")));
+        assert!(
+            !ServiceFilter::new(&["_ssh._tcp".into()], &["_ssh._tcp".into()])
+                .permits(&ask("_ssh._tcp.local."))
+        );
     }
 }

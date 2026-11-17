@@ -111,12 +111,15 @@ Off unless `enabled = true`. See [Multicast DNS bridge](../guides/mdns.md).
 | `interfaces` | `[]` | 1 to 8 names, no repeats | Networks to listen on, such as `eth0` |
 | `domain` | unset | DNS name, not `.local`, not under `.arpa`, no overlap with a zone or `dhcp.domain` | Turns on the discovery proxy: `<name>.<domain>` mirrors `<name>.local` |
 | `reflect` | `false` | Needs two or more interfaces | Repeat mDNS between the interfaces. Crosses network boundaries |
+| `reflect_services` | `[]` | Up to 64 entries like `_airplay._tcp`; needs `reflect` | Repeat only these service types. Empty repeats every service. Plain host lookups (`tv.local`) are always repeated |
+| `reflect_block_services` | `[]` | Same shape; needs `reflect` | Never repeat these service types. Wins over `reflect_services` |
+| `publish_name` | unset | One DNS label | Answer for and announce `<publish_name>.local` (A and AAAA for each listed interface). No conflict probing: pick a unique label |
 | `ipv6` | `true` | | Also use `ff02::fb` |
 | `wait_ms` | `700` | 100 to 3000 | How long a question waits for devices |
 | `ttl_cap_secs` | `120` | 1 to 3600 | Longest TTL given to an answer |
 | `max_records` | `4096` | 64 to 65536 | Records kept. The soonest to expire go first |
 
-At least one of `domain` and `reflect` is required.
+At least one of `domain`, `reflect` and `publish_name` is required.
 
 ## Authoritative zones, forwarders, and TSIG keys
 

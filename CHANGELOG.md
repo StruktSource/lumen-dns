@@ -7,6 +7,7 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 ### Added
 
 - **Full DNSSEC lifecycle for operator zones.** Zones can use separate KSK/ZSK files, pre-publish successor keys, and schedule their handoff with `rollover_at_unix`. KSKs sign DNSKEY while ZSKs sign zone data. Dynamic RFC 2136 zones and each split-horizon view can now be signed, and daily signature renewal remains active.
+- **mDNS self-publishing and per-service reflection filters.** `mdns.publish_name` answers for and announces `<name>.local` on each listed interface (no conflict probing yet). `mdns.reflect_services` and `mdns.reflect_block_services` limit which service types the reflector repeats; plain host lookups always pass. DNS Push is not built yet. See [Multicast DNS bridge](docs/guides/mdns.md).
 
 ## [0.7.0] - 2026-11-12
 

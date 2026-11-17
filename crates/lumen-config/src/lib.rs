@@ -304,6 +304,14 @@ pub struct Mdns {
     /// Repeat mDNS between all listed interfaces. Needs at least two. Crosses network
     /// boundaries by design: read the guide before turning it on.
     pub reflect: bool,
+    /// Reflect only these service types, such as `_airplay._tcp`. Empty repeats every service.
+    /// Plain host lookups (`tv.local`) are always repeated so a found service stays reachable.
+    pub reflect_services: Vec<String>,
+    /// Never reflect these service types. Wins over `reflect_services`.
+    pub reflect_block_services: Vec<String>,
+    /// Publish this machine over mDNS as `<publish_name>.local` (A and AAAA for each listed
+    /// interface). Unset publishes nothing. There is no conflict probing: pick a unique label.
+    pub publish_name: Option<String>,
     /// Also use IPv6 (`ff02::fb`) next to IPv4.
     pub ipv6: bool,
     /// How long a question waits for devices to answer, in milliseconds (100 to 3000).
@@ -325,6 +333,9 @@ impl Default for Mdns {
             interfaces: Vec::new(),
             domain: None,
             reflect: false,
+            reflect_services: Vec::new(),
+            reflect_block_services: Vec::new(),
+            publish_name: None,
             ipv6: true,
             wait_ms: 700,
             ttl_cap_secs: 120,
@@ -1944,6 +1955,7 @@ impl Config {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn validate_mdns(&self) -> Result<(), String> {
         let mdns = &self.mdns;
         if !mdns.enabled {
@@ -1966,8 +1978,45 @@ impl Config {
         {
             return Err("mdns.interfaces must not repeat an interface".into());
         }
-        if mdns.domain.is_none() && !mdns.reflect {
-            return Err("mdns needs a domain (discovery proxy), reflect = true, or both".into());
+        if mdns.domain.is_none() && !mdns.reflect && mdns.publish_name.is_none() {
+            return Err(
+                "mdns needs a domain (discovery proxy), reflect = true, or a publish_name".into(),
+            );
+        }
+        let service_ok = |s: &String| {
+            let parts: Vec<&str> = s.split('.').collect();
+            parts.len() == 2
+                && parts[0].starts_with('_')
+                && matches!(parts[1], "_tcp" | "_udp")
+                && s.len() <= 63 + 5
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        };
+        if mdns.reflect_services.len() > 64
+            || mdns.reflect_block_services.len() > 64
+            || !mdns
+                .reflect_services
+                .iter()
+                .chain(&mdns.reflect_block_services)
+                .all(service_ok)
+        {
+            return Err("mdns service filters must look like _airplay._tcp (at most 64)".into());
+        }
+        if (!mdns.reflect_services.is_empty() || !mdns.reflect_block_services.is_empty())
+            && !mdns.reflect
+        {
+            return Err("mdns service filters need reflect = true".into());
+        }
+        if let Some(label) = &mdns.publish_name
+            && (label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+        {
+            return Err("mdns.publish_name must be one DNS label (letters, digits, -)".into());
         }
         if mdns.reflect && mdns.interfaces.len() < 2 {
             return Err("mdns.reflect needs at least two interfaces".into());

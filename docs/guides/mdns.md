@@ -15,6 +15,9 @@ enabled = true
 interfaces = ["eth0", "eth1"]       # the networks to listen on (1 to 8)
 domain = "mdns.home.example"        # discovery proxy: <name>.<domain> is <name>.local
 # reflect = false                   # repeat mDNS between the interfaces (needs two or more)
+# reflect_services = ["_airplay._tcp"]   # repeat only these services (empty: all)
+# reflect_block_services = ["_ssh._tcp"] # never repeat these
+# publish_name = "lumen"            # answer for and announce lumen.local
 # ipv6 = true                       # also use ff02::fb next to 224.0.0.251
 # wait_ms = 700                     # how long a question waits for devices (100 to 3000)
 # ttl_cap_secs = 120                # longest TTL in an answer (1 to 3600)
@@ -45,6 +48,14 @@ With `reflect = true`, an mDNS packet that arrives on one interface is sent on t
 
 > [!WARNING]
 > Reflecting mDNS **crosses a network boundary on purpose**. A device on a guest network can then announce itself to, and ask about, devices on your main network, which weakens the isolation between them. Reflect only between networks you trust each other, and prefer the discovery proxy (which exposes names, not the multicast stream) where it is enough. Reflection does not carry any traffic between the networks: after discovery, the devices still need firewall rules that allow them to talk.
+
+## Per-service reflection filters
+
+With `reflect_services` set, only those service types cross between networks; `reflect_block_services` removes types and wins over the allow list. A packet is judged by every service name in its questions and records, including PTR targets, so an instance such as `Living-Room._airplay._tcp.local` counts as `_airplay._tcp`. Plain host lookups (`tv.local`) always pass, because a client that found a service on another network must still resolve its host.
+
+## Publishing this machine
+
+`publish_name = "lumen"` answers questions for `lumen.local` (A and AAAA, from each listed interface's addresses) and announces it twice at startup. There is no conflict probing yet, so choose a label no other device uses.
 
 ## Who can see what
 

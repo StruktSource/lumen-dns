@@ -90,6 +90,15 @@ impl Link for UdpLink {
     async fn send(&self, packet: &[u8]) -> io::Result<()> {
         self.socket.send_to(packet, self.group).await.map(|_| ())
     }
+    fn addresses(&self) -> Vec<IpAddr> {
+        let v4 = self
+            .iface
+            .v4
+            .iter()
+            .map(|(address, _)| IpAddr::V4(*address));
+        let v6 = self.iface.v6.iter().map(|address| IpAddr::V6(*address));
+        v4.chain(v6).collect()
+    }
     fn on_link(&self, source: IpAddr) -> bool {
         if self.test_mode {
             return source.is_loopback();
@@ -253,6 +262,9 @@ pub async fn start(config: &Mdns, resolver: &Resolver) -> io::Result<Running> {
             wait: Duration::from_millis(u64::from(config.wait_ms)),
             ttl_cap: config.ttl_cap_secs,
             max_records: config.max_records as usize,
+            reflect_allow: config.reflect_services.clone(),
+            reflect_block: config.reflect_block_services.clone(),
+            publish: config.publish_name.clone(),
         },
     )
     .map_err(io::Error::other)?;
@@ -260,6 +272,15 @@ pub async fn start(config: &Mdns, resolver: &Resolver) -> io::Result<Running> {
         resolver.set_bridge(bridge.clone());
     }
     let mut tasks = Vec::new();
+    if config.publish_name.is_some() {
+        let announcer = bridge.clone();
+        tasks.push(tokio::spawn(async move {
+            // RFC 6762 section 8.3: announce at least twice, a second apart.
+            announcer.announce().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            announcer.announce().await;
+        }));
+    }
     for (index, socket) in sockets.into_iter().enumerate() {
         let tx = tx.clone();
         tasks.push(tokio::spawn(async move {
