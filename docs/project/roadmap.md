@@ -37,15 +37,15 @@ _Last updated 2026-11-13 for version 0.7.0._
 
 **Still ahead**
 
-- [ ] **Device and room manager:** Add a simple web UI to name devices, assign them to virtual rooms or areas, and manage their DNS policies using the existing group and profile support. Group a device's IPv4 and multiple IPv6 addresses under one identity, including changing IPv6 privacy addresses where possible. Explore optional FRITZ!Box integration to discover devices and address associations; support manual linking and corrections when matching is uncertain. Consider router-managed IPv4 reservations where supported, with explicit user control. Show when a device or query cannot be identified reliably.
-- More encrypted DNS options: DNSCrypt upstreams, Anonymized DNSCrypt, and ECH support
-- High availability and cluster configuration replication
-- Phase 7: high availability, threat feeds and enterprise policy, extended conformance and soak tests, and an external security review
-- Real-hardware validation for Proxmox, Unraid, Raspberry Pi, and dual-stack Kubernetes
-- Image signing, reproducible builds, and backup, restore, and upgrade tests
-- A customizable console UI through CSS themes
-- More console languages, and translating the remaining long help texts
-- **Independent security review before a stable release**
+- Timer-driven DNSSEC key rollover, separate KSK/ZSK keys, and signing for dynamic and split-horizon zones
+- mDNS self-publishing, DNS Push, and per-service reflection filters
+- DHCP lease and reservation links to device and local-DNS policy
+- A device and room manager with multiple addresses, optional FRITZ!Box discovery, manual matching, and DNS policy links
+- Optional DNS threat feeds and enterprise policy
+- Finish HTTPS/SVCB and ECH-record interoperability
+
+Validation, release work, and smaller optional tails are tracked separately below. They do not
+displace this feature order.
 
 Parked ideas that are **not planned yet** (such as community plugins and a store) are listed at the end under [Ideas, not now](#ideas-not-now).
 
@@ -158,7 +158,6 @@ Principles that shape every decision:
 - [x] Native DoH over HTTP/3 listener (`listen.doh3`), same `/dns-query` contract as HTTP/2 DoH. Client-side DoH3 to an upstream is available as `protocol = "h3"` for explicit upstreams and, since 0.7.0, in the automatic provider list for providers that advertise HTTP/3 (untested against the live providers); Lumen does not advertise HTTP/3 itself
 - [x] DNSCrypt v2 **server** (UDP and TCP, both cipher suites, signed rotating certificates). Still open: DNSCrypt as an upstream transport, Anonymized DNSCrypt relays, and interop testing against `dnscrypt-proxy` releases
 - [ ] HTTPS and SVCB record interoperability, including preserving ECH configuration from authoritative answer to browser ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36)). Started: an end-to-end test proves an HTTPS record with `alpn` and `ech` from an operator zone arrives byte-identical, live and repeated. Forwarded answers (UDP, TCP, and from the cache) are proven the same way. Recursive answers (validation off and on) and DNSSEC-validated forwarded answers are proven the same way (0.7.0). Native ECH is the part still blocked
-- [ ] Optional native ECH for Lumen's own TLS connections and encrypted DNS listeners where the TLS stack supports it. **Checked 2026-11-12: blocked.** rustls 0.23 implements ECH for clients only, so Lumen's listeners cannot accept ECH, and Hickory 0.26.3 does not pass an ECH config to its upstream connections. Revisit when rustls adds server-side ECH or Hickory exposes client ECH ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36))
 - [x] Regular-expression blocking with explicit syntax, compile limits, linear-time matching, and explainable matches (0.7.0)
 - [x] CNAME-based tracker blocking that inspects upstream answer chains without bypassing DNSSEC or response bounds (0.7.0)
 - [x] SafeSearch with explicit opt-in, per-profile scope, documented providers (Google, Bing, YouTube), and no hidden logging (0.7.0). Wider child-safety categories shipped as per-list categories (0.7.0)
@@ -179,9 +178,7 @@ Each item has to keep Lumen's defaults intact: private, bounded, and explicit op
 - [x] A translation framework: message catalogs keyed by the English text, a per-browser choice, a console default for administrators, a browser-language fallback, and locale-aware numbers
 - [x] A language step in the setup wizard, and language settings under Users → My account and System → Console
 - [x] A documented way to add or improve a translation, with tests that keep the catalogs complete and current ([Languages and translations](../guides/translations.md))
-- [ ] Translate the remaining long help texts on the DNS settings and Filtering pages
-- [ ] More languages
-- [ ] Localize the documentation where practical. Technical terms such as DoH, DoT, and DNSSEC stay recognizable
+- Remaining language and documentation work is tracked under [Smaller tails](#smaller-tails).
 
 ### Phase 7: Scale, assurance, and enterprise
 
@@ -189,53 +186,41 @@ Moved out of Phase 5 on 2026-11-12 so Phase 5 stays focused on DNS features.
 
 - [ ] High availability, multi-service use, cluster configuration replication, and a cache strategy
 - [ ] Optional DNS threat feeds and enterprise policy features that leave privacy defaults unchanged
-- [ ] Extended DNS and DNSSEC conformance and long-running soak tests
-- [ ] **External security review before stable release**
 
 ## What is planned next
 
-Open items, from most to least urgent. This is a recommended order, not a dated commitment. Validation, testing, and release-hardening work lives in [Side projects](#side-projects) so it does not crowd the feature list.
+Open items, from most to least urgent. This is a recommended order, not a dated commitment. Validation, testing, and release-hardening work lives in [Validation and release](#validation-and-release) so it does not crowd the feature list.
 
 ### Open GitHub issues
 
 - [x] [Issue #35: forward mode returns SERVFAIL for names under `l.google.com` when local DNSSEC validation is on](https://github.com/StruktSource/lumen-dns/issues/35). Fixed in 0.7.0 with bounded insecure-ancestor recovery for forward mode: signed-zone failures and bogus ancestors still return `SERVFAIL`, provider answers stay final, both DS reply shapes are covered by local tests. Public-network behavior is not claimed
-- [ ] [Issue #36: native ECH support and HTTPS/SVCB interoperability](https://github.com/StruktSource/lumen-dns/issues/36). First prove HTTPS/SVCB and ECH configuration survive filtering, caching, forwarding, recursion, and DNSSEC; then evaluate native ECH for Lumen's own encrypted transports
+- [ ] [Issue #36: HTTPS/SVCB and ECH-record interoperability](https://github.com/StruktSource/lumen-dns/issues/36). Finish proof that HTTPS/SVCB and ECH configuration survive filtering, caching, forwarding, recursion, and DNSSEC. Native TLS ECH is a dependency-blocked smaller tail
 
-### High priority: do next
+### Active feature queue
 
-1. **Logic-led cleanup and optimization (v0.6.0).** Completed with local checks; selected changes and verification are in [the audit](optimization-audit.md) and [verification](verification.md). Implemented and checked: response ownership transfer, discarded filter-match allocation removal, and portable ThinLTO. Large I/O, allocator, arena, tree and parser rewrites are rejected or deferred with reasons.
-2. **Silent first encrypted transport failover (v0.6.0).** Implement bounded per-transport shares inside the provider deadline, preserve final DNS/DNSSEC results and encrypted-only policy. Local checks pass; cross-platform hosted CI remains pending. See [provider behavior](../guides/upstream-providers.md#how-failover-works).
-3. **Cold recursive DNSSEC latency diagnosis and recovery (v0.6.0 bounded work complete).** Each full walk now has a Lumen attempt budget; only timeouts retry, and attempts plus the one DNSSEC recovery budget must fit the outer deadline. The extra SOA/NS ancestor scan shares one budget instead of multiplying waits. Opt-in fixed-cardinality attempt metrics expose timing, timeout, retry, and failure counts without names or addresses. A local fixture proves a silent first walk times out and the next walk can finish. Usable and authenticated negative answers and DNSSEC failures remain final. **Still open:** Hickory 0.26.3 does not expose privacy-safe per-authority timing through its stable recursor API, so exact authority-hop attribution and a statistically significant public-network latency gain are not claimed.
-4. **Local-only DNS names (v0.6.0 complete).** Default-on, operator-disableable local answering covers the current IANA RFC 6303/RFC 7793 reverse registry, `home.arpa`, `resolver.arpa`, `service.arpa`, and `.local` leak prevention. Empty zones return authoritative SOA/NS/NXDOMAIN/NODATA, the DNSSEC `home.arpa` DS exception still gets the public proof, and DDR returns local NODATA. Tests prove public reverse DNS and `ipv4only.arpa` are not blanket-blocked. Lumen does not bridge mDNS or yet provide per-zone conditional forwarding. See [resolver behavior](../guides/resolver-modes.md#cold-recursion-and-local-names).
-
-### Medium priority: soon
-
-5. **Optional external login: done in 0.6.0** ([guide](../guides/external-login.md)). Authorization code with PKCE for any OpenID Connect provider, off by default, built-in login kept. Includes linking an existing account, optional group-to-role sync, optional single logout, and a setup-wizard step. **Experimental.** Not yet checked against live Authentik, Authelia, Pocket ID, or Octelium installations; back-channel logout and per-group roles beyond one admin group are not built.
-6. **CSS themes** for the console.
-7. **Finish the translations:** the remaining long help texts, and more languages.
+1. **DNSSEC zone lifecycle.** Timer-driven rollover, separate KSK/ZSK keys, and signing for dynamic and split-horizon zones.
+2. **mDNS completion.** Self-publishing, DNS Push, and per-service reflection filters.
+3. **DHCP policy links.** Connect live leases and reservations to device identities and local-DNS policy.
+4. **Device and room manager.** Group multiple IPv4/IPv6 addresses under one identity, add rooms, optional FRITZ!Box discovery, manual matching and corrections, and DNS policy links.
+5. **Threat feeds and enterprise policy.** Optional and disabled by default, without changing privacy defaults.
+6. **HTTPS/SVCB and ECH-record interoperability.** Finish the remaining Issue #36 paths. Native TLS ECH stays in smaller tails until dependencies expose it.
 
 ### Lower priority: later
 
 8. **Faster, lighter list downloads (partly done in 0.6.0).** Done: conditional requests (`ETag` / `Last-Modified`), compressed transfer, and a bounded disk cache in managed mode so a restart does not fetch fresh lists again. Still open: downloading several lists at once with a bound, and delta updates for very large lists.
 9. **Weighted random load balancing** across providers (spreading by recent speed rather than evenly), as some filter apps offer. Round-robin and fastest-first cover most of it today.
-10. **Serve-stale and persistent cache (done in 0.7.0).** Bounded RFC 8767 stale answers and a separate opt-in persistent DNS cache. Cache behavior under real restarts and long soaks is still unmeasured.
-11. **Authoritative and local DNS.** Add authoritative zones, operator-managed records, a split-horizon module, conditional forwarding, RFC 2136 updates, AXFR/IXFR, and DNSSEC zone signing.
-12. **Encrypted DNS and ECH.** Keep current DoH over HTTP/2; add native DoH over HTTP/3, DNSCrypt, HTTPS/SVCB and ECH-config delivery to browsers, and optional native ECH in Lumen's own TLS paths.
-13. **Filtering and family policy (mostly done in 0.7.0).** Regex rules, CNAME-based blocking, and opt-in SafeSearch profiles shipped. Wider child-safety categories shipped (0.7.0).
-14. **Optional DHCP server module (done in 0.7.0).** IPv4 and IPv6 with reservations, SQLite leases and DNS names. Open: ISC-compatible failover (a separate, large protocol; ISC DHCP is end-of-life). Integrate leases and reservations with device and local-DNS policy without making Lumen authoritative for the network by default.
-15. **Trust-anchor rollover automation and certificate lifecycle tooling.**
+10. **CSS themes** for the console under its strict Content-Security-Policy.
+11. **Trust-anchor and certificate lifecycle follow-up.** Keep real rollover and public-CA evidence under validation; add lifecycle controls only where they reduce operator risk.
 
 ### Large efforts, before or after 1.0
 
-16. **Independent security review.** Required before a stable release.
-17. **High availability and cluster configuration replication.**
-18. **Optional DNS threat feeds and enterprise policy features.**
+16. **High availability and cluster configuration replication.**
 
 ### Not now
 
 19. **Plugins, add-ons, and a community store.** Parked as an idea. See [Ideas, not now](#ideas-not-now).
 
-## Side projects
+## Validation and release
 
 Important work that does not add a feature. It can be done in any order and by anyone, and does not block the feature list above, except that the first two are needed before a stable release.
 
@@ -244,6 +229,14 @@ Important work that does not add a feature. It can be done in any order and by a
 - [ ] **Conformance and soak tests:** extended DNS and DNSSEC conformance suites and long-running soak tests
 - [ ] **Release hardening:** keyless image signing and reproducible-build comparison (SBOM and provenance are already configured)
 - [ ] **Report the DNSSEC fix upstream** to Hickory, then drop the vendored copy (see [Upstream follow-up](#upstream-follow-up))
+- [ ] **External security review before 1.0.** This is a release gate, not feature-queue work
+
+## Smaller tails
+
+- [ ] **Native ECH for Lumen TLS paths**, when rustls provides server ECH and Hickory exposes upstream client ECH configuration. This is dependency-blocked, not part of remaining DNS-record interoperability
+- [ ] **Translate remaining long help text** on DNS settings and Filtering pages
+- [ ] **More console languages** after current feature text settles
+- [ ] **Localized documentation where useful**, while keeping DNS terms such as DoH, DoT, and DNSSEC recognizable
 
 ## Recursion speed (Issue #9)
 
