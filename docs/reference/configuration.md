@@ -129,6 +129,61 @@ The IPAM inventory lives in the web console's state and is switched on as a cons
 | :--- | :--- | :--- | :--- |
 | `dns_domain` | unset | DNS name without a trailing dot, not `.local`, not under `.arpa`, no overlap with a zone, `dhcp.domain`, or `mdns.domain` | Addresses in IPAM with a host name and DNS publishing on become `name.<dns_domain>` (`A`/`AAAA`) with a matching `PTR`. Unset publishes nothing |
 
+## `[network]`
+
+Network discovery, the device inventory, topology, and monitoring. Off unless `enabled = true`, and it only looks at the networks in `scopes`. Needs [managed mode](../guides/managed-mode.md). See [Network discovery](../guides/network.md).
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Run discovery, monitoring, and SNMP polling |
+| `scopes` | `[]` | 1 to 32 | The networks to look at. Required when enabled |
+| `scan_interval_secs` | `3600` | 0, or 60 to 86400 | Seconds between automatic discovery runs. `0` means only when asked |
+| `concurrency` | `32` | 1 to 256 | Most probes in flight |
+| `timeout_ms` | `800` | 100 to 5000 | How long a probe waits |
+| `packets_per_second` | `100` | 1 to 2000 | Most probe packets per second, across all scopes |
+| `gone_after_scans` | `3` | 1 to 100 | Missed runs in a row before a device is marked gone |
+| `retention_days` | `30` | 1 to 365 | Days of check, traffic, and event history kept |
+| `snmp_interval_secs` | `300` | 30 to 3600 | Seconds between SNMP polls of a device |
+| `oui_file` | unset | an IEEE `oui.txt` | Extra or newer manufacturer names |
+
+`[[network.scopes]]`:
+
+| Field | Bounds | Meaning |
+| :--- | :--- | :--- |
+| `name` | 1 to 64 letters, digits, space, `-` `_` `.`, unique | The scope's name |
+| `networks` | 1 to 64 CIDR ranges. IPv4 `/16` to `/32`, IPv6 `/48` to `/128`. At most 262,144 IPv4 addresses over all scopes | What to look at |
+| `exclude` | up to 256 ranges | Never probed, learned, or stored |
+| `interface` | an interface name | Needed for IPv6 networks |
+| `snmp_profile` | a profile name | The SNMP profile for devices in this scope |
+
+`[network.methods]` (booleans): `neighbors`, `icmp`, `dhcp`, and `dns` default to `true`; `snmp` defaults to `false` and needs a profile.
+
+`[network.monitor]`:
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `true` | | Check devices regularly |
+| `interval_secs` | `60` | 10 to 3600 | Seconds between checks (a device can override it) |
+| `failures_before_offline` | `3` | 1 to 20 | Failed checks in a row before a device is offline |
+| `degraded_loss_percent` | `20` | 1 to 99 | Recent loss at which a device that answers is degraded |
+| `probes_per_check` | `3` | 1 to 10 | Probes sent per check |
+
+`[[network.snmp_profiles]]`:
+
+| Field | Default | Meaning |
+| :--- | :--- | :--- |
+| `name` | | Unique name |
+| `version` | | `"v2c"` or `"v3"` |
+| `community_file` | | v2c: file holding the community (mode `0600`) |
+| `username` | | v3: user name |
+| `auth_protocol` | none | v3: `sha1`, `sha256`, `sha384`, or `sha512`; needs `auth_password_file` |
+| `auth_password_file` | | v3: file with the password, at least 8 characters, mode `0600` |
+| `privacy_protocol` | none | v3: `aes128`; needs authentication and `privacy_password_file` |
+| `privacy_password_file` | | v3: file with the password, at least 8 characters, mode `0600` |
+| `port` | `161` | UDP port |
+| `timeout_ms` | `1500` | 200 to 10000 |
+| `retries` | `1` | 0 to 5 |
+
 ## Authoritative zones, forwarders, and TSIG keys
 
 Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these are off until you add a table.

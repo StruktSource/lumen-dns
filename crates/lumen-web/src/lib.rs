@@ -78,6 +78,7 @@ const ASSETS: &[Asset] = &[
     asset!("/assets/js/view-trafficmap.js", JS, "js/view-trafficmap.js"),
     asset!("/assets/js/view-dhcp.js", JS, "js/view-dhcp.js"),
     asset!("/assets/js/view-ipam.js", JS, "js/view-ipam.js"),
+    asset!("/assets/js/view-network.js", JS, "js/view-network.js"),
     asset!("/assets/js/view-filtering.js", JS, "js/view-filtering.js"),
     asset!("/assets/js/view-dns.js", JS, "js/view-dns.js"),
     asset!("/assets/js/view-users.js", JS, "js/view-users.js"),

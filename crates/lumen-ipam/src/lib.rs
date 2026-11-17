@@ -15,6 +15,7 @@ mod store;
 
 pub use model::{
     AddressFilter, AddressInput, AddressRow, AddressState, AllocateInput, Conflict, Leased,
-    Location, LocationInput, Overview, Strategy, Subnet, SubnetInput, SubnetStats, Vlan, VlanInput,
+    Location, LocationInput, Overview, Placement, Strategy, Subnet, SubnetInput, SubnetStats, Vlan,
+    VlanInput,
 };
 pub use store::Ipam;

@@ -228,3 +228,14 @@ pub struct Conflict {
     pub ip: String,
     pub detail: String,
 }
+
+/// Where an address sits in the inventory.
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+pub struct Placement {
+    pub subnet_id: i64,
+    pub cidr: String,
+    pub subnet_name: String,
+    /// `VLAN 10 · Users`, when the subnet has one.
+    pub vlan: Option<String>,
+    pub location_id: Option<i64>,
+}

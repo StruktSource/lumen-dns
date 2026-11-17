@@ -27,6 +27,7 @@ use std::{
 };
 
 mod ipam;
+mod network;
 
 pub(crate) type Reply = Response<Full<Bytes>>;
 
@@ -496,6 +497,9 @@ impl Console {
             ("DELETE", ["users", name]) => self.remove_user(&mut store, &ctx, name),
             ("PUT", ["devices"]) => self.put_device(&mut store, &ctx),
             ("DELETE", ["devices", id]) => self.delete_device(&mut store, &ctx, id),
+            (_, ["network", rest @ ..]) => {
+                self.network_route(&mut store, &ctx, method.as_str(), rest)
+            }
             (_, ["ipam", rest @ ..]) => self.ipam_route(&mut store, &ctx, method.as_str(), rest),
             ("GET", ["dhcp"]) => self.dhcp(&store),
             ("POST", ["dhcp", "reconfigure"]) => self.dhcp_reconfigure(&mut store, &ctx),
@@ -2377,7 +2381,7 @@ fn language(store: &Store) -> Option<String> {
 }
 
 /// Optional features an administrator can switch on. Every module is off by default.
-const MODULES: &[&str] = &["traffic-map", "dhcp", "ipam"];
+const MODULES: &[&str] = &["traffic-map", "dhcp", "ipam", "network"];
 
 /// The enabled modules, in catalog order. Unknown names in storage are ignored.
 fn enabled_modules(store: &Store) -> Vec<&'static str> {
@@ -2705,6 +2709,9 @@ mod tests {
         ipam_names: Mutex<Vec<(String, IpAddr)>>,
     }
     impl Host for Stub {
+        fn network_engine(&self) -> Option<Value> {
+            Some(json!({ "scanning": false, "icmp_v4": true, "scopes": [] }))
+        }
         fn ipam_dns_domain(&self) -> Option<String> {
             self.ipam_domain.lock().unwrap().clone()
         }
@@ -4705,6 +4712,85 @@ mod tests {
     }
 
     #[test]
+    fn the_network_module_keeps_an_inventory_and_asks_for_discovery_for_administrators_only() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let send = |method: Method, path: &str, payload: &str| {
+            body(call(&f, method, path, session, payload, "127.0.0.1"))
+        };
+        assert_eq!(
+            send(Method::GET, "/api/network", "").0,
+            StatusCode::NOT_FOUND,
+            "off by default"
+        );
+        send(
+            Method::PUT,
+            "/api/modules",
+            r#"{"id":"network","enabled":true}"#,
+        );
+        let (status, device) = send(
+            Method::POST,
+            "/api/network/devices",
+            r#"{"name":"NAS","kind":"nas","addresses":["192.168.1.10"],"macs":["02:00:00:00:00:10"]}"#,
+        );
+        assert_eq!(status, StatusCode::OK, "{device}");
+        assert_eq!(
+            send(
+                Method::POST,
+                "/api/network/devices",
+                r#"{"name":"Again","addresses":["192.168.1.10"]}"#
+            )
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (_, listed) = send(Method::GET, "/api/network/devices?q=nas", "");
+        assert_eq!(listed["total"], json!(1));
+        let (_, home) = send(Method::GET, "/api/network", "");
+        assert_eq!(home["counts"]["total"], json!(1));
+        assert_eq!(
+            home["engine"]["icmp_v4"],
+            json!(true),
+            "the daemon's side is reported"
+        );
+        let (status, scan) = send(Method::POST, "/api/network/scan", "");
+        assert_eq!(
+            (status, scan["requested"].clone()),
+            (StatusCode::OK, json!(true))
+        );
+        assert!(
+            lumen_netmon::Netmon::open(&f.state)
+                .unwrap()
+                .take_scan_request()
+                .unwrap(),
+            "the daemon will see it"
+        );
+        assert_eq!(
+            send(Method::GET, "/api/network/nothing", "").0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                Method::DELETE,
+                &format!("/api/network/devices/{}", device["id"]),
+                ""
+            )
+            .0,
+            StatusCode::OK
+        );
+        let (cookie, csrf) = sign_in(&f, "anna", "anna passphrase 123");
+        let user = Some((cookie.as_str(), csrf.as_str()));
+        assert_eq!(
+            call(&f, Method::GET, "/api/network", user, "", "127.0.0.1").status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&f, Method::POST, "/api/network/scan", user, "", "127.0.0.1").status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
     fn modules_are_off_until_an_administrator_turns_them_on() {
         let f = fixture();
         let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
@@ -4721,7 +4807,10 @@ mod tests {
             .1
         };
         assert_eq!(get()["enabled"], json!([]));
-        assert_eq!(get()["available"], json!(["traffic-map", "dhcp", "ipam"]));
+        assert_eq!(
+            get()["available"],
+            json!(["traffic-map", "dhcp", "ipam", "network"])
+        );
         let put = |payload: &str| {
             call(
                 &f,

@@ -15,7 +15,10 @@ L.MODULES = [
     needs: 'Needs dhcp.enabled in the configuration. Lumen never hands out addresses on its own.' },
   { id: 'ipam', page: 'ipam', name: 'IPAM', icon: 'overview',
     text: 'IP address management: your subnets, VLANs and locations in one inventory, with the next free address picked for you. It records what you use and shows DHCP leases beside it, and it never changes a device or a network.',
-    needs: 'Works with or without the DHCP module. Set ipam.dns_domain to publish names in DNS.' }];
+    needs: 'Works with or without the DHCP module. Set ipam.dns_domain to publish names in DNS.' },
+  { id: 'network', page: 'network', name: 'Network', icon: 'map',
+    text: 'Find the devices on your networks, keep an inventory of them, see how they connect, and get told when one stops answering. It looks only at the networks you list, and it never changes a device.',
+    needs: 'Needs network.enabled and its scopes in the configuration for discovery and monitoring. You can add devices by hand without it.' }];
 
 L.loadModules = async () => { L.S.modules = await L.api('GET', '/api/modules'); L.S.modulesAt = Date.now(); };
 L.moduleOn = id => !!L.S.modules?.enabled?.includes(id);
@@ -36,6 +39,13 @@ const preview = id => {
     s.append(sv('path', { class: 'mod-edge', d: 'M120 34V52M120 52H48V76M120 52V76M120 52H192V76', fill: 'none', pathLength: '1' }));
     s.append(sv('rect', { class: 'mod-n root', x: 92, y: 14, width: 56, height: 20 }));
     [48, 120, 192].forEach(x => s.append(sv('rect', { class: 'mod-n leaf', x: x - 22, y: 76, width: 44, height: 16 })));
+    return s;
+  }
+  if (id === 'network') {
+    const s = sv('svg', { class: 'mod-art', viewBox: '0 0 240 120', 'aria-hidden': 'true' });
+    s.append(sv('path', { class: 'mod-edge', d: 'M120 32V52M120 52H44V74M120 52H120V74M120 52H196V74', fill: 'none', pathLength: '1' }));
+    s.append(sv('circle', { class: 'mod-n root', cx: 120, cy: 22, r: 11 }));
+    [44, 120, 196].forEach((x, i) => s.append(sv('circle', { class: i === 2 ? 'mod-n bad' : 'mod-n', cx: x, cy: 86, r: 11 })));
     return s;
   }
   if (id === 'ipam') {

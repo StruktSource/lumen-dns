@@ -55,7 +55,7 @@ New to the ideas? Read [Concepts](docs/getting-started/concepts.md) for a plain-
 | **Your own zones** | Authoritative zones from files, split-horizon views, conditional forwarding, TSIG-signed dynamic updates (RFC 2136), zone transfers (AXFR/IXFR), and DNSSEC signing with NSEC or NSEC3 and key rollover |
 | **DHCP server** | Opt-in IPv4 and IPv6 addresses with reservations, relay agents, prefix delegation, network boot options, Router Advertisements, and Lumen-to-Lumen failover. Leases become DNS names |
 | **Multicast DNS bridge** | Opt-in discovery proxy and reflector, so `printer.local` also answers as `printer.your-domain` and across networks |
-| **Web console** | First-run setup, one Users page for accounts and roles, optional two-step verification and optional, experimental single sign-on (OpenID Connect), live overview and activity, filtering, devices, local DNS, and an optional **Modules** page (Traffic map, DHCP, IPAM), in [English, German, Italian, Spanish, and Dutch](docs/guides/translations.md) |
+| **Web console** | First-run setup, one Users page for accounts and roles, optional two-step verification and optional, experimental single sign-on (OpenID Connect), live overview and activity, filtering, devices, local DNS, and an optional **Modules** page (Traffic map, DHCP, IPAM, Network), in [English, German, Italian, Spanish, and Dutch](docs/guides/translations.md) |
 | **Query history** | Opt-in. Recent lookups in memory, or saved for 1 to 90 days, anonymous or with the device, with search and one-click deletion |
 | **Operations** | Validated TOML config, optional SQLite state, staged reloads with rollback, audit log, signed webhooks, and Prometheus metrics |
 
@@ -88,6 +88,7 @@ That is a private recursive resolver with DNSSEC validation. Prefer a ready-made
 | Name my own devices and services | [Your own DNS zones](docs/guides/authoritative-dns.md#easy-local-dns-manager) |
 | Hand out IP addresses | [DHCP server](docs/guides/dhcp.md) |
 | Track subnets, VLANs, and addresses | [IP address management](docs/guides/ipam.md) |
+| Discover and monitor devices | [Network discovery](docs/guides/network.md) |
 | Serve encrypted DNS with a real certificate | [Encrypted DNS](docs/guides/encrypted-dns.md) and [Automatic certificates](docs/guides/certificates.md) |
 | Use the browser interface | [Web console](docs/guides/web-console.md) (start Lumen with `--state`) |
 | Forward to an encrypted provider | [Resolver modes](docs/guides/resolver-modes.md) and [Upstream providers](docs/guides/upstream-providers.md) |

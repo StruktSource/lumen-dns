@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Versioned startup configuration. Unknown fields and unsafe limits fail closed.
 
+pub mod network;
+pub use network::{
+    DiscoveryMethods, Monitor, Network, NetworkScope, SnmpAuth, SnmpPrivacy, SnmpProfile,
+    SnmpVersion,
+};
+
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -33,6 +39,9 @@ pub struct Config {
     /// IP address management settings. The inventory itself lives in the web console's state and
     /// is switched on as a console module; this only holds what needs the daemon.
     pub ipam: Ipam,
+    /// Optional network discovery, device inventory, topology, and monitoring. Off by default,
+    /// and it only looks at networks listed in its scopes.
+    pub network: Network,
     /// Authoritative zones served from operator-managed records.
     pub zones: Vec<Zone>,
     /// Conditional forwarding: names under `domain` go to these resolvers.
@@ -1465,6 +1474,7 @@ impl Config {
             &mut config.web.private_key,
             &mut config.web.oidc.client_secret_file,
             &mut config.web.oidc.ca_file,
+            &mut config.network.oui_file,
         ]
         .into_iter()
         .flatten()
@@ -1509,6 +1519,20 @@ impl Config {
                 && path.is_relative()
             {
                 *path = base.join(&*path);
+            }
+        }
+        for profile in &mut config.network.snmp_profiles {
+            for path in [
+                &mut profile.community_file,
+                &mut profile.auth_password_file,
+                &mut profile.privacy_password_file,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if path.is_relative() {
+                    *path = base.join(&*path);
+                }
             }
         }
         for webhook in &mut config.management.webhooks {
@@ -1636,6 +1660,7 @@ impl Config {
         self.validate_acme()?;
         self.validate_dhcp()?;
         self.validate_ipam()?;
+        self.network.validate()?;
         self.validate_mdns()?;
         self.validate_zones()?;
         if self.listen.allow_clients.is_empty() || self.listen.allow_clients.len() > 128 {

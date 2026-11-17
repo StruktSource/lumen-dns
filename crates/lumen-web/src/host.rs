@@ -149,6 +149,11 @@ pub trait Host: Send + Sync + 'static {
     fn dhcp(&self) -> Option<DhcpInfo> {
         None
     }
+    /// What the network module's daemon side reports (scopes, intervals, whether ICMP works),
+    /// when the module is configured to run.
+    fn network_engine(&self) -> Option<serde_json::Value> {
+        None
+    }
     /// The DNS domain IPAM names are published under (`ipam.dns_domain`), when set.
     fn ipam_dns_domain(&self) -> Option<String> {
         None

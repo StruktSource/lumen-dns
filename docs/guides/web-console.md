@@ -186,6 +186,10 @@ Modules are big, optional features. Each one is **off until an administrator tur
 
 Shows the networks of the [DHCP server](dhcp.md), how full each one is, and every lease with its name, device, and expiry. Read-only and for administrators; the configuration decides what is served.
 
+### Network
+
+Devices on your networks: discovery, an inventory with search, filters and grouping, an interactive topology, SNMP interface and system data, and availability monitoring with outage events. It looks only at the networks you list and never changes a device. See [Network discovery](network.md).
+
 ### IPAM
 
 An inventory of your subnets, addresses, VLANs, and locations, with the next free address picked for you and DHCP leases shown beside it. It records what you use and never changes a device or your network. Optional DNS names need `ipam.dns_domain`. See [IP address management](ipam.md).

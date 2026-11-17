@@ -14,6 +14,8 @@ lumen-resolver = { path = "../lumen-resolver" }
 lumen-web = { path = "../lumen-web" }
 lumen-dhcp = { path = "../lumen-dhcp" }
 lumen-mdns = { path = "../lumen-mdns" }
+lumen-netmon = { path = "../lumen-netmon" }
+async-trait = "0.1"
 tokio.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true

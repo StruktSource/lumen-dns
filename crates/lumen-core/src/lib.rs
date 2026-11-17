@@ -4,6 +4,7 @@
 mod acme;
 mod certs;
 mod dnscrypt;
+mod netenv;
 mod padding;
 mod transport;
 pub use certs::Reload;
@@ -255,6 +256,8 @@ struct Service {
     metrics: Arc<Metrics>,
     /// Set once, after the DHCP server (if any) has started.
     dhcp: std::sync::OnceLock<lumen_dhcp::Handle>,
+    /// Set once, after network discovery (if enabled) has started.
+    network: std::sync::OnceLock<lumen_netmon::Handle>,
 }
 
 impl Service {
@@ -533,6 +536,10 @@ impl Drop for ActiveQuery<'_> {
 }
 
 impl lumen_web::Host for Service {
+    fn network_engine(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(self.network.get()?.status()).ok()
+    }
+
     fn ipam_dns_domain(&self) -> Option<String> {
         self.resolver
             .ipam_hosts()

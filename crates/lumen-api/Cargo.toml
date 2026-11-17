@@ -13,6 +13,7 @@ workspace = true
 lumen-config = { path = "../lumen-config" }
 lumen-filter = { path = "../lumen-filter" }
 lumen-ipam = { path = "../lumen-ipam" }
+lumen-netmon = { path = "../lumen-netmon" }
 lumen-store = { path = "../lumen-store" }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
 ring = "0.17"

@@ -973,6 +973,37 @@ impl Ipam {
         Ok(found)
     }
 
+    /// The most specific managed subnet that holds an address, with its VLAN and location.
+    ///
+    /// # Errors
+    /// The database failed.
+    pub fn locate(&self, ip: IpAddr) -> Result<Option<crate::model::Placement>, String> {
+        let subnets = subnets_in(&self.conn)?;
+        let best = subnets
+            .iter()
+            .filter_map(|s| s.cidr.parse::<IpNet>().ok().map(|n| (s, n)))
+            .filter(|(_, n)| n.contains(&ip))
+            .max_by_key(|(_, n)| n.prefix_len());
+        let Some((subnet, _)) = best else {
+            return Ok(None);
+        };
+        let vlan = match subnet.vlan_id {
+            Some(id) => self
+                .vlans()?
+                .into_iter()
+                .find(|v| v.id == id)
+                .map(|v| format!("VLAN {} · {}", v.vid, v.name)),
+            None => None,
+        };
+        Ok(Some(crate::model::Placement {
+            subnet_id: subnet.id,
+            cidr: subnet.cidr.clone(),
+            subnet_name: subnet.name.clone(),
+            vlan,
+            location_id: subnet.location_id,
+        }))
+    }
+
     /// A small value shared between the daemon and the management API.
     ///
     /// # Errors

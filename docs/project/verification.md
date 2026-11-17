@@ -90,6 +90,15 @@ Tests bind ephemeral local sockets and use in-process DNS fixtures. They do not 
 - Allocation strategies for IPv4 and IPv6, skipping recorded, leased, gateway, and child-subnet addresses, with 8 threads on separate connections never receiving the same address, and persistence across reopening
 - Utilization, conflict detection, and DNS entries; console and management API routes, roles, the module switch, generic error bodies, and name publication and withdrawal
 
+**Network discovery and monitoring**
+
+- Neighbor-table parsers over real Linux and macOS sample output, ICMP and TCP probes on loopback (including TCP self-connect), scope enumeration with exclusions, and DHCP client identifiers
+- Merging one device seen by several methods, address changes, merges, manual data that discovery never overwrites, and gone and returning devices
+- The availability state machine: thresholds, loss, recovery, and no false alarms from a restart
+- The SNMP client against a real `snmpd`: v2c, v3 authentication and AES privacy, wrong passwords and users named, walks bounded, plus BER, USM key derivation (RFC 3414 vector), and malformed-input handling
+- The engine end to end on loopback through the real database: discovery, DHCP names, an outage and its recovery, and nothing outside the scope stored
+- Routes, roles, the topology (confirmed and inferred links), IPAM placement, and the console and management API wiring
+
 ## Results by date
 
 ### 2026-11-17: operator-zone DNSSEC lifecycle

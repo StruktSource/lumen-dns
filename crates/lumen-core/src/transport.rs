@@ -34,6 +34,8 @@ pub struct RunningServer {
     _dhcp: Option<lumen_dhcp::Running>,
     /// Keeps the multicast DNS bridge running for as long as the service does.
     _mdns: Option<lumen_mdns::Running>,
+    /// Keeps network discovery and monitoring running for as long as the service does.
+    _network: Option<lumen_netmon::Running>,
 }
 
 /// Optional managed-mode inputs for the web console.
@@ -116,6 +118,7 @@ impl RunningServer {
             config: Arc::new(config),
             metrics: Arc::clone(&metrics),
             dhcp: std::sync::OnceLock::new(),
+            network: std::sync::OnceLock::new(),
         });
         if let Some(not_after) = cert_not_after {
             service
@@ -206,6 +209,7 @@ impl RunningServer {
             }
         }
         let metrics_listener = config.metrics.map(tcp_listener).transpose()?;
+        let state_path = console.state.clone();
         let console = console.state.map(|state| {
             lumen_web::Console::new(
                 state,
@@ -333,6 +337,18 @@ impl RunningServer {
         } else {
             None
         };
+        let network = if config.network.enabled {
+            let state = state_path.as_deref().ok_or_else(|| {
+                io::Error::other("network discovery needs managed mode (--state): its inventory lives in the console state")
+            })?;
+            let environment = Arc::new(crate::netenv::Environment(Arc::clone(&service)));
+            let running = lumen_netmon::start(&config.network, state, environment)
+                .map_err(io::Error::other)?;
+            let _ = service.network.set(running.handle());
+            Some(running)
+        } else {
+            None
+        };
         if let Some(listener) = metrics_listener {
             tasks.spawn(serve_metrics(listener, Arc::clone(&service)));
         }
@@ -349,6 +365,7 @@ impl RunningServer {
             certificates: tls_handle,
             _dhcp: dhcp,
             _mdns: mdns,
+            _network: network,
         })
     }
 

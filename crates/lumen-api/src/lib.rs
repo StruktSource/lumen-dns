@@ -222,11 +222,18 @@ fn required_role(method: &str, path: &str) -> Option<ApiRole> {
         }
         ("DELETE", path) if path.starts_with("/v1/devices/") => Some(ApiRole::Admin),
         (method, path) => {
-            let parts = ipam_parts(path)?;
-            Some(match lumen_ipam::api::access(method, &parts)? {
-                lumen_ipam::api::Access::Read => ApiRole::Viewer,
-                lumen_ipam::api::Access::Address => ApiRole::Operator,
-                lumen_ipam::api::Access::Structure => ApiRole::Admin,
+            if let Some(parts) = ipam_parts(path) {
+                return Some(match lumen_ipam::api::access(method, &parts)? {
+                    lumen_ipam::api::Access::Read => ApiRole::Viewer,
+                    lumen_ipam::api::Access::Address => ApiRole::Operator,
+                    lumen_ipam::api::Access::Structure => ApiRole::Admin,
+                });
+            }
+            let parts = network_parts(path)?;
+            Some(match lumen_netmon::api::access(method, &parts)? {
+                lumen_netmon::api::Access::Read => ApiRole::Viewer,
+                lumen_netmon::api::Access::Operate => ApiRole::Operator,
+                lumen_netmon::api::Access::Manage => ApiRole::Admin,
             })
         }
     }
@@ -240,6 +247,58 @@ fn ipam_parts(path: &str) -> Option<Vec<&str>> {
         return None;
     }
     Some(rest.split('/').filter(|part| !part.is_empty()).collect())
+}
+
+/// The path after `/v1/network`, split at `/`, or `None` for any other path.
+fn network_parts(path: &str) -> Option<Vec<&str>> {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    let rest = path.strip_prefix("/v1/network")?;
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return None;
+    }
+    Some(rest.split('/').filter(|part| !part.is_empty()).collect())
+}
+
+/// The network module over the management API: the same inventory the console shows. A discovery
+/// request is picked up by the running daemon within a few seconds.
+fn network_route(request: &Request, store: &Store, state: &ApiState) -> Response {
+    let (path, query) = request
+        .path
+        .split_once('?')
+        .unwrap_or((request.path.as_str(), ""));
+    let Some(parts) = network_parts(path) else {
+        return error("404 Not Found", "route not found");
+    };
+    let modules = store.setting("modules").ok().flatten().unwrap_or_default();
+    let on = |name: &str| modules.split(',').any(|module| module == name);
+    if !on("network") {
+        return error("404 Not Found", "the network module is off");
+    }
+    if matches!(request.method.as_str(), "POST" | "PUT")
+        && !request.body.is_empty()
+        && !is_json(request)
+    {
+        return error("415 Unsupported Media Type", "use application/json");
+    }
+    let outcome = lumen_netmon::api::handle(&lumen_netmon::api::Request {
+        method: &request.method,
+        parts: &parts,
+        query,
+        body: &request.body,
+        state: &state.state_path,
+        ipam_enabled: on("ipam"),
+        engine: None,
+    });
+    let mut body = outcome.body;
+    if outcome.status >= 500 {
+        body = json!({"error": "state unavailable"});
+    } else if body["error"]
+        .as_str()
+        .is_some_and(|message| message.starts_with("invalid request"))
+    {
+        body = json!({"error": "invalid request"});
+    }
+    json_response(http_status(outcome.status), body)
 }
 
 fn http_status(code: u16) -> &'static str {
@@ -357,6 +416,7 @@ fn route(request: &Request, state: &ApiState) -> Response {
             }
         }
         (_, path) if ipam_parts(path).is_some() => ipam_route(request, &store, state),
+        (_, path) if network_parts(path).is_some() => network_route(request, &store, state),
         ("POST", "/v1/filter/refresh") => queue(&store, Command::FilterRefresh),
         ("POST", "/v1/filter/rollback") => queue(&store, Command::FilterRollback),
         ("POST", "/v1/reload") => queue(&store, Command::Reload),
@@ -887,6 +947,88 @@ mod tests {
             call(2, "DELETE", "/v1/ipam/addresses/10.5.0.1", "").0,
             "200 OK"
         );
+    }
+
+    #[test]
+    fn network_routes_follow_roles_and_the_module_switch() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let store = Store::open(&path).unwrap();
+        let secrets = [
+            ("viewer", ApiRole::Viewer, "v".repeat(32)),
+            ("operator", ApiRole::Operator, "o".repeat(32)),
+            ("admin", ApiRole::Admin, "a".repeat(32)),
+        ];
+        let state = ApiState {
+            state_path: path.clone(),
+            tokens: secrets
+                .iter()
+                .map(|(name, role, secret)| Token {
+                    name: (*name).into(),
+                    role: *role,
+                    hash: Sha256::digest(secret.as_bytes()).into(),
+                })
+                .collect(),
+            requests_per_minute: 600,
+            rates: Mutex::new(HashMap::new()),
+            webhook_sender: None,
+        };
+        let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let call = |who: usize, method: &str, path: &str, body: &str| {
+            let response = dispatch(
+                &Request {
+                    method: method.into(),
+                    path: path.into(),
+                    authorization: Some(format!("Bearer {}", secrets[who].2)),
+                    content_type: (!body.is_empty()).then(|| "application/json".to_owned()),
+                    body: body.as_bytes().to_vec(),
+                },
+                peer,
+                &state,
+            );
+            (
+                response.status,
+                serde_json::from_slice::<Value>(&response.body).unwrap(),
+            )
+        };
+        assert_eq!(
+            call(2, "GET", "/v1/network", "").0,
+            "404 Not Found",
+            "off until the console turns it on"
+        );
+        store.set_setting("modules", "network").unwrap();
+        assert_eq!(call(0, "GET", "/v1/network", "").0, "200 OK");
+        let device = r#"{"name":"Switch","kind":"switch","addresses":["192.168.1.2"]}"#;
+        assert_eq!(
+            call(1, "POST", "/v1/network/devices", device).0,
+            "403 Forbidden",
+            "operators do not edit the inventory"
+        );
+        let (status, made) = call(2, "POST", "/v1/network/devices", device);
+        assert_eq!(status, "200 OK");
+        assert_eq!(call(0, "GET", "/v1/network/devices", "").1["total"], 1);
+        assert_eq!(call(0, "POST", "/v1/network/scan", "").0, "403 Forbidden");
+        assert_eq!(
+            call(1, "POST", "/v1/network/scan", "").0,
+            "200 OK",
+            "operators can ask for discovery"
+        );
+        assert!(
+            lumen_netmon::Netmon::open(&path)
+                .unwrap()
+                .take_scan_request()
+                .unwrap()
+        );
+        assert_eq!(
+            call(0, "GET", &format!("/v1/network/devices/{}", made["id"]), "").0,
+            "200 OK"
+        );
+        let (status, body) = call(2, "POST", "/v1/network/devices", r#"{"nope":1}"#);
+        assert_eq!(
+            (status, body),
+            ("400 Bad Request", json!({"error": "invalid request"}))
+        );
+        assert_eq!(call(2, "GET", "/v1/networks", "").0, "404 Not Found");
     }
 
     #[tokio::test]

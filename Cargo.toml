@@ -9,6 +9,7 @@ members = [
   "crates/lumen-core",
   "crates/lumen-dhcp",
   "crates/lumen-mdns",
+  "crates/lumen-netmon",
   "crates/lumen-proto",
   "crates/lumen-resolver",
   "crates/lumen-store",
