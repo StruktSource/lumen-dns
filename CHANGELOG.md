@@ -4,6 +4,8 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-17
+
 ### Added
 
 - **Full DNSSEC lifecycle for operator zones.** Zones can use separate KSK/ZSK files, pre-publish successor keys, and schedule their handoff with `rollover_at_unix`. KSKs sign DNSKEY while ZSKs sign zone data. Dynamic RFC 2136 zones and each split-horizon view can now be signed, and daily signature renewal remains active.
