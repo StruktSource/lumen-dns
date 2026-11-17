@@ -77,6 +77,7 @@ const ASSETS: &[Asset] = &[
     asset!("/assets/js/view-modules.js", JS, "js/view-modules.js"),
     asset!("/assets/js/view-trafficmap.js", JS, "js/view-trafficmap.js"),
     asset!("/assets/js/view-dhcp.js", JS, "js/view-dhcp.js"),
+    asset!("/assets/js/view-ipam.js", JS, "js/view-ipam.js"),
     asset!("/assets/js/view-filtering.js", JS, "js/view-filtering.js"),
     asset!("/assets/js/view-dns.js", JS, "js/view-dns.js"),
     asset!("/assets/js/view-users.js", JS, "js/view-users.js"),
@@ -155,6 +156,8 @@ impl BoundWeb {
             tasks.spawn(async move { sampler.run_sampler().await });
             let writer = Arc::clone(console);
             tasks.spawn(async move { writer.run_history_writer().await });
+            let ipam = Arc::clone(console);
+            tasks.spawn(async move { ipam.run_ipam_sync().await });
         }
         for (listener, tls) in self.listeners {
             tasks.spawn(serve_listener(

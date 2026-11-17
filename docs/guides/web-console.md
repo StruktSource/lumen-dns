@@ -186,6 +186,10 @@ Modules are big, optional features. Each one is **off until an administrator tur
 
 Shows the networks of the [DHCP server](dhcp.md), how full each one is, and every lease with its name, device, and expiry. Read-only and for administrators; the configuration decides what is served.
 
+### IPAM
+
+An inventory of your subnets, addresses, VLANs, and locations, with the next free address picked for you and DHCP leases shown beside it. It records what you use and never changes a device or your network. Optional DNS names need `ipam.dns_domain`. See [IP address management](ipam.md).
+
 ### Traffic map
 
 An interactive tree of your DNS traffic: the Lumen server at the top, then domain endings (`.com`, `.co.uk`), then the domains under each one.

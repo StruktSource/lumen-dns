@@ -12,7 +12,10 @@ L.MODULES = [
     needs: 'Needs query history. Turn it on under Activity.' },
   { id: 'dhcp', page: 'dhcp', name: 'DHCP', icon: 'server',
     text: 'The DHCP server for IPv4 and IPv6 built into Lumen. Devices that get an address also get a DNS name, so you can reach them by name. See your networks and every lease at a glance.',
-    needs: 'Needs dhcp.enabled in the configuration. Lumen never hands out addresses on its own.' }];
+    needs: 'Needs dhcp.enabled in the configuration. Lumen never hands out addresses on its own.' },
+  { id: 'ipam', page: 'ipam', name: 'IPAM', icon: 'overview',
+    text: 'IP address management: your subnets, VLANs and locations in one inventory, with the next free address picked for you. It records what you use and shows DHCP leases beside it, and it never changes a device or a network.',
+    needs: 'Works with or without the DHCP module. Set ipam.dns_domain to publish names in DNS.' }];
 
 L.loadModules = async () => { L.S.modules = await L.api('GET', '/api/modules'); L.S.modulesAt = Date.now(); };
 L.moduleOn = id => !!L.S.modules?.enabled?.includes(id);
@@ -33,6 +36,11 @@ const preview = id => {
     s.append(sv('path', { class: 'mod-edge', d: 'M120 34V52M120 52H48V76M120 52V76M120 52H192V76', fill: 'none', pathLength: '1' }));
     s.append(sv('rect', { class: 'mod-n root', x: 92, y: 14, width: 56, height: 20 }));
     [48, 120, 192].forEach(x => s.append(sv('rect', { class: 'mod-n leaf', x: x - 22, y: 76, width: 44, height: 16 })));
+    return s;
+  }
+  if (id === 'ipam') {
+    const s = sv('svg', { class: 'mod-art', viewBox: '0 0 240 120', 'aria-hidden': 'true' });
+    [[24, 20, 192], [24, 44, 120], [24, 68, 156], [24, 92, 72]].forEach(([x, y, w], i) => { s.append(sv('rect', { class: 'mod-n leaf', x, y, width: 192, height: 14 })); s.append(sv('rect', { class: i === 1 ? 'mod-n bad' : 'mod-n root', x, y, width: w * 0.8, height: 14 })); });
     return s;
   }
   if (id !== 'traffic-map') return null;

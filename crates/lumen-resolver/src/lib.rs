@@ -115,6 +115,8 @@ pub struct Resolver {
     notifications: Vec<(Name, Vec<SocketAddr>)>,
     challenges: Arc<Challenges>,
     hosts: Arc<Hosts>,
+    /// Names given to addresses in the console's IPAM module.
+    ipam_hosts: Arc<Hosts>,
     /// A multicast DNS bridge, set once after startup when `[mdns]` is on.
     bridge: std::sync::OnceLock<Arc<dyn Bridge>>,
     resigners: Resigners,
@@ -681,6 +683,7 @@ impl Resolver {
             notifications,
             challenges: Arc::default(),
             hosts: Arc::new(Hosts::new(config.dhcp.domain.as_deref())),
+            ipam_hosts: Arc::new(Hosts::new(config.ipam.dns_domain.as_deref())),
             bridge: std::sync::OnceLock::new(),
             resigners: Resigners::default(),
             metrics,
@@ -719,6 +722,12 @@ impl Resolver {
         Arc::clone(&self.hosts)
     }
 
+    /// The names published for IPAM addresses.
+    #[must_use]
+    pub fn ipam_hosts(&self) -> Arc<Hosts> {
+        Arc::clone(&self.ipam_hosts)
+    }
+
     /// Where an ACME client publishes DNS-01 challenge values for this resolver to answer.
     #[must_use]
     pub fn challenges(&self) -> Arc<Challenges> {
@@ -742,7 +751,11 @@ impl Resolver {
         protocol: Transport,
         maximum: usize,
     ) -> Result<Vec<u8>, String> {
-        if let Some(response) = self.hosts.answer(query) {
+        if let Some(response) = self
+            .hosts
+            .answer(query)
+            .or_else(|| self.ipam_hosts.answer(query))
+        {
             return response
                 .to_vec()
                 .map_err(|_| "cannot encode host response".into());

@@ -533,6 +533,17 @@ impl Drop for ActiveQuery<'_> {
 }
 
 impl lumen_web::Host for Service {
+    fn ipam_dns_domain(&self) -> Option<String> {
+        self.resolver
+            .ipam_hosts()
+            .domain()
+            .map(|domain| domain.trim_end_matches('.').to_owned())
+    }
+
+    fn ipam_dns_sync(&self, entries: &[(String, std::net::IpAddr)]) {
+        self.resolver.ipam_hosts().replace(entries);
+    }
+
     fn dhcp_reconfigure(&self, ip: std::net::IpAddr, info_only: bool) -> Result<(), String> {
         self.dhcp
             .get()

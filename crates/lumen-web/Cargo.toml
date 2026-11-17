@@ -14,9 +14,11 @@ hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["http1", "http2", "server-auto", "tokio"] }
 lumen-config = { path = "../lumen-config" }
 lumen-filter = { path = "../lumen-filter" }
+lumen-ipam = { path = "../lumen-ipam" }
 lumen-store = { path = "../lumen-store" }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
 sha2.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 subtle.workspace = true
 toml = "1.1"

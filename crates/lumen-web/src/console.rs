@@ -26,6 +26,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod ipam;
+
 pub(crate) type Reply = Response<Full<Bytes>>;
 
 const COOKIE_NAME: &str = "lumen_session";
@@ -328,6 +330,9 @@ impl Console {
         let store = Store::open(&self.state)?;
         self.host
             .set_history(runtime_settings(store.history_prefs()));
+        if enabled_modules(&store).contains(&"ipam") {
+            self.ipam_sync_dns();
+        }
         if store.user_count()? == 0 {
             if let Some(code) = store.setting("setup_code")? {
                 return Ok(Some(code));
@@ -491,6 +496,7 @@ impl Console {
             ("DELETE", ["users", name]) => self.remove_user(&mut store, &ctx, name),
             ("PUT", ["devices"]) => self.put_device(&mut store, &ctx),
             ("DELETE", ["devices", id]) => self.delete_device(&mut store, &ctx, id),
+            (_, ["ipam", rest @ ..]) => self.ipam_route(&mut store, &ctx, method.as_str(), rest),
             ("GET", ["dhcp"]) => self.dhcp(&store),
             ("POST", ["dhcp", "reconfigure"]) => self.dhcp_reconfigure(&mut store, &ctx),
             ("GET", ["config"]) => config_json(&store),
@@ -2371,7 +2377,7 @@ fn language(store: &Store) -> Option<String> {
 }
 
 /// Optional features an administrator can switch on. Every module is off by default.
-const MODULES: &[&str] = &["traffic-map", "dhcp"];
+const MODULES: &[&str] = &["traffic-map", "dhcp", "ipam"];
 
 /// The enabled modules, in catalog order. Unknown names in storage are ignored.
 fn enabled_modules(store: &Store) -> Vec<&'static str> {
@@ -2695,8 +2701,16 @@ mod tests {
         recent: Mutex<Vec<QueryRecord>>,
         unsaved: Mutex<Vec<QueryRecord>>,
         oidc: Mutex<Option<lumen_config::Oidc>>,
+        ipam_domain: Mutex<Option<String>>,
+        ipam_names: Mutex<Vec<(String, IpAddr)>>,
     }
     impl Host for Stub {
+        fn ipam_dns_domain(&self) -> Option<String> {
+            self.ipam_domain.lock().unwrap().clone()
+        }
+        fn ipam_dns_sync(&self, entries: &[(String, IpAddr)]) {
+            *self.ipam_names.lock().unwrap() = entries.to_vec();
+        }
         fn oidc(&self) -> Option<lumen_config::Oidc> {
             self.oidc.lock().unwrap().clone()
         }
@@ -4511,6 +4525,186 @@ mod tests {
     }
 
     #[test]
+    fn the_ipam_module_manages_subnets_vlans_locations_and_allocates_atomically() {
+        let f = fixture();
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let send = |method: Method, path: &str, payload: &str| {
+            body(call(&f, method, path, session, payload, "127.0.0.1"))
+        };
+        assert_eq!(
+            send(Method::GET, "/api/ipam", "").0,
+            StatusCode::NOT_FOUND,
+            "off by default"
+        );
+        send(
+            Method::PUT,
+            "/api/modules",
+            r#"{"id":"ipam","enabled":true}"#,
+        );
+        let (status, site) = send(
+            Method::POST,
+            "/api/ipam/locations",
+            r#"{"kind":"site","name":"HQ"}"#,
+        );
+        assert_eq!(status, StatusCode::OK);
+        let (_, vlan) = send(
+            Method::POST,
+            "/api/ipam/vlans",
+            &json!({"vid": 10, "name": "Users", "location_id": site["id"]}).to_string(),
+        );
+        assert_eq!(
+            send(
+                Method::POST,
+                "/api/ipam/vlans",
+                &json!({"vid": 10, "name": "Again", "location_id": site["id"]}).to_string()
+            )
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status, subnet) = send(
+            Method::POST,
+            "/api/ipam/subnets",
+            &json!({"cidr": "192.168.1.0/24", "name": "LAN", "vlan_id": vlan["id"], "location_id": site["id"], "gateway": "192.168.1.1"}).to_string(),
+        );
+        assert_eq!(status, StatusCode::OK, "{subnet}");
+        assert_eq!(
+            send(
+                Method::POST,
+                "/api/ipam/subnets",
+                r#"{"cidr":"192.168.1.0/24","name":"dup"}"#
+            )
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            send(
+                Method::POST,
+                "/api/ipam/subnets",
+                r#"{"cidr":"x","name":"bad","nope":1}"#
+            )
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let allocate = format!("/api/ipam/subnets/{}/allocate", subnet["id"]);
+        let (_, first) = send(Method::POST, &allocate, r#"{"hostname":"nas"}"#);
+        let (_, second) = send(Method::POST, &allocate, "{}");
+        assert_eq!(first["ip"], json!("192.168.1.2"), "the gateway is skipped");
+        assert_eq!(second["ip"], json!("192.168.1.3"));
+        // DNS publishing needs ipam.dns_domain, which the test host does not have.
+        assert_eq!(
+            send(Method::POST, &allocate, r#"{"hostname":"x","dns":true}"#).0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            send(
+                Method::PUT,
+                "/api/ipam/addresses",
+                r#"{"ip":"192.168.1.50","state":"reserved"}"#
+            )
+            .0,
+            StatusCode::OK
+        );
+        let (_, listed) = send(Method::GET, "/api/ipam/addresses?state=reserved", "");
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        let (_, overview) = send(Method::GET, "/api/ipam", "");
+        assert_eq!(overview["overview"]["assigned"], json!(2));
+        assert_eq!(overview["overview"]["subnets"][0]["free"], json!("250"));
+        assert_eq!(overview["dhcp"], json!(false));
+        assert_eq!(
+            send(Method::DELETE, "/api/ipam/addresses/192.168.1.50", "").0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(Method::DELETE, "/api/ipam/addresses/192.168.1.50", "").0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(
+                Method::DELETE,
+                &format!("/api/ipam/vlans/{}", vlan["id"]),
+                ""
+            )
+            .0,
+            StatusCode::BAD_REQUEST,
+            "a subnet uses it"
+        );
+        assert_eq!(send(Method::GET, "/api/ipam/conflicts", "").1, json!([]));
+        assert_eq!(
+            send(Method::GET, "/api/ipam/nothing", "").0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn ipam_publishes_names_in_dns_only_when_asked_and_only_for_administrators() {
+        let f = fixture();
+        *f.host.ipam_domain.lock().unwrap() = Some("net.example".into());
+        let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
+        let session = Some((cookie.as_str(), csrf.as_str()));
+        let send = |method: Method, path: &str, payload: &str| {
+            body(call(&f, method, path, session, payload, "127.0.0.1"))
+        };
+        send(
+            Method::PUT,
+            "/api/modules",
+            r#"{"id":"ipam","enabled":true}"#,
+        );
+        let (_, subnet) = send(
+            Method::POST,
+            "/api/ipam/subnets",
+            r#"{"cidr":"10.7.0.0/24","name":"Lab"}"#,
+        );
+        let allocate = format!("/api/ipam/subnets/{}/allocate", subnet["id"]);
+        send(Method::POST, &allocate, r#"{"hostname":"quiet"}"#);
+        assert!(
+            f.host.ipam_names.lock().unwrap().is_empty(),
+            "DNS publishing is opt-in per address"
+        );
+        let (status, row) = send(Method::POST, &allocate, r#"{"hostname":"nas","dns":true}"#);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            *f.host.ipam_names.lock().unwrap(),
+            vec![("nas".to_owned(), "10.7.0.2".parse().unwrap())]
+        );
+        send(
+            Method::PUT,
+            "/api/ipam/addresses",
+            r#"{"ip":"10.7.0.2","state":"reserved","hostname":"nas","dns":false}"#,
+        );
+        assert!(
+            f.host.ipam_names.lock().unwrap().is_empty(),
+            "turning it off withdraws the name"
+        );
+        send(
+            Method::PUT,
+            "/api/ipam/addresses",
+            r#"{"ip":"10.7.0.2","state":"assigned","hostname":"nas","dns":true}"#,
+        );
+        assert_eq!(f.host.ipam_names.lock().unwrap().len(), 1);
+        send(
+            Method::DELETE,
+            &format!("/api/ipam/addresses/{}", row["ip"].as_str().unwrap()),
+            "",
+        );
+        assert!(
+            f.host.ipam_names.lock().unwrap().is_empty(),
+            "releasing withdraws the name"
+        );
+        // Ordinary accounts cannot read or change the inventory.
+        let (cookie, csrf) = sign_in(&f, "anna", "anna passphrase 123");
+        let user = Some((cookie.as_str(), csrf.as_str()));
+        assert_eq!(
+            call(&f, Method::GET, "/api/ipam", user, "", "127.0.0.1").status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&f, Method::POST, &allocate, user, "{}", "127.0.0.1").status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
     fn modules_are_off_until_an_administrator_turns_them_on() {
         let f = fixture();
         let (cookie, csrf) = sign_in(&f, "admin", "correct horse battery");
@@ -4527,7 +4721,7 @@ mod tests {
             .1
         };
         assert_eq!(get()["enabled"], json!([]));
-        assert_eq!(get()["available"], json!(["traffic-map", "dhcp"]));
+        assert_eq!(get()["available"], json!(["traffic-map", "dhcp", "ipam"]));
         let put = |payload: &str| {
             call(
                 &f,

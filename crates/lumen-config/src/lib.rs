@@ -30,6 +30,9 @@ pub struct Config {
     /// Optional DHCP server (IPv4 and IPv6) that also feeds Lumen's DNS. Off by default.
     pub dhcp: Dhcp,
     pub mdns: Mdns,
+    /// IP address management settings. The inventory itself lives in the web console's state and
+    /// is switched on as a console module; this only holds what needs the daemon.
+    pub ipam: Ipam,
     /// Authoritative zones served from operator-managed records.
     pub zones: Vec<Zone>,
     /// Conditional forwarding: names under `domain` go to these resolvers.
@@ -344,6 +347,18 @@ impl Default for Mdns {
             group6: None,
         }
     }
+}
+
+/// IP address management (the console's IPAM module). The inventory is stored with the console
+/// state; this section only names where its DNS records go.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Ipam {
+    /// DNS domain for names given to addresses in IPAM, for example `net.home.example` (no
+    /// trailing dot). Addresses with a host name and DNS publishing on become `name.<domain>`
+    /// (A or AAAA) with a matching PTR. Unset publishes nothing. Must not overlap a zone, the
+    /// DHCP domain or the mDNS domain.
+    pub dns_domain: Option<String>,
 }
 
 /// Optional DHCP server. It never starts on its own: nothing is served until `enabled` is true,
@@ -1620,6 +1635,7 @@ impl Config {
         self.validate_dnscrypt()?;
         self.validate_acme()?;
         self.validate_dhcp()?;
+        self.validate_ipam()?;
         self.validate_mdns()?;
         self.validate_zones()?;
         if self.listen.allow_clients.is_empty() || self.listen.allow_clients.len() > 128 {
@@ -2057,6 +2073,43 @@ impl Config {
             {
                 return Err("mdns.domain overlaps a zone or the dhcp.domain".into());
             }
+        }
+        Ok(())
+    }
+
+    fn validate_ipam(&self) -> Result<(), String> {
+        let Some(domain) = self.ipam.dns_domain.as_deref() else {
+            return Ok(());
+        };
+        let label_ok = |label: &str| {
+            (1..=63).contains(&label.len())
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        };
+        if domain.len() > 200 || domain.ends_with('.') || !domain.split('.').all(label_ok) {
+            return Err("ipam.dns_domain must be a DNS name without a trailing dot".into());
+        }
+        let lower = domain.to_ascii_lowercase();
+        let overlaps = |other: &str| {
+            let other = other.to_ascii_lowercase();
+            other == lower
+                || other.ends_with(&format!(".{lower}"))
+                || lower.ends_with(&format!(".{other}"))
+        };
+        let last = lower.rsplit('.').next().unwrap_or_default();
+        if last == "local"
+            || last == "arpa"
+            || self.zones.iter().any(|zone| overlaps(&zone.name))
+            || (self.dhcp.enabled && self.dhcp.domain.as_deref().is_some_and(overlaps))
+            || (self.mdns.enabled && self.mdns.domain.as_deref().is_some_and(overlaps))
+        {
+            return Err(
+                "ipam.dns_domain must not be .local or .arpa, or overlap a zone, dhcp.domain or mdns.domain"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -3040,6 +3093,24 @@ mod tests {
         timing.takeover_secs = 1;
         pair.dhcp.failover = Some(timing);
         assert!(pair.validate_dhcp().is_err());
+    }
+
+    #[test]
+    fn ipam_domain_is_optional_and_must_not_overlap_other_names() {
+        assert!(Config::default().validate_ipam().is_ok());
+        let with = |domain: &str| {
+            let mut config = Config::default();
+            config.ipam.dns_domain = Some(domain.into());
+            config
+        };
+        assert!(with("net.home.example").validate_ipam().is_ok());
+        for bad in ["", "net.", "a b.example", "x.local", "10.in-addr.arpa"] {
+            assert!(with(bad).validate_ipam().is_err(), "{bad}");
+        }
+        let mut config = with("net.home.example");
+        config.dhcp.enabled = true;
+        config.dhcp.domain = Some("home.example".into());
+        assert!(config.validate_ipam().is_err());
     }
 
     #[test]

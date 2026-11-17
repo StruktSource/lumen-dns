@@ -121,6 +121,14 @@ Off unless `enabled = true`. See [Multicast DNS bridge](../guides/mdns.md).
 
 At least one of `domain`, `reflect` and `publish_name` is required.
 
+## `[ipam]`
+
+The IPAM inventory lives in the web console's state and is switched on as a console module. This section only says where its DNS names go. See [IP address management](../guides/ipam.md).
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `dns_domain` | unset | DNS name without a trailing dot, not `.local`, not under `.arpa`, no overlap with a zone, `dhcp.domain`, or `mdns.domain` | Addresses in IPAM with a host name and DNS publishing on become `name.<dns_domain>` (`A`/`AAAA`) with a matching `PTR`. Unset publishes nothing |
+
 ## Authoritative zones, forwarders, and TSIG keys
 
 Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these are off until you add a table.

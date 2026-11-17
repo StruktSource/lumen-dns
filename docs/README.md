@@ -16,6 +16,7 @@ Welcome! This is the map to everything written about Lumen, a self-hosted DNS re
 | Block ads, trackers, or adult sites | [Filtering](guides/filtering.md) |
 | Give my devices and services their own names | [Your own DNS zones](guides/authoritative-dns.md#easy-local-dns-manager) |
 | Hand out IP addresses on my network | [DHCP server](guides/dhcp.md) |
+| Keep track of subnets, VLANs, and addresses | [IP address management](guides/ipam.md) |
 | Manage everything from a browser | [Web console](guides/web-console.md) |
 
 ## Getting started
@@ -31,6 +32,7 @@ Welcome! This is the map to everything written about Lumen, a self-hosted DNS re
 - [Encrypted DNS](guides/encrypted-dns.md): serve DNS-over-TLS, DNS-over-HTTPS, DNS-over-HTTP/3, DNS-over-QUIC, and DNSCrypt.
 - [Multicast DNS bridge](guides/mdns.md): answer for `.local` devices under a domain and repeat mDNS between networks (off by default).
 - [DHCP server](guides/dhcp.md): hand out IPv4 and IPv6 addresses and turn every lease into a DNS name (off by default).
+- [IP address management](guides/ipam.md): an inventory of subnets, addresses, VLANs, and locations, with next-free-address allocation (optional module).
 - [Automatic certificates (ACME)](guides/certificates.md): get and renew the encrypted-DNS certificate from Let's Encrypt or another ACME CA.
 - [Your own DNS zones](guides/authoritative-dns.md): the console's Local DNS manager, authoritative zones, DNSSEC signing, split-horizon views, conditional forwarding, dynamic updates, and zone transfers.
 - [Filtering](guides/filtering.md): block lists, rules, per-device profiles, and schedules.

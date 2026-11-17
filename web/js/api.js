@@ -56,7 +56,8 @@ const NEEDS = {
   system: () => [L.loadStatus(), L.loadRevisions(), L.loadSettings(), L.S.draft ? null : L.loadConfig()],
   /* The map's code is only fetched, and its data only loaded, while the module is on and its page is open. */
   trafficmap: () => [L.moduleOn('traffic-map') ? L.lazy('/assets/js/view-trafficmap.js').then(() => L.loadTraffic()) : null],
-  dhcp: () => [L.moduleOn('dhcp') ? L.lazy('/assets/js/view-dhcp.js').then(() => L.loadDhcp()) : null]
+  dhcp: () => [L.moduleOn('dhcp') ? L.lazy('/assets/js/view-dhcp.js').then(() => L.loadDhcp()) : null],
+  ipam: () => [L.moduleOn('ipam') ? L.lazy('/assets/js/view-ipam.js').then(() => L.loadIpam()) : null]
 };
 /* Load a script once, on demand. */
 const scripts = new Map();

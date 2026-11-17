@@ -83,6 +83,13 @@ Tests bind ephemeral local sockets and use in-process DNS fixtures. They do not 
 - Multi-list failure atomicity, concurrent snapshot readers, periodic refresh, and rollback hold
 - Blocking over all five transports on IPv4 and IPv6, per-client decisions before shared cache hits, failed startup, refresh, and rollback
 
+**Addressing (IPAM)**
+
+- Subnet normalization, uniqueness, nesting and parent lookup, gateway and reference checks; VLAN ID uniqueness per location; location trees without loops
+- Manual assignment and reservation rules (network and broadcast, DHCP leases, duplicate names), release, and adoption of addresses by a more specific new subnet
+- Allocation strategies for IPv4 and IPv6, skipping recorded, leased, gateway, and child-subnet addresses, with 8 threads on separate connections never receiving the same address, and persistence across reopening
+- Utilization, conflict detection, and DNS entries; console and management API routes, roles, the module switch, generic error bodies, and name publication and withdrawal
+
 ## Results by date
 
 ### 2026-11-17: operator-zone DNSSEC lifecycle

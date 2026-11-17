@@ -149,6 +149,12 @@ pub trait Host: Send + Sync + 'static {
     fn dhcp(&self) -> Option<DhcpInfo> {
         None
     }
+    /// The DNS domain IPAM names are published under (`ipam.dns_domain`), when set.
+    fn ipam_dns_domain(&self) -> Option<String> {
+        None
+    }
+    /// Replace the names published for IPAM addresses with exactly these.
+    fn ipam_dns_sync(&self, _entries: &[(String, IpAddr)]) {}
     /// Ask the device that holds `ip` to renew now (`DHCPv6` Reconfigure, or `DHCPFORCERENEW`
     /// for an IPv4 address).
     ///

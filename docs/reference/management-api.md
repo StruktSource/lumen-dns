@@ -47,9 +47,9 @@ Send `Authorization: Bearer TOKEN`. Token comparison is constant-time. Each toke
 
 | Role | Can do |
 | :--- | :--- |
-| `viewer` | Read status and devices |
-| `operator` | Everything a viewer can, plus refresh and roll back filter lists |
-| `admin` | Everything an operator can, plus audit, config, devices, reload, and shutdown |
+| `viewer` | Read status, devices, and the IPAM inventory |
+| `operator` | Everything a viewer can, plus refresh and roll back filter lists, and assign, reserve, allocate, and release IPAM addresses |
+| `admin` | Everything an operator can, plus audit, config, devices, IPAM subnets, VLANs, and locations, reload, and shutdown |
 
 **Audit log.** Every accepted or rejected call is recorded with the token name, role, action, target, outcome, and source IP. Tokens and request bodies are never recorded. The newest 10,000 events are kept.
 
@@ -67,6 +67,25 @@ Send `Authorization: Bearer TOKEN`. Token comparison is constant-time. Each toke
 | `POST /v1/reload` | admin | Queue a configuration reload |
 | `POST /v1/config` | admin | Stage an `application/toml` body and queue a reload |
 | `POST /v1/shutdown` | admin | Queue a clean shutdown |
+
+### IPAM
+
+Routes under `/v1/ipam` manage the inventory of the optional [IPAM module](../guides/ipam.md). They answer `404` until an administrator switches the module on in the console. Bodies are `application/json`. Names given to addresses reach DNS, and DHCP leases are taken into account, through the running daemon within a few seconds.
+
+| Method and path | Role | Result |
+| :--- | :--- | :--- |
+| `GET /v1/ipam` | viewer | Subnet utilization and totals |
+| `GET /v1/ipam/subnets`, `/vlans`, `/locations` | viewer | The lists |
+| `GET /v1/ipam/addresses?subnet=ID&location=ID&state=assigned\|reserved\|leased\|available&q=TEXT&limit=N` | viewer | Addresses (default 500, at most 2000). `available` needs a `subnet` |
+| `GET /v1/ipam/conflicts` | viewer | Addresses that IPAM and DHCP both claim |
+| `POST /v1/ipam/subnets/ID/allocate` | operator | Pick and record the next free address. Body: optional `strategy` (`first`, `last`, `random`), `state` (`assigned`, `reserved`), `hostname`, `description`, `device`, `location_id`, `dns` |
+| `PUT /v1/ipam/addresses` | operator | Assign or reserve a given address. Body: `ip`, `state`, and the same optional fields |
+| `DELETE /v1/ipam/addresses/IP` | operator | Release an address |
+| `POST /v1/ipam/subnets`, `PUT`/`DELETE /v1/ipam/subnets/ID` | admin | Subnets. Body: `cidr` (create only), `name`, `description`, `group`, `vlan_id`, `location_id`, `gateway`, `metadata` |
+| `POST /v1/ipam/vlans`, `PUT`/`DELETE /v1/ipam/vlans/ID` | admin | VLANs. Body: `vid`, `name`, `description`, `location_id` |
+| `POST /v1/ipam/locations`, `PUT`/`DELETE /v1/ipam/locations/ID` | admin | Locations. Body: `kind` (`site`, `building`, `floor`, `room`, `rack`), `name`, `description`, `parent_id` |
+
+An allocation is atomic: concurrent requests never receive the same address. Refusals return `400` with a short reason, such as the subnet having no free address.
 
 **Limits.** Headers stop at 16 KiB and bodies at 64 KiB. Chunked bodies are rejected, and connections and reads have hard time limits. Error bodies are generic JSON and never include config, database, token, or parser details.
 

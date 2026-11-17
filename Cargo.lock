@@ -1416,6 +1416,7 @@ version = "0.7.0"
 dependencies = [
  "lumen-config",
  "lumen-filter",
+ "lumen-ipam",
  "lumen-store",
  "reqwest",
  "ring",
@@ -1521,6 +1522,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-ipam"
+version = "0.7.0"
+dependencies = [
+ "ipnet",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "lumen-mdns"
 version = "0.7.0"
 dependencies = [
@@ -1581,10 +1593,12 @@ dependencies = [
  "hyper-util",
  "lumen-config",
  "lumen-filter",
+ "lumen-ipam",
  "lumen-store",
  "rcgen",
  "reqwest",
  "rustls",
+ "serde",
  "serde_json",
  "sha2",
  "subtle",
