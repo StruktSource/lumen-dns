@@ -814,7 +814,19 @@ impl InnerInMemory {
         inception: OffsetDateTime,
     ) -> DnsSecResult<()> {
         rr_set.clear_rrsigs();
-        for signer in secure_keys {
+        // LUMEN PATCH: a KSK signs DNSKEY; a separate ZSK signs other zone data.
+        let has_separate_zsk = secure_keys
+            .iter()
+            .any(|signer| signer.dnskey().zone_key() && !signer.dnskey().secure_entry_point());
+        let is_dnskey = rr_set.record_type() == RecordType::DNSKEY;
+        for signer in secure_keys.iter().filter(|signer| {
+            if is_dnskey {
+                signer.dnskey().secure_entry_point() || !has_separate_zsk
+            } else {
+                signer.dnskey().zone_key()
+                    && (!signer.dnskey().secure_entry_point() || !has_separate_zsk)
+            }
+        }) {
             debug!(
                 "signing rr_set: {}, {} with: {}",
                 rr_set.name(),

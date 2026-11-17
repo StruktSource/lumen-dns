@@ -85,6 +85,13 @@ Tests bind ephemeral local sockets and use in-process DNS fixtures. They do not 
 
 ## Results by date
 
+### 2026-11-17: operator-zone DNSSEC lifecycle
+
+- Focused config and resolver tests pass: separate KSK/ZSK roles, successor-set validation, and pre-/post-handoff signer selection.
+- Focused socket tests pass with real signatures: KSK signs DNSKEY only; ZSK signs zone data; a scheduled combined-key handoff retires the old key without restart; dynamic and split-horizon zones serve verifiable signed answers.
+- `./scripts/dev.sh check` passed the full local format, lint, workspace test, and documentation-test suite. This includes 36 config tests, 56 resolver tests, and 37 service tests.
+- Not yet established: hosted cross-platform CI, a public parent/registrar KSK handoff, long-running rollover timing, or recovery from storage and clock faults.
+
 ### 2026-10-29: Phase 1 resolver core
 
 Native host macOS ARM64 and OrbStack Linux ARM64.

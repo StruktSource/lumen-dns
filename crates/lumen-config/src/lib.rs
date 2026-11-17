@@ -69,7 +69,7 @@ pub struct Zone {
     pub transfer_keys: Vec<String>,
     /// Secondary servers to tell (NOTIFY, RFC 1996) when this zone changes, and at startup.
     pub notify: Vec<SocketAddr>,
-    /// Sign this zone with DNSSEC. Only plain zones: no views, journal, or transfers.
+    /// Sign this zone with DNSSEC. Plain, dynamic, and split-horizon zones are supported.
     pub dnssec: Option<ZoneSigning>,
 }
 
@@ -171,12 +171,12 @@ pub enum Denial {
     Nsec3,
 }
 
-/// How Lumen signs one zone: one combined signing key (or two during a rollover), `NSEC` or
-/// `NSEC3` denial of existence, and signatures that are renewed every day.
+/// How Lumen signs one zone: either one legacy combined key or separate KSK/ZSK keys, optional
+/// pre-published successor keys, `NSEC` or `NSEC3` denial, and daily signature renewal.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ZoneSigning {
-    /// PKCS#8 PEM private key. Create one with `lumen --zone-key FILE --zone NAME`.
+    /// Legacy combined PKCS#8 PEM key. Mutually exclusive with `ksk_file` and `zsk_file`.
     pub key_file: PathBuf,
     pub algorithm: SigningAlgorithm,
     /// How long each signature stays valid, in days (2 to 90).
@@ -187,6 +187,24 @@ pub struct ZoneSigning {
     pub next_key_file: Option<PathBuf>,
     /// Algorithm of `next_key_file`. Defaults to `algorithm`; set it to change algorithm.
     pub next_algorithm: Option<SigningAlgorithm>,
+    /// Key-signing key. Set together with `zsk_file` instead of `key_file`.
+    pub ksk_file: Option<PathBuf>,
+    pub ksk_algorithm: SigningAlgorithm,
+    /// Zone-signing key. Set together with `ksk_file` instead of `key_file`.
+    pub zsk_file: Option<PathBuf>,
+    pub zsk_algorithm: SigningAlgorithm,
+    /// Pre-published successor KSK. Before `rollover_at_unix`, both KSKs are published and sign
+    /// DNSKEY. At that time the old KSK is retired without a service reload.
+    pub next_ksk_file: Option<PathBuf>,
+    pub next_ksk_algorithm: Option<SigningAlgorithm>,
+    /// Pre-published successor ZSK. Before `rollover_at_unix`, both ZSKs sign zone data. At that
+    /// time the old ZSK is retired without a service reload.
+    pub next_zsk_file: Option<PathBuf>,
+    pub next_zsk_algorithm: Option<SigningAlgorithm>,
+    /// Unix timestamp for the scheduled successor-key handoff. The operator must update a
+    /// parent DS before a KSK handoff. Without this field, successor keys stay in manual
+    /// double-signing mode until configuration is changed.
+    pub rollover_at_unix: Option<u64>,
     pub denial: Denial,
     /// `NSEC3` salt in hex, at most 8 bytes. RFC 9276 advises against a salt, so none is the
     /// default. Only with `denial = "nsec3"`.
@@ -203,6 +221,15 @@ impl Default for ZoneSigning {
             signature_days: 14,
             next_key_file: None,
             next_algorithm: None,
+            ksk_file: None,
+            ksk_algorithm: SigningAlgorithm::default(),
+            zsk_file: None,
+            zsk_algorithm: SigningAlgorithm::default(),
+            next_ksk_file: None,
+            next_ksk_algorithm: None,
+            next_zsk_file: None,
+            next_zsk_algorithm: None,
+            rollover_at_unix: None,
             denial: Denial::Nsec,
             nsec3_salt: None,
             nsec3_opt_out: false,
@@ -632,6 +659,89 @@ pub fn parse_hex(text: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
         .collect()
+}
+
+fn validate_zone_signing(value: &ZoneSigning) -> Result<(), String> {
+    let combined = !value.key_file.as_os_str().is_empty();
+    let split = value.ksk_file.is_some() || value.zsk_file.is_some();
+    if combined == split || !(2..=90).contains(&value.signature_days) {
+        return Err("zone dnssec needs either key_file or both ksk_file and zsk_file, plus 2..=90 signature_days".into());
+    }
+    if split
+        && (value
+            .ksk_file
+            .as_ref()
+            .is_none_or(|path| path.as_os_str().is_empty())
+            || value
+                .zsk_file
+                .as_ref()
+                .is_none_or(|path| path.as_os_str().is_empty()))
+    {
+        return Err("zone dnssec needs both ksk_file and zsk_file".into());
+    }
+    if combined
+        && (value.ksk_file.is_some()
+            || value.zsk_file.is_some()
+            || value.next_ksk_file.is_some()
+            || value.next_zsk_file.is_some()
+            || value.next_ksk_algorithm.is_some()
+            || value.next_zsk_algorithm.is_some())
+    {
+        return Err("combined key_file cannot be mixed with KSK/ZSK fields".into());
+    }
+    if split && (value.next_key_file.is_some() || value.next_algorithm.is_some()) {
+        return Err("separate KSK/ZSK fields cannot use next_key_file".into());
+    }
+    if value
+        .next_key_file
+        .as_ref()
+        .is_some_and(|next| next == &value.key_file || next.as_os_str().is_empty())
+    {
+        return Err("zone dnssec next_key_file must be a different key".into());
+    }
+    if value.next_algorithm.is_some() && value.next_key_file.is_none() {
+        return Err("zone dnssec next_algorithm needs next_key_file".into());
+    }
+    if value.next_ksk_algorithm.is_some() && value.next_ksk_file.is_none() {
+        return Err("zone dnssec next_ksk_algorithm needs next_ksk_file".into());
+    }
+    if value.next_zsk_algorithm.is_some() && value.next_zsk_file.is_none() {
+        return Err("zone dnssec next_zsk_algorithm needs next_zsk_file".into());
+    }
+    let paths: Vec<&PathBuf> = [
+        Some(&value.key_file).filter(|path| !path.as_os_str().is_empty()),
+        value.next_key_file.as_ref(),
+        value.ksk_file.as_ref(),
+        value.zsk_file.as_ref(),
+        value.next_ksk_file.as_ref(),
+        value.next_zsk_file.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let unique: std::collections::HashSet<&PathBuf> = paths.iter().copied().collect();
+    if paths.len() != unique.len() {
+        return Err("zone dnssec key files must be different".into());
+    }
+    if value.rollover_at_unix.is_some()
+        && value.next_key_file.is_none()
+        && value.next_ksk_file.is_none()
+        && value.next_zsk_file.is_none()
+    {
+        return Err("zone dnssec rollover_at_unix needs a successor key".into());
+    }
+    let nsec3 = value.denial == Denial::Nsec3;
+    if !nsec3 && (value.nsec3_salt.is_some() || value.nsec3_opt_out) {
+        return Err("nsec3_salt and nsec3_opt_out need denial = \"nsec3\"".into());
+    }
+    if value
+        .nsec3_salt
+        .as_deref()
+        .is_some_and(|salt| parse_hex(salt).is_none_or(|bytes| bytes.len() > 8))
+    {
+        return Err("nsec3_salt must be 1 to 8 bytes in hex".into());
+    }
+    Ok(())
 }
 
 /// How the certificate authority checks that you control the names.
@@ -1339,8 +1449,12 @@ impl Config {
         }
         for zone in &mut config.zones {
             if let Some(signing) = &mut zone.dnssec {
-                for path in
-                    std::iter::once(&mut signing.key_file).chain(signing.next_key_file.as_mut())
+                for path in std::iter::once(&mut signing.key_file)
+                    .chain(signing.next_key_file.as_mut())
+                    .chain(signing.ksk_file.as_mut())
+                    .chain(signing.zsk_file.as_mut())
+                    .chain(signing.next_ksk_file.as_mut())
+                    .chain(signing.next_zsk_file.as_mut())
                 {
                     if path.is_relative() {
                         *path = base.join(&*path);
@@ -1790,38 +1904,7 @@ impl Config {
                 return Err("transfer_keys must name at most 8 configured tsig_keys".into());
             }
             if let Some(signing) = &zone.dnssec {
-                if signing.key_file.as_os_str().is_empty()
-                    || !(2..=90).contains(&signing.signature_days)
-                {
-                    return Err("zone dnssec needs a key_file and 2..=90 signature_days".into());
-                }
-                if signing
-                    .next_key_file
-                    .as_ref()
-                    .is_some_and(|next| next == &signing.key_file || next.as_os_str().is_empty())
-                {
-                    return Err("zone dnssec next_key_file must be a different key".into());
-                }
-                if signing.next_algorithm.is_some() && signing.next_key_file.is_none() {
-                    return Err("zone dnssec next_algorithm needs next_key_file".into());
-                }
-                let nsec3 = signing.denial == Denial::Nsec3;
-                if !nsec3 && (signing.nsec3_salt.is_some() || signing.nsec3_opt_out) {
-                    return Err("nsec3_salt and nsec3_opt_out need denial = \"nsec3\"".into());
-                }
-                if signing
-                    .nsec3_salt
-                    .as_deref()
-                    .is_some_and(|salt| parse_hex(salt).is_none_or(|bytes| bytes.len() > 8))
-                {
-                    return Err("nsec3_salt must be 1 to 8 bytes in hex".into());
-                }
-                if zone.journal.is_some()
-                    || !zone.views.is_empty()
-                    || !zone.transfer_keys.is_empty()
-                {
-                    return Err("a signed zone cannot have views, a journal, or transfers".into());
-                }
+                validate_zone_signing(signing)?;
             }
             if zone.journal.is_some() {
                 if zone.file.is_none() || !zone.views.is_empty() || zone.update_rules.is_empty() {
@@ -3329,6 +3412,51 @@ preference = "low"
                 s.nsec3_salt = Some("xyz".into());
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn separate_zone_signing_keys_and_schedules_are_complete() {
+        let validate = |signing| {
+            Config {
+                zones: vec![Zone {
+                    name: "a.test".into(),
+                    text: Some("x".into()),
+                    dnssec: Some(signing),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+            .validate_zones()
+        };
+        let split = ZoneSigning {
+            ksk_file: Some("ksk.pem".into()),
+            zsk_file: Some("zsk.pem".into()),
+            ..Default::default()
+        };
+        assert!(validate(split.clone()).is_ok());
+        assert!(
+            validate(ZoneSigning {
+                zsk_file: None,
+                ..split.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate(ZoneSigning {
+                rollover_at_unix: Some(1_900_000_000),
+                ..split.clone()
+            })
+            .is_err(),
+            "a schedule needs a successor"
+        );
+        assert!(
+            validate(ZoneSigning {
+                next_zsk_file: Some("next-zsk.pem".into()),
+                rollover_at_unix: Some(1_900_000_000),
+                ..split
+            })
+            .is_ok()
         );
     }
 

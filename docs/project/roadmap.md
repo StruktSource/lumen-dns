@@ -154,7 +154,7 @@ Principles that shape every decision:
 - [x] Multicast DNS bridge (0.7.0): a discovery proxy (`.local` devices answered under your own domain, service browsing included) and a reflector between interfaces. Opt-in, Linux and macOS. Open: publishing Lumen's own names over mDNS, DNS Push, and per-service reflection filters
 - [x] Dynamic DNS updates (RFC 2136) with TSIG authentication, per-key name and type scope, a SQLite journal, and bounded size
 - [x] Zone transfers over TCP with TSIG-keyed policy and a one-message size bound. Dynamic zones answer IXFR with the differences from the last 32 updates (in memory; a full transfer after a restart or for older serials), NOTIFY is sent to `notify` secondaries at startup and after accepted updates
-- [x] DNSSEC signing for plain operator zones (NSEC3 and double-signature key rollover added in 0.7.0): one combined key (Ed25519 or ECDSA P-256), NSEC, daily signature renewal, `lumen --zone-key` for key creation and the DS record. **Still open:** timer-driven rollover, separate KSK/ZSK, and signing for dynamic or split-horizon zones
+- [x] DNSSEC signing for operator zones: NSEC/NSEC3, daily signature renewal, combined or separate KSK/ZSK roles, manual double signing or a scheduled successor-key handoff, and signed dynamic and split-horizon zones. Dynamic updates re-sign before their new data is served (unreleased). Real parent/registrar handoff remains validation work
 - [x] Native DoH over HTTP/3 listener (`listen.doh3`), same `/dns-query` contract as HTTP/2 DoH. Client-side DoH3 to an upstream is available as `protocol = "h3"` for explicit upstreams and, since 0.7.0, in the automatic provider list for providers that advertise HTTP/3 (untested against the live providers); Lumen does not advertise HTTP/3 itself
 - [x] DNSCrypt v2 **server** (UDP and TCP, both cipher suites, signed rotating certificates). Still open: DNSCrypt as an upstream transport, Anonymized DNSCrypt relays, and interop testing against `dnscrypt-proxy` releases
 - [ ] HTTPS and SVCB record interoperability, including preserving ECH configuration from authoritative answer to browser ([Issue #36](https://github.com/StruktSource/lumen-dns/issues/36)). Started: an end-to-end test proves an HTTPS record with `alpn` and `ech` from an operator zone arrives byte-identical, live and repeated. Forwarded answers (UDP, TCP, and from the cache) are proven the same way. Recursive answers (validation off and on) and DNSSEC-validated forwarded answers are proven the same way (0.7.0). Native ECH is the part still blocked
@@ -198,7 +198,7 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 
 ### Active feature queue
 
-1. **DNSSEC zone lifecycle.** Timer-driven rollover, separate KSK/ZSK keys, and signing for dynamic and split-horizon zones.
+1. **DNSSEC zone lifecycle (implemented, validation open).** Timer-driven successor handoff, separate KSK/ZSK keys, and signing for dynamic and split-horizon zones are implemented. Full hosted CI and a real parent/registrar KSK handoff remain under validation.
 2. **mDNS completion.** Self-publishing, DNS Push, and per-service reflection filters.
 3. **DHCP policy links.** Connect live leases and reservations to device identities and local-DNS policy.
 4. **Device and room manager.** Group multiple IPv4/IPv6 addresses under one identity, add rooms, optional FRITZ!Box discovery, manual matching and corrections, and DNS policy links.

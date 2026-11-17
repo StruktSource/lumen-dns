@@ -3677,6 +3677,167 @@ async fn a_double_signature_rollover_publishes_both_keys_and_signs_with_both() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn separate_ksk_and_zsk_sign_only_their_record_sets() {
+    use hickory_proto::rr::RecordType as T;
+    let dir = tempfile::tempdir().unwrap();
+    let ksk = dir.path().join("ksk.pem");
+    let zsk = dir.path().join("zsk.pem");
+    for path in [&ksk, &zsk] {
+        lumen_resolver::zone_key(path, "signed.test", lumen_config::SigningAlgorithm::Ed25519)
+            .unwrap();
+    }
+    let (mut server, bind) = signed_authority(lumen_config::ZoneSigning {
+        ksk_file: Some(ksk),
+        zsk_file: Some(zsk),
+        ..Default::default()
+    })
+    .await;
+    let key_reply = udp(bind, &dnssec_query("signed.test.", T::DNSKEY)).await;
+    let keys = published_keys(&key_reply);
+    assert_eq!(keys.len(), 2);
+    let ksk_tag = keys
+        .iter()
+        .find(|key| key.secure_entry_point())
+        .unwrap()
+        .calculate_key_tag()
+        .unwrap();
+    let zsk_tag = keys
+        .iter()
+        .find(|key| !key.secure_entry_point())
+        .unwrap()
+        .calculate_key_tag()
+        .unwrap();
+    assert_eq!(
+        verified_signers(&key_reply, &keys, "signed.test.", T::DNSKEY),
+        vec![ksk_tag]
+    );
+    let host = udp(bind, &dnssec_query("host.signed.test.", T::A)).await;
+    assert_eq!(
+        verified_signers(&host, &keys, "host.signed.test.", T::A),
+        vec![zsk_tag]
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn scheduled_zone_key_handoff_retires_the_old_key_without_restart() {
+    use hickory_proto::rr::RecordType as T;
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("old.pem");
+    let next = dir.path().join("next.pem");
+    for path in [&old, &next] {
+        lumen_resolver::zone_key(path, "signed.test", lumen_config::SigningAlgorithm::Ed25519)
+            .unwrap();
+    }
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3;
+    let (mut server, bind) = signed_authority(lumen_config::ZoneSigning {
+        key_file: old,
+        next_key_file: Some(next),
+        rollover_at_unix: Some(at),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(
+        published_keys(&udp(bind, &dnssec_query("signed.test.", T::DNSKEY)).await).len(),
+        2
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    let key_reply = udp(bind, &dnssec_query("signed.test.", T::DNSKEY)).await;
+    let keys = published_keys(&key_reply);
+    assert_eq!(keys.len(), 1);
+    let host = udp(bind, &dnssec_query("host.signed.test.", T::A)).await;
+    assert_eq!(
+        verified_signers(&host, &keys, "host.signed.test.", T::A).len(),
+        1
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn dynamic_and_split_horizon_zones_are_dnssec_signed() {
+    use hickory_proto::rr::RecordType as T;
+    let upstream = fixture().await;
+    let dir = tempfile::tempdir().unwrap();
+    let dynamic_key = dir.path().join("dynamic.pem");
+    let split_key = dir.path().join("split.pem");
+    lumen_resolver::zone_key(
+        &dynamic_key,
+        "dynamic.test",
+        lumen_config::SigningAlgorithm::Ed25519,
+    )
+    .unwrap();
+    lumen_resolver::zone_key(
+        &split_key,
+        "split.test",
+        lumen_config::SigningAlgorithm::Ed25519,
+    )
+    .unwrap();
+    let dynamic_file = dir.path().join("dynamic.zone");
+    std::fs::write(&dynamic_file, zone_text("dynamic.test", "192.0.2.10")).unwrap();
+    let tsig_secret = dir.path().join("update.secret");
+    std::fs::write(&tsig_secret, "MDEyMzQ1Njc4OWFiY2RlZg==\n").unwrap();
+
+    let bind = address("127.0.0.1");
+    let mut cfg = config(upstream.address, bind);
+    cfg.tsig_keys = vec![lumen_config::TsigKey {
+        name: "update.dynamic.test".into(),
+        algorithm: "hmac-sha256".into(),
+        secret_file: Some(tsig_secret),
+    }];
+    cfg.zones = vec![
+        lumen_config::Zone {
+            name: "dynamic.test".into(),
+            file: Some(dynamic_file),
+            journal: Some(dir.path().join("dynamic.journal")),
+            update_rules: vec![lumen_config::UpdateRule {
+                key: "update.dynamic.test".into(),
+                names: vec!["*.dynamic.test".into()],
+                types: vec!["A".into(), "AAAA".into()],
+            }],
+            dnssec: Some(lumen_config::ZoneSigning {
+                key_file: dynamic_key,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        lumen_config::Zone {
+            name: "split.test".into(),
+            text: Some(zone_text("split.test", "192.0.2.20")),
+            views: vec![lumen_config::ZoneView {
+                clients: vec!["127.0.0.0/8".parse().unwrap()],
+                file: None,
+                text: Some(zone_text("split.test", "192.0.2.21")),
+            }],
+            dnssec: Some(lumen_config::ZoneSigning {
+                key_file: split_key,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ];
+    let mut server = RunningServer::start(cfg).await.unwrap();
+
+    for (zone, host, expected) in [
+        ("dynamic.test.", "host.dynamic.test.", "192.0.2.10"),
+        ("split.test.", "host.split.test.", "192.0.2.21"),
+    ] {
+        let key_reply = udp(bind, &dnssec_query(zone, T::DNSKEY)).await;
+        let keys = published_keys(&key_reply);
+        assert_eq!(keys.len(), 1, "{zone}");
+        let reply = udp(bind, &dnssec_query(host, T::A)).await;
+        assert!(reply.answers.iter().any(|record| {
+            matches!(&record.data, RData::A(address) if address.to_string() == expected)
+        }));
+        assert_eq!(verified_signers(&reply, &keys, host, T::A).len(), 1);
+    }
+    server.shutdown().await;
+}
+
 /// A pretend mDNS device answers whoever asked, from a fresh socket.
 async fn mdns_reply(from: SocketAddr, reply: &Message) {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();

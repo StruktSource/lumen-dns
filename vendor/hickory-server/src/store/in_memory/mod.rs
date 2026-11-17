@@ -22,7 +22,7 @@ use crate::{
     net::runtime::Time,
     proto::dnssec::{
         DnsSecResult, DnssecSigner,
-        rdata::{DNSKEY, DNSSECRData},
+        rdata::DNSSECRData,
     },
     zone_handler::{DnssecZoneHandler, Nsec3QueryInfo},
 };
@@ -244,7 +244,7 @@ impl<P: RuntimeProvider + Send + Sync> InMemoryZoneHandler<P> {
     ) -> DnsSecResult<()> {
         // also add the key to the zone
         let zone_ttl = inner.minimum_ttl(origin);
-        let dnskey = DNSKEY::from_key(&signer.key().to_public_key()?);
+        let dnskey = signer.to_dnskey();
         let dnskey = Record::from_rdata(
             origin.clone().into(),
             zone_ttl,
@@ -685,6 +685,28 @@ impl<P: RuntimeProvider + Send + Sync> DnssecZoneHandler for InMemoryZoneHandler
         let mut inner = self.inner.write().await;
 
         Self::inner_add_zone_signing_key(&mut inner, signer, self.origin(), self.class)
+    }
+
+    async fn set_zone_signing_keys(&self, signers: Vec<DnssecSigner>) -> DnsSecResult<()> {
+        let mut inner = self.inner.write().await;
+        inner.secure_keys.clear();
+        inner
+            .records
+            .remove(&RrKey::new(self.origin().clone(), RecordType::DNSKEY));
+        for signer in signers {
+            Self::inner_add_zone_signing_key(
+                &mut inner,
+                signer,
+                self.origin(),
+                self.class,
+            )?;
+        }
+        inner.secure_zone_mut(
+            self.origin(),
+            self.class,
+            self.nx_proof_kind.as_ref(),
+            Self::current_time()?,
+        )
     }
 
     /// Sign the zone for DNSSEC

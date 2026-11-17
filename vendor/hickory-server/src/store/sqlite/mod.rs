@@ -1183,6 +1183,10 @@ impl<P: RuntimeProvider + Send + Sync> DnssecZoneHandler for SqliteZoneHandler<P
         self.in_memory.add_zone_signing_key(signer).await
     }
 
+    async fn set_zone_signing_keys(&self, signers: Vec<DnssecSigner>) -> DnsSecResult<()> {
+        self.in_memory.set_zone_signing_keys(signers).await
+    }
+
     /// (Re)generates the nsec records, increments the serial number and signs the zone
     async fn secure_zone(&self) -> DnsSecResult<()> {
         self.in_memory.secure_zone().await

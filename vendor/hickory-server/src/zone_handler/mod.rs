@@ -207,6 +207,9 @@ pub trait DnssecZoneHandler: ZoneHandler {
     /// Add Signer
     async fn add_zone_signing_key(&self, signer: DnssecSigner) -> DnsSecResult<()>;
 
+    /// LUMEN PATCH: replace all signing keys and re-sign atomically for a scheduled rollover.
+    async fn set_zone_signing_keys(&self, signers: Vec<DnssecSigner>) -> DnsSecResult<()>;
+
     /// Sign the zone for DNSSEC
     async fn secure_zone(&self) -> DnsSecResult<()>;
 }

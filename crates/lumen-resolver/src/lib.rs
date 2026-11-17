@@ -28,10 +28,9 @@ use hickory_server::{
         recursor::{DnssecConfig, DnssecPolicy, Recursor, RecursorOptions},
     },
     server::{Request, RequestHandler, RequestInfo, ResponseHandler, ResponseInfo},
-    store::in_memory::InMemoryZoneHandler,
     zone_handler::{
-        AuthLookup, AxfrPolicy, Catalog, DnssecZoneHandler, LookupControlFlow, LookupError,
-        LookupOptions, MessageResponse, Nsec3QueryInfo, ZoneHandler, ZoneType,
+        AuthLookup, AxfrPolicy, Catalog, LookupControlFlow, LookupError, LookupOptions,
+        MessageResponse, Nsec3QueryInfo, ZoneHandler, ZoneType,
     },
 };
 use lumen_config::{Config, ForwardStrategy, Mode, UpstreamProtocol, read_bounded};
@@ -112,7 +111,7 @@ pub struct Resolver {
     /// the built-in local-zone answers, because their answers depend on the client and change.
     custom: Vec<LowerName>,
     rollover: Option<rollover::Tracker>,
-    signed: Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
+    signed: Vec<zones::Signed>,
     notifications: Vec<(Name, Vec<SocketAddr>)>,
     challenges: Arc<Challenges>,
     hosts: Arc<Hosts>,
@@ -529,21 +528,53 @@ fn empty_zone_response(query: &Query, zone: &Name) -> Message {
 #[derive(Default)]
 struct Resigners(std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>);
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
 impl Resigners {
-    fn start(&self, zones: &[Arc<InMemoryZoneHandler<TokioRuntimeProvider>>]) {
+    fn start(&self, zones: &[zones::Signed]) {
         let Ok(mut tasks) = self.0.lock() else {
             return;
         };
         if !tasks.is_empty() {
             return;
         }
-        for zone in zones {
-            let zone = Arc::clone(zone);
+        for target in zones {
+            let zone = Arc::clone(&target.handler);
+            let signing = target.signing.clone();
+            let origin = target.origin.clone();
             tasks.push(tokio::spawn(async move {
-                // Signatures last days; renewing daily leaves a long margin for failures.
+                let mut handed_over = signing.rollover_at_unix.is_some_and(|at| at <= unix_now());
                 loop {
-                    tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
-                    if DnssecZoneHandler::secure_zone(&*zone).await.is_err() {
+                    let current = unix_now();
+                    let until_handoff = signing
+                        .rollover_at_unix
+                        .filter(|_| !handed_over)
+                        .map_or(24 * 3600, |at| at.saturating_sub(current).max(1));
+                    tokio::time::sleep(Duration::from_secs(until_handoff.min(24 * 3600))).await;
+                    if !handed_over && signing.rollover_at_unix.is_some_and(|at| at <= unix_now()) {
+                        if let Ok(keys) = signing::signers_for_phase(&signing, &origin, true) {
+                            if zone.set_zone_signing_keys(keys).await.is_ok() {
+                                handed_over = true;
+                            } else {
+                                if let Ok(keys) =
+                                    signing::signers_for_phase(&signing, &origin, false)
+                                {
+                                    let _ = zone.set_zone_signing_keys(keys).await;
+                                }
+                                eprintln!("zone key rollover failed; keeping current signatures");
+                                tokio::time::sleep(Duration::from_secs(60)).await;
+                            }
+                        } else {
+                            eprintln!("zone key rollover failed; keeping current signatures");
+                            tokio::time::sleep(Duration::from_secs(60)).await;
+                        }
+                        continue;
+                    }
+                    if zone.secure_zone().await.is_err() {
                         eprintln!("zone signature renewal failed; keeping current signatures");
                     }
                 }
