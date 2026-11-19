@@ -185,12 +185,21 @@ const overviewTab = () => {
 };
 
 /* ---------- page ---------- */
-const VIEWS = new Map(Object.entries({ overview: overviewTab, subnets: subnetsTab, addresses: addressesTab, vlans: vlansTab, locations: locationsTab }));
+/* An explicit switch, not a lookup by the route's name, so a route can only ever select one of these. */
+const renderTab = tab => {
+  switch (tab) {
+    case 'subnets': return subnetsTab();
+    case 'addresses': return addressesTab();
+    case 'vlans': return vlansTab();
+    case 'locations': return locationsTab();
+    default: return overviewTab();
+  }
+};
 L.views.ipam = () => {
   const head = L.pageHead('IPAM', 'Subnets, addresses, VLANs and locations in one inventory. It records what you use; it never changes a device.',
     h('button', { class: 'btn', onclick: reload }, 'Refresh'));
   if (!I()) return [head, L.empty('Loading', 'One moment.')];
-  const tab = VIEWS.has(L.route().sub) ? L.route().sub : 'overview';
-  return [head, L.tabs(TABS, tab, id => L.go('ipam', id)), h('div', { style: 'margin-top:16px' }, VIEWS.get(tab)())];
+  const tab = TABS.some(([id]) => id === L.route().sub) ? L.route().sub : 'overview';
+  return [head, L.tabs(TABS, tab, id => L.go('ipam', id)), h('div', { style: 'margin-top:16px' }, renderTab(tab))];
 };
 })();
