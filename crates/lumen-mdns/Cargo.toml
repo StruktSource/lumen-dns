@@ -19,7 +19,7 @@ ipnet.workspace = true
 socket2 = { version = "0.6", features = ["all"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", default-features = false, features = ["net"] }
+nix = { version = "0.32", default-features = false, features = ["net"] }
 
 [lints]
 workspace = true
