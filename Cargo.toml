@@ -5,9 +5,11 @@ members = [
   "crates/lumen-api",
   "crates/lumen-config",
   "crates/lumen-filter",
+  "crates/lumen-ipam",
   "crates/lumen-core",
   "crates/lumen-dhcp",
   "crates/lumen-mdns",
+  "crates/lumen-netmon",
   "crates/lumen-proto",
   "crates/lumen-resolver",
   "crates/lumen-store",
@@ -16,7 +18,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"

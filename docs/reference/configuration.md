@@ -111,12 +111,92 @@ Off unless `enabled = true`. See [Multicast DNS bridge](../guides/mdns.md).
 | `interfaces` | `[]` | 1 to 8 names, no repeats | Networks to listen on, such as `eth0` |
 | `domain` | unset | DNS name, not `.local`, not under `.arpa`, no overlap with a zone or `dhcp.domain` | Turns on the discovery proxy: `<name>.<domain>` mirrors `<name>.local` |
 | `reflect` | `false` | Needs two or more interfaces | Repeat mDNS between the interfaces. Crosses network boundaries |
+| `reflect_services` | `[]` | Up to 64 entries like `_airplay._tcp`; needs `reflect` | Repeat only these service types. Empty repeats every service. Plain host lookups (`tv.local`) are always repeated |
+| `reflect_block_services` | `[]` | Same shape; needs `reflect` | Never repeat these service types. Wins over `reflect_services` |
+| `publish_name` | unset | One DNS label | Probe, answer for, and announce `<publish_name>.local`; conflicts use `-2`, `-3`, and so on |
+| `push_listen` | `[]` | Up to 8 addresses, one nonzero port; needs `domain` and the encrypted-listener certificate/key | DNS Push (RFC 8765) over TLS; `_dns-push-tls._tcp.<domain>` advertises the port |
+| `push_max_connections` | `64` | 1 to 1024 | Simultaneous DNS Push TLS sessions |
+| `push_max_subscriptions` | `128` | 1 to 1024 | Subscriptions in one DNS Push session |
 | `ipv6` | `true` | | Also use `ff02::fb` |
 | `wait_ms` | `700` | 100 to 3000 | How long a question waits for devices |
 | `ttl_cap_secs` | `120` | 1 to 3600 | Longest TTL given to an answer |
 | `max_records` | `4096` | 64 to 65536 | Records kept. The soonest to expire go first |
 
-At least one of `domain` and `reflect` is required.
+At least one of `domain`, `reflect` and `publish_name` is required.
+
+## `[ipam]`
+
+The IPAM inventory lives in the web console's state and is switched on as a console module. This section only says where its DNS names go. See [IP address management](../guides/ipam.md).
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `dns_domain` | unset | DNS name without a trailing dot, not `.local`, not under `.arpa`, no overlap with a zone, `dhcp.domain`, or `mdns.domain` | Addresses in IPAM with a host name and DNS publishing on become `name.<dns_domain>` (`A`/`AAAA`) with a matching `PTR`. Unset publishes nothing |
+
+## `[network]`
+
+Network discovery, the device inventory, topology, and monitoring. Off unless `enabled = true`, and it only looks at the networks in `scopes`. Needs [managed mode](../guides/managed-mode.md). See [Network discovery](../guides/network.md).
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `false` | | Run discovery, monitoring, and SNMP polling |
+| `scopes` | `[]` | 1 to 32 | The networks to look at. Required when enabled |
+| `scan_interval_secs` | `3600` | 0, or 60 to 86400 | Seconds between automatic discovery runs. `0` means only when asked |
+| `concurrency` | `32` | 1 to 256 | Most probes in flight |
+| `timeout_ms` | `800` | 100 to 5000 | How long a probe waits |
+| `packets_per_second` | `100` | 1 to 2000 | Most probe packets per second, across all scopes |
+| `gone_after_scans` | `3` | 1 to 100 | Missed runs in a row before a device is marked gone |
+| `retention_days` | `30` | 1 to 365 | Days of check, traffic, and event history kept |
+| `snmp_interval_secs` | `300` | 30 to 3600 | Seconds between SNMP polls of a device |
+| `oui_file` | unset | an IEEE `oui.txt` | Extra or newer manufacturer names |
+
+`[[network.scopes]]`:
+
+| Field | Bounds | Meaning |
+| :--- | :--- | :--- |
+| `name` | 1 to 64 letters, digits, space, `-` `_` `.`, unique | The scope's name |
+| `networks` | 1 to 64 CIDR ranges. IPv4 `/16` to `/32`, IPv6 `/48` to `/128`. At most 262,144 IPv4 addresses over all scopes | What to look at |
+| `exclude` | up to 256 ranges | Never probed, learned, or stored |
+| `interface` | an interface name | Needed for IPv6 networks |
+| `snmp_profile` | a profile name | The SNMP profile for devices in this scope |
+
+`[network.methods]` (booleans): `neighbors`, `icmp`, `dhcp`, and `dns` default to `true`; `snmp` defaults to `false` and needs a profile.
+
+`[network.monitor]`:
+
+| Field | Default | Bounds | Meaning |
+| :--- | :--- | :--- | :--- |
+| `enabled` | `true` | | Check devices regularly |
+| `interval_secs` | `60` | 10 to 3600 | Seconds between checks (a device can override it) |
+| `failures_before_offline` | `3` | 1 to 20 | Failed checks in a row before a device is offline |
+| `degraded_loss_percent` | `20` | 1 to 99 | Recent loss at which a device that answers is degraded |
+| `probes_per_check` | `3` | 1 to 10 | Probes sent per check |
+
+`[[network.snmp_profiles]]`:
+
+| Field | Default | Meaning |
+| :--- | :--- | :--- |
+| `name` | | Unique name |
+| `version` | | `"v2c"` or `"v3"` |
+| `community_file` | | v2c: file holding the community (mode `0600`) |
+| `username` | | v3: user name |
+| `auth_protocol` | none | v3: `sha1`, `sha256`, `sha384`, or `sha512`; needs `auth_password_file` |
+| `auth_password_file` | | v3: file with the password, at least 8 characters, mode `0600` |
+| `privacy_protocol` | none | v3: `aes128`; needs authentication and `privacy_password_file` |
+| `privacy_password_file` | | v3: file with the password, at least 8 characters, mode `0600` |
+| `port` | `161` | UDP port |
+| `timeout_ms` | `1500` | 200 to 10000 |
+| `retries` | `1` | 0 to 5 |
+
+`[network.fritzbox]` (read-only import, see the [network guide](../guides/network.md#fritzbox-optional)):
+
+| Field | Default | Meaning |
+| :--- | :--- | :--- |
+| `enabled` | `false` | Import the FRITZ!Box host list |
+| `host` | `"fritz.box"` | A private IP address or a name; never a public address |
+| `port` | `49000` | TR-064 port |
+| `username` | | A FRITZ!Box user with only the "FRITZ!Box settings" right (1 to 64 characters, no quotes) |
+| `password_file` | | File holding the password (mode `0600`), required |
+| `interval_secs` | `300` | 60 to 86400 |
 
 ## Authoritative zones, forwarders, and TSIG keys
 
@@ -131,7 +211,7 @@ Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these a
 | `views` | `[]` | Up to 8 `[[zones.views]]` with `clients` (1 to 32 CIDRs) and their own `file` or `text`. First match wins |
 | `journal` | unset | SQLite file that makes the zone dynamic. Needs `file`, `update_rules`, and no `views` |
 | `update_rules` | `[]` | Up to 16 `[[zones.update_rules]]` with `key`, `names` (exact or `*.suffix`, inside the zone), and `types` |
-| `dnssec` | off | `[zones.dnssec]` with `key_file` (PKCS#8 PEM, mode 0600), `algorithm` (`ed25519` or `ecdsap256sha256`) `signature_days` (2 to 90, default 14), `denial` (`nsec` or `nsec3`), `nsec3_salt` (hex, up to 8 bytes) and `nsec3_opt_out`, and `next_key_file` with `next_algorithm` for a [key rollover](../guides/authoritative-dns.md#key-rollover). Not with `views`, `journal`, or `transfer_keys`. See [DNSSEC signing](../guides/authoritative-dns.md#dnssec-signing) |
+| `dnssec` | off | `[zones.dnssec]` with either combined `key_file` or both `ksk_file` and `zsk_file` (PKCS#8 PEM, mode 0600). Algorithms are `ed25519` or `ecdsap256sha256`; `signature_days` is 2 to 90 (default 14). Successor fields are `next_key_file`, or `next_ksk_file` / `next_zsk_file`; `rollover_at_unix` schedules their handoff. `denial` is `nsec` or `nsec3`, with optional bounded `nsec3_salt` and `nsec3_opt_out`. Works with plain, dynamic, transferred, and split-horizon zones. See [DNSSEC signing](../guides/authoritative-dns.md#dnssec-signing) |
 | `transfer_keys` | `[]` | Up to 8 TSIG key names allowed to run AXFR/IXFR over TCP. Empty refuses all transfers |
 | `notify` | `[]` | Up to 8 secondary `ip:port` addresses that get a NOTIFY at startup and after each accepted update. Not Lumen's own listeners |
 

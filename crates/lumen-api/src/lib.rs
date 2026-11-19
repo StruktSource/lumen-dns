@@ -221,8 +221,143 @@ fn required_role(method: &str, path: &str) -> Option<ApiRole> {
             Some(ApiRole::Admin)
         }
         ("DELETE", path) if path.starts_with("/v1/devices/") => Some(ApiRole::Admin),
-        _ => None,
+        (method, path) => {
+            if let Some(parts) = ipam_parts(path) {
+                return Some(match lumen_ipam::api::access(method, &parts)? {
+                    lumen_ipam::api::Access::Read => ApiRole::Viewer,
+                    lumen_ipam::api::Access::Address => ApiRole::Operator,
+                    lumen_ipam::api::Access::Structure => ApiRole::Admin,
+                });
+            }
+            let parts = network_parts(path)?;
+            Some(match lumen_netmon::api::access(method, &parts)? {
+                lumen_netmon::api::Access::Read => ApiRole::Viewer,
+                lumen_netmon::api::Access::Operate => ApiRole::Operator,
+                lumen_netmon::api::Access::Manage => ApiRole::Admin,
+            })
+        }
     }
+}
+
+/// The path after `/v1/ipam`, split at `/`, or `None` for any other path.
+fn ipam_parts(path: &str) -> Option<Vec<&str>> {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    let rest = path.strip_prefix("/v1/ipam")?;
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return None;
+    }
+    Some(rest.split('/').filter(|part| !part.is_empty()).collect())
+}
+
+/// The path after `/v1/network`, split at `/`, or `None` for any other path.
+fn network_parts(path: &str) -> Option<Vec<&str>> {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    let rest = path.strip_prefix("/v1/network")?;
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return None;
+    }
+    Some(rest.split('/').filter(|part| !part.is_empty()).collect())
+}
+
+/// The network module over the management API: the same inventory the console shows. A discovery
+/// request is picked up by the running daemon within a few seconds.
+fn network_route(request: &Request, store: &Store, state: &ApiState) -> Response {
+    let (path, query) = request
+        .path
+        .split_once('?')
+        .unwrap_or((request.path.as_str(), ""));
+    let Some(parts) = network_parts(path) else {
+        return error("404 Not Found", "route not found");
+    };
+    let modules = store.setting("modules").ok().flatten().unwrap_or_default();
+    let on = |name: &str| modules.split(',').any(|module| module == name);
+    if !on("network") {
+        return error("404 Not Found", "the network module is off");
+    }
+    if matches!(request.method.as_str(), "POST" | "PUT")
+        && !request.body.is_empty()
+        && !is_json(request)
+    {
+        return error("415 Unsupported Media Type", "use application/json");
+    }
+    let outcome = lumen_netmon::api::handle(&lumen_netmon::api::Request {
+        method: &request.method,
+        parts: &parts,
+        query,
+        body: &request.body,
+        state: &state.state_path,
+        ipam_enabled: on("ipam"),
+        engine: None,
+    });
+    let mut body = outcome.body;
+    if outcome.status >= 500 {
+        body = json!({"error": "state unavailable"});
+    } else if body["error"]
+        .as_str()
+        .is_some_and(|message| message.starts_with("invalid request"))
+    {
+        body = json!({"error": "invalid request"});
+    }
+    json_response(http_status(outcome.status), body)
+}
+
+fn http_status(code: u16) -> &'static str {
+    match code {
+        200 => "200 OK",
+        400 => "400 Bad Request",
+        404 => "404 Not Found",
+        _ => "500 Internal Server Error",
+    }
+}
+
+/// IPAM over the management API. The inventory is the same one the console shows. Names reach
+/// DNS, and DHCP leases are checked, through the running daemon within a few seconds.
+fn ipam_route(request: &Request, store: &Store, state: &ApiState) -> Response {
+    let (path, query) = request
+        .path
+        .split_once('?')
+        .unwrap_or((request.path.as_str(), ""));
+    let Some(parts) = ipam_parts(path) else {
+        return error("404 Not Found", "route not found");
+    };
+    let on = store
+        .setting("modules")
+        .ok()
+        .flatten()
+        .is_some_and(|saved| saved.split(',').any(|module| module == "ipam"));
+    if !on {
+        return error("404 Not Found", "the IPAM module is off");
+    }
+    if matches!(request.method.as_str(), "POST" | "PUT") && !is_json(request) {
+        return error("415 Unsupported Media Type", "use application/json");
+    }
+    let Ok(mut ipam) = lumen_ipam::Ipam::open(&state.state_path) else {
+        return error("503 Service Unavailable", "state unavailable");
+    };
+    let leased = ipam.leased().unwrap_or_default();
+    let dhcp = ipam.meta("dhcp_running").ok().flatten().as_deref() == Some("1");
+    let outcome = lumen_ipam::api::handle(
+        &mut ipam,
+        &lumen_ipam::api::Request {
+            method: &request.method,
+            parts: &parts,
+            query,
+            body: &request.body,
+            leased: &leased,
+            dhcp,
+        },
+    );
+    let mut body = outcome.body;
+    // Details of a database or a parser never leave through this API.
+    if outcome.status >= 500 {
+        body = json!({"error": "state unavailable"});
+    } else if body["error"]
+        .as_str()
+        .is_some_and(|message| message.starts_with("invalid request"))
+    {
+        body = json!({"error": "invalid request"});
+    }
+    json_response(http_status(outcome.status), body)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -280,6 +415,8 @@ fn route(request: &Request, state: &ApiState) -> Response {
                 Err(_) => error("400 Bad Request", "invalid device id"),
             }
         }
+        (_, path) if ipam_parts(path).is_some() => ipam_route(request, &store, state),
+        (_, path) if network_parts(path).is_some() => network_route(request, &store, state),
         ("POST", "/v1/filter/refresh") => queue(&store, Command::FilterRefresh),
         ("POST", "/v1/filter/rollback") => queue(&store, Command::FilterRollback),
         ("POST", "/v1/reload") => queue(&store, Command::Reload),
@@ -705,6 +842,193 @@ mod tests {
             webhooks: Vec::new(),
         };
         assert!(validate_hashes(&config).is_ok());
+    }
+
+    #[test]
+    fn ipam_routes_follow_roles_the_module_switch_and_hide_details() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let store = Store::open(&path).unwrap();
+        let secrets = [
+            ("viewer", ApiRole::Viewer, "v".repeat(32)),
+            ("operator", ApiRole::Operator, "o".repeat(32)),
+            ("admin", ApiRole::Admin, "a".repeat(32)),
+        ];
+        let state = ApiState {
+            state_path: path.clone(),
+            tokens: secrets
+                .iter()
+                .map(|(name, role, secret)| Token {
+                    name: (*name).into(),
+                    role: *role,
+                    hash: Sha256::digest(secret.as_bytes()).into(),
+                })
+                .collect(),
+            requests_per_minute: 600,
+            rates: Mutex::new(HashMap::new()),
+            webhook_sender: None,
+        };
+        let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let call = |who: usize, method: &str, path: &str, body: &str| {
+            let response = dispatch(
+                &Request {
+                    method: method.into(),
+                    path: path.into(),
+                    authorization: Some(format!("Bearer {}", secrets[who].2)),
+                    content_type: (!body.is_empty()).then(|| "application/json".to_owned()),
+                    body: body.as_bytes().to_vec(),
+                },
+                peer,
+                &state,
+            );
+            let json: Value = serde_json::from_slice(&response.body).unwrap();
+            (response.status, json)
+        };
+        // Off until the console switches the module on.
+        assert_eq!(call(2, "GET", "/v1/ipam", "").0, "404 Not Found");
+        store.set_setting("modules", "ipam").unwrap();
+        // Roles: viewers read, operators handle addresses, administrators change the structure.
+        assert_eq!(call(0, "GET", "/v1/ipam", "").0, "200 OK");
+        assert_eq!(
+            call(
+                1,
+                "POST",
+                "/v1/ipam/subnets",
+                r#"{"cidr":"10.5.0.0/24","name":"x"}"#
+            )
+            .0,
+            "403 Forbidden"
+        );
+        let (status, subnet) = call(
+            2,
+            "POST",
+            "/v1/ipam/subnets",
+            r#"{"cidr":"10.5.0.0/24","name":"Lab"}"#,
+        );
+        assert_eq!(status, "200 OK");
+        let allocate = format!("/v1/ipam/subnets/{}/allocate", subnet["id"]);
+        assert_eq!(call(0, "POST", &allocate, "{}").0, "403 Forbidden");
+        let (status, first) = call(1, "POST", &allocate, r#"{"hostname":"nas"}"#);
+        assert_eq!((status, first["ip"].as_str()), ("200 OK", Some("10.5.0.1")));
+        assert_eq!(call(1, "POST", &allocate, "{}").1["ip"], "10.5.0.2");
+        // The daemon reports DHCP leases through the shared state: IPAM keeps clear of them.
+        let mut ipam = lumen_ipam::Ipam::open(&path).unwrap();
+        ipam.replace_leases(&[lumen_ipam::Leased {
+            ip: "10.5.0.3".parse().unwrap(),
+            hostname: None,
+        }])
+        .unwrap();
+        assert_eq!(call(1, "POST", &allocate, "{}").1["ip"], "10.5.0.4");
+        let (_, listed) = call(0, "GET", "/v1/ipam/addresses?state=leased", "");
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        // DNS publishing needs the domain the daemon reports.
+        assert_eq!(
+            call(1, "POST", &allocate, r#"{"hostname":"x","dns":true}"#).0,
+            "400 Bad Request"
+        );
+        ipam.set_meta("dns_domain", "net.example").unwrap();
+        assert_eq!(
+            call(1, "POST", &allocate, r#"{"hostname":"web","dns":true}"#).0,
+            "200 OK"
+        );
+        assert!(ipam.generation().unwrap() > 0);
+        // Generic errors: nothing about the parser or the database leaks.
+        let (status, body) = call(1, "POST", &allocate, r#"{"strategy":"sideways"}"#);
+        assert_eq!(
+            (status, body),
+            ("400 Bad Request", json!({"error": "invalid request"}))
+        );
+        assert_eq!(
+            call(1, "POST", "/v1/ipam/subnets", "not json").0,
+            "403 Forbidden"
+        );
+        assert_eq!(call(2, "GET", "/v1/ipamx", "").0, "404 Not Found");
+        assert_eq!(
+            call(2, "DELETE", "/v1/ipam/addresses/10.5.0.1", "").0,
+            "200 OK"
+        );
+    }
+
+    #[test]
+    fn network_routes_follow_roles_and_the_module_switch() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let store = Store::open(&path).unwrap();
+        let secrets = [
+            ("viewer", ApiRole::Viewer, "v".repeat(32)),
+            ("operator", ApiRole::Operator, "o".repeat(32)),
+            ("admin", ApiRole::Admin, "a".repeat(32)),
+        ];
+        let state = ApiState {
+            state_path: path.clone(),
+            tokens: secrets
+                .iter()
+                .map(|(name, role, secret)| Token {
+                    name: (*name).into(),
+                    role: *role,
+                    hash: Sha256::digest(secret.as_bytes()).into(),
+                })
+                .collect(),
+            requests_per_minute: 600,
+            rates: Mutex::new(HashMap::new()),
+            webhook_sender: None,
+        };
+        let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let call = |who: usize, method: &str, path: &str, body: &str| {
+            let response = dispatch(
+                &Request {
+                    method: method.into(),
+                    path: path.into(),
+                    authorization: Some(format!("Bearer {}", secrets[who].2)),
+                    content_type: (!body.is_empty()).then(|| "application/json".to_owned()),
+                    body: body.as_bytes().to_vec(),
+                },
+                peer,
+                &state,
+            );
+            (
+                response.status,
+                serde_json::from_slice::<Value>(&response.body).unwrap(),
+            )
+        };
+        assert_eq!(
+            call(2, "GET", "/v1/network", "").0,
+            "404 Not Found",
+            "off until the console turns it on"
+        );
+        store.set_setting("modules", "network").unwrap();
+        assert_eq!(call(0, "GET", "/v1/network", "").0, "200 OK");
+        let device = r#"{"name":"Switch","kind":"switch","addresses":["192.168.1.2"]}"#;
+        assert_eq!(
+            call(1, "POST", "/v1/network/devices", device).0,
+            "403 Forbidden",
+            "operators do not edit the inventory"
+        );
+        let (status, made) = call(2, "POST", "/v1/network/devices", device);
+        assert_eq!(status, "200 OK");
+        assert_eq!(call(0, "GET", "/v1/network/devices", "").1["total"], 1);
+        assert_eq!(call(0, "POST", "/v1/network/scan", "").0, "403 Forbidden");
+        assert_eq!(
+            call(1, "POST", "/v1/network/scan", "").0,
+            "200 OK",
+            "operators can ask for discovery"
+        );
+        assert!(
+            lumen_netmon::Netmon::open(&path)
+                .unwrap()
+                .take_scan_request()
+                .unwrap()
+        );
+        assert_eq!(
+            call(0, "GET", &format!("/v1/network/devices/{}", made["id"]), "").0,
+            "200 OK"
+        );
+        let (status, body) = call(2, "POST", "/v1/network/devices", r#"{"nope":1}"#);
+        assert_eq!(
+            (status, body),
+            ("400 Bad Request", json!({"error": "invalid request"}))
+        );
+        assert_eq!(call(2, "GET", "/v1/networks", "").0, "404 Not Found");
     }
 
     #[tokio::test]

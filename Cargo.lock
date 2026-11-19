@@ -19,6 +19,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -212,6 +223,15 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "cfb-mode"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "738b8d467867f80a71351933f70461f5b56f24d5c93e0cf216e59229c968d330"
+dependencies = [
+ "cipher",
 ]
 
 [[package]]
@@ -1400,7 +1420,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "lumen"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "lumen-api",
  "lumen-config",
@@ -1412,10 +1432,12 @@ dependencies = [
 
 [[package]]
 name = "lumen-api"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "lumen-config",
  "lumen-filter",
+ "lumen-ipam",
+ "lumen-netmon",
  "lumen-store",
  "reqwest",
  "ring",
@@ -1430,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-config"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ipnet",
  "lumen-filter",
@@ -1442,8 +1464,9 @@ dependencies = [
 
 [[package]]
 name = "lumen-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "bytes",
  "crypto_box",
@@ -1461,6 +1484,7 @@ dependencies = [
  "lumen-dhcp",
  "lumen-filter",
  "lumen-mdns",
+ "lumen-netmon",
  "lumen-proto",
  "lumen-resolver",
  "lumen-store",
@@ -1480,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-dhcp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "dhcproto",
  "hmac",
@@ -1501,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-filter"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flate2",
  "ipnet",
@@ -1521,28 +1545,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-ipam"
+version = "0.8.0"
+dependencies = [
+ "ipnet",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "lumen-mdns"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "hickory-proto",
+ "ipnet",
  "lumen-config",
  "lumen-resolver",
  "nix",
+ "rustls",
  "socket2",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
+name = "lumen-netmon"
+version = "0.8.0"
+dependencies = [
+ "aes",
+ "async-trait",
+ "cfb-mode",
+ "ipnet",
+ "lumen-config",
+ "lumen-ipam",
+ "md-5",
+ "nix",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
  "tokio",
 ]
 
 [[package]]
 name = "lumen-proto"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "hickory-proto",
 ]
 
 [[package]]
 name = "lumen-resolver"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1560,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-store"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "lumen-filter",
  "ring",
@@ -1572,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-web"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1581,10 +1640,13 @@ dependencies = [
  "hyper-util",
  "lumen-config",
  "lumen-filter",
+ "lumen-ipam",
+ "lumen-netmon",
  "lumen-store",
  "rcgen",
  "reqwest",
  "rustls",
+ "serde",
  "serde_json",
  "sha2",
  "subtle",
@@ -1597,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "lumenctl"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "lumen-config",
  "lumen-core",

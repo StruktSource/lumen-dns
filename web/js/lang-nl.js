@@ -664,6 +664,8 @@ L.i18n.add('nl', {
 "No encrypted transport": "Geen versleuteld transport",
 "At most {n} here.": "Hier maximaal {n}.",
 "Live": "Realtime",
+"Names": "Namen",
+"Show the device name from the network inventory instead of its IP address.": "Toont de apparaatnaam uit de netwerkinventaris in plaats van het IP-adres.",
 "Live view adds new lookups to the list as they happen.": "De realtimeweergave voegt nieuwe DNS-query's direct aan de lijst toe.",
 "Auto reload": "Automatisch verversen",
 "{n} s": "{n} s",

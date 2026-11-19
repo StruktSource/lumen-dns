@@ -91,6 +91,21 @@ impl Hosts {
         }
     }
 
+    /// Replace everything published with exactly `entries` in one step, so a reader never sees
+    /// the names half-removed.
+    pub fn replace(&self, entries: &[(String, IpAddr)]) {
+        let fresh = Self {
+            domain: self.domain.clone(),
+            inner: RwLock::default(),
+        };
+        for (host, address) in entries {
+            fresh.publish(host, *address);
+        }
+        if let (Ok(mut inner), Ok(new)) = (self.inner.write(), fresh.inner.into_inner()) {
+            *inner = new;
+        }
+    }
+
     /// Forget everything. Used before a full rebuild from stored leases.
     pub fn clear(&self) {
         if let Ok(mut inner) = self.inner.write() {
@@ -320,5 +335,30 @@ mod tests {
                 .answer(&ask("x.home.example.", RecordType::A))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn replace_swaps_the_whole_set_in_one_step() {
+        let hosts = Hosts::new(Some("net.example"));
+        let a: IpAddr = "10.0.0.2".parse().unwrap();
+        let b: IpAddr = "10.0.0.3".parse().unwrap();
+        hosts.publish("old", a);
+        hosts.replace(&[("new".into(), b), ("bad name".into(), a)]);
+        assert_eq!(
+            hosts.names(),
+            HashSet::from(["new.net.example.".to_owned()])
+        );
+        assert!(
+            hosts
+                .answer(&ask("3.0.0.10.in-addr.arpa.", RecordType::PTR))
+                .is_some()
+        );
+        assert!(
+            hosts
+                .answer(&ask("2.0.0.10.in-addr.arpa.", RecordType::PTR))
+                .is_none()
+        );
+        hosts.replace(&[]);
+        assert!(hosts.is_empty());
     }
 }

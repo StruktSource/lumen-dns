@@ -83,7 +83,30 @@ Tests bind ephemeral local sockets and use in-process DNS fixtures. They do not 
 - Multi-list failure atomicity, concurrent snapshot readers, periodic refresh, and rollback hold
 - Blocking over all five transports on IPv4 and IPv6, per-client decisions before shared cache hits, failed startup, refresh, and rollback
 
+**Addressing (IPAM)**
+
+- Subnet normalization, uniqueness, nesting and parent lookup, gateway and reference checks; VLAN ID uniqueness per location; location trees without loops
+- Manual assignment and reservation rules (network and broadcast, DHCP leases, duplicate names), release, and adoption of addresses by a more specific new subnet
+- Allocation strategies for IPv4 and IPv6, skipping recorded, leased, gateway, and child-subnet addresses, with 8 threads on separate connections never receiving the same address, and persistence across reopening
+- Utilization, conflict detection, and DNS entries; console and management API routes, roles, the module switch, generic error bodies, and name publication and withdrawal
+
+**Network discovery and monitoring**
+
+- Neighbor-table parsers over real Linux and macOS sample output, ICMP and TCP probes on loopback (including TCP self-connect), scope enumeration with exclusions, and DHCP client identifiers
+- Merging one device seen by several methods, address changes, merges, manual data that discovery never overwrites, and gone and returning devices
+- The availability state machine: thresholds, loss, recovery, and no false alarms from a restart
+- The SNMP client against a real `snmpd`: v2c, v3 authentication and AES privacy, wrong passwords and users named, walks bounded, plus BER, USM key derivation (RFC 3414 vector), and malformed-input handling
+- The engine end to end on loopback through the real database: discovery, DHCP names, an outage and its recovery, and nothing outside the scope stored
+- Routes, roles, the topology (confirmed and inferred links), IPAM placement, and the console and management API wiring
+
 ## Results by date
+
+### 2026-11-17: operator-zone DNSSEC lifecycle
+
+- Focused config and resolver tests pass: separate KSK/ZSK roles, successor-set validation, and pre-/post-handoff signer selection.
+- Focused socket tests pass with real signatures: KSK signs DNSKEY only; ZSK signs zone data; a scheduled combined-key handoff retires the old key without restart; dynamic and split-horizon zones serve verifiable signed answers.
+- `./scripts/dev.sh check` passed the full local format, lint, workspace test, and documentation-test suite. This includes 36 config tests, 56 resolver tests, and 37 service tests.
+- Not yet established: hosted cross-platform CI, a public parent/registrar KSK handoff, long-running rollover timing, or recovery from storage and clock faults.
 
 ### 2026-10-29: Phase 1 resolver core
 

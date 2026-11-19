@@ -65,7 +65,7 @@ impl Cache {
             if removed {
                 inner.count -= 1;
             }
-            return false;
+            return removed;
         }
         let mut stored = record.clone();
         let flush = stored.mdns_cache_flush;

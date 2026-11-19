@@ -17,12 +17,13 @@ release.
 
 ## `hickory-server` 0.26.3
 
-Four changes, all marked `LUMEN PATCH`:
+Five changes, all marked `LUMEN PATCH`:
 
 - `Cargo.toml`: the optional `sqlite` store depends on `rusqlite` 0.41 (upstream asks for 0.39). Two SQLite bindings cannot link into one binary, and Lumen is pinned to 0.41.1 for RUSTSEC-2026-0459. The store compiles unchanged.
 - `zone_handler/catalog.rs` and `store/in_memory/mod.rs`: an `IXFR` query is treated as a transfer under the same policy as `AXFR` and answered in AXFR format, which RFC 1995 section 4 allows. Without it, an IXFR query skipped the transfer policy.
 
 - `zone_handler/auth_lookup.rs`: `AxfrRecords::from_records` wraps exact records, SOA included, so Lumen can answer an IXFR with the differences (RFC 1995) instead of the whole zone.
 - `store/sqlite/mod.rs`: `set_tsig_signers` is no longer limited to tests, so Lumen can install its TSIG keys.
+- `zone_handler/mod.rs` and the file, in-memory, and SQLite stores: signing keys can be replaced at runtime; configured DNSKEY flags are preserved; and separate KSK/ZSK roles sign only DNSKEY or zone data. Lumen uses this for scheduled rollover and signed dynamic zones.
 
 Remove this directory and its `[patch.crates-io]` entry once upstream supports both.

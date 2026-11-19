@@ -3,11 +3,14 @@
 use crate::{
     bridge::{Bridge, Settings},
     link::{Datagram, Family, Link},
+    push,
     reflect::{on_link_v4, on_link_v6},
 };
 use async_trait::async_trait;
+use ipnet::IpNet;
 use lumen_config::Mdns;
 use lumen_resolver::Resolver;
+use rustls::ServerConfig;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io,
@@ -89,6 +92,15 @@ impl Link for UdpLink {
     }
     async fn send(&self, packet: &[u8]) -> io::Result<()> {
         self.socket.send_to(packet, self.group).await.map(|_| ())
+    }
+    fn addresses(&self) -> Vec<IpAddr> {
+        let v4 = self
+            .iface
+            .v4
+            .iter()
+            .map(|(address, _)| IpAddr::V4(*address));
+        let v6 = self.iface.v6.iter().map(|address| IpAddr::V6(*address));
+        v4.chain(v6).collect()
     }
     fn on_link(&self, source: IpAddr) -> bool {
         if self.test_mode {
@@ -179,7 +191,12 @@ impl Drop for Running {
 /// # Errors
 /// An interface does not exist or has no address, or a socket cannot be opened.
 #[allow(clippy::too_many_lines)]
-pub async fn start(config: &Mdns, resolver: &Resolver) -> io::Result<Running> {
+pub async fn start(
+    config: &Mdns,
+    resolver: &Resolver,
+    push_tls: Option<ServerConfig>,
+    push_clients: &[IpNet],
+) -> io::Result<Running> {
     let test_mode = config.group4.is_some() || config.group6.is_some();
     let found = if test_mode {
         config
@@ -253,13 +270,30 @@ pub async fn start(config: &Mdns, resolver: &Resolver) -> io::Result<Running> {
             wait: Duration::from_millis(u64::from(config.wait_ms)),
             ttl_cap: config.ttl_cap_secs,
             max_records: config.max_records as usize,
+            reflect_allow: config.reflect_services.clone(),
+            reflect_block: config.reflect_block_services.clone(),
+            publish: config.publish_name.clone(),
+            push_port: config.push_listen.first().map(SocketAddr::port),
         },
     )
     .map_err(io::Error::other)?;
+    let mut tasks = if config.push_listen.is_empty() {
+        Vec::new()
+    } else {
+        let tls = push_tls.ok_or_else(|| io::Error::other("DNS Push needs TLS credentials"))?;
+        push::start(
+            &config.push_listen,
+            Arc::new(tls),
+            bridge.clone(),
+            usize::from(config.push_max_connections),
+            usize::from(config.push_max_subscriptions),
+            push_clients.to_vec(),
+        )
+        .await?
+    };
     if config.domain.is_some() {
         resolver.set_bridge(bridge.clone());
     }
-    let mut tasks = Vec::new();
     for (index, socket) in sockets.into_iter().enumerate() {
         let tx = tx.clone();
         tasks.push(tokio::spawn(async move {
@@ -284,5 +318,9 @@ pub async fn start(config: &Mdns, resolver: &Resolver) -> io::Result<Running> {
             engine.handle(datagram, Instant::now()).await;
         }
     }));
+    if config.publish_name.is_some() {
+        let publisher = bridge.clone();
+        tasks.push(tokio::spawn(async move { publisher.publish().await }));
+    }
     Ok(Running { bridge, tasks })
 }

@@ -133,7 +133,8 @@ upstreams = ["10.0.0.53:53", "10.0.0.54:53"]
 
 ## DNSSEC signing
 
-Sign a plain zone so that clients that validate DNSSEC can check its answers. It is **off by default** and works per zone.
+Sign a plain, dynamic, or split-horizon zone so validating clients can check its answers. It is
+**off by default** and works per zone.
 
 ```sh
 lumen --zone-key zones/home.example.pem --zone home.example
@@ -154,11 +155,21 @@ file = "zones/home.example.zone"
 ```
 
 - Give the **`DS` line to the operator of the parent zone** (your registrar, or your own parent zone). Until the parent publishes it, validators treat the zone as unsigned, which is safe. A public name needs this step. A private zone needs a trust anchor on each validating client instead.
-- Lumen uses one combined key for the zone and key-signing roles, and NSEC (or [NSEC3](#nsec3)) for proving that a name does not exist. Signatures are served to clients that ask for DNSSEC data (the DO bit) and are renewed every day, with the validity set by `signature_days`. Each renewal also raises the zone's SOA serial.
+- `key_file` is the compatible combined-key form. For separate roles, set both `ksk_file` and `zsk_file` instead. A KSK signs only DNSKEY; a ZSK signs zone data. NSEC (or [NSEC3](#nsec3)) proves that a name does not exist. Signatures are served to clients that ask for DNSSEC data (the DO bit) and renewed every day, with validity set by `signature_days`. Each renewal also raises the zone's SOA serial.
 - The key file must be PKCS#8 PEM and not readable by group or others. Startup fails otherwise. Back it up with your config: losing it means a new `DS` at the parent.
-- A signed zone must be plain: no `views`, no `journal`, no `transfer_keys`. A zone you change rarely suits signing; edit the file and restart to publish changes.
-- **Not built:** separate key- and zone-signing keys, automatic (timer-driven) rollover, and signing for dynamic or split-horizon zones.
+- A dynamic zone is re-signed after each accepted RFC 2136 update. Every split-horizon view is signed separately from its own records. A transfer carries the signed dynamic data subject to the existing TSIG transfer policy.
 - Lumen does not validate its own operator zones against the parent. It serves what you configured.
+
+Separate roles use two private keys. Generate each with the same command; publish only the KSK's
+`DS` at the parent:
+
+```toml
+  [zones.dnssec]
+  ksk_file = "zones/home.example-ksk.pem"
+  zsk_file = "zones/home.example-zsk.pem"
+  # ksk_algorithm = "ed25519"
+  # zsk_algorithm = "ed25519"
+```
 
 ### NSEC3
 
@@ -176,7 +187,7 @@ Lumen uses SHA-1 (the only NSEC3 hash defined) and **zero extra iterations**, as
 
 ### Key rollover
 
-Replace a key without a gap with a **double-signature rollover**: for a while the zone is signed with both keys and both are published, so the parent can move its `DS` from the old key to the new one while every resolver can validate with either. Lumen signs with both while `next_key_file` is set.
+Replace a combined key without a gap with a **double-signature rollover**: for a while the zone is signed with both keys and both are published, so the parent can move its `DS` from the old key to the new one while every resolver can validate with either. Lumen signs with both while `next_key_file` is set.
 
 1. **Create the new key** and note its `DS`: `lumen --zone-key zones/home.example-next.pem --zone home.example`.
 2. **Start the rollover.** Add the key to the zone and restart (or reload):
@@ -199,7 +210,27 @@ Replace a key without a gap with a **double-signature rollover**: for a while th
 
    Restart. Then remove the old `DS` at the parent, and keep the old key file until you are sure nothing still needs it.
 
-The same steps change the algorithm: set `next_algorithm` in step 2. Lumen checks that the two keys differ and that both files are private to their owner. It does not time the steps for you and cannot see the parent, so the waits in step 3 are yours to keep: moving on too early leaves resolvers with cached data they cannot validate. Tested with real signatures: both keys are published, every record set verifies under both keys, and after the finish step only the new key remains. Not tested against a real parent or registrar.
+The same steps change the algorithm: set `next_algorithm` in step 2. Lumen checks that the two keys differ and that both files are private to their owner.
+
+With separate roles, use `next_ksk_file` and/or `next_zsk_file`, plus their optional
+`next_ksk_algorithm` or `next_zsk_algorithm`. During pre-publication, both KSKs sign DNSKEY while
+both ZSKs sign zone data. To schedule the handoff without a reload, add an absolute Unix time:
+
+```toml
+  [zones.dnssec]
+  ksk_file = "zones/home.example-ksk.pem"
+  zsk_file = "zones/home.example-zsk.pem"
+  next_zsk_file = "zones/home.example-zsk-next.pem"
+  rollover_at_unix = 1800000000
+```
+
+At that time Lumen replaces the old role with its successor and re-signs the zone. A restart after
+the time also starts with only the successor. For a KSK handoff, publish the new parent `DS` and
+wait for old DNSKEY and DS TTLs before the scheduled time; Lumen cannot see the parent. A ZSK
+handoff needs no parent change. After a successful handoff, make successor files current and remove
+the `next_*` and `rollover_at_unix` fields at the next normal config update. Moving too early leaves
+resolvers with cached data they cannot validate. Local tests cover the live timer, separate signing
+roles, dynamic zones, and split views. No real registrar handoff has been run.
 
 ## Dynamic updates (RFC 2136)
 

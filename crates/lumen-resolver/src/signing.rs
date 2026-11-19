@@ -4,7 +4,8 @@ use base64::Engine as _;
 use hickory_server::dnssec::NxProofKind;
 use hickory_server::proto::{
     dnssec::{
-        Algorithm, DigestType, DnssecSigner, Nsec3HashAlgorithm, PublicKey, SigningKey,
+        Algorithm, DigestType, DnssecSigner, Nsec3HashAlgorithm, PublicKey, PublicKeyBuf,
+        SigningKey,
         crypto::{EcdsaSigningKey, Ed25519SigningKey, signing_key_from_der},
         rdata::DNSKEY,
     },
@@ -42,17 +43,29 @@ fn private_key(path: &Path, choice: SigningAlgorithm) -> Result<Box<dyn SigningK
         .map_err(|_| "zone signing key does not match its algorithm".to_string())
 }
 
+#[derive(Clone, Copy)]
+enum KeyRole {
+    Combined,
+    Ksk,
+    Zsk,
+}
+
 fn signer_for(
     path: &Path,
     choice: SigningAlgorithm,
     signing: &ZoneSigning,
     origin: &Name,
+    role: KeyRole,
 ) -> Result<DnssecSigner, String> {
     let key = private_key(path, choice)?;
     let public = key
         .to_public_key()
         .map_err(|_| "zone signing key has no usable public key")?;
-    let dnskey = DNSKEY::from_key(&public);
+    let public_buf = PublicKeyBuf::new(public.public_bytes().to_vec(), public.algorithm());
+    let dnskey = match role {
+        KeyRole::Combined | KeyRole::Ksk => DNSKEY::new(true, true, false, public_buf),
+        KeyRole::Zsk => DNSKEY::new(true, false, false, public_buf),
+    };
     Ok(DnssecSigner::new(
         dnskey,
         key,
@@ -61,34 +74,72 @@ fn signer_for(
     ))
 }
 
-/// The signers for `origin`: one combined key (zone and key signing), or two while a rollover is
-/// under way (`next_key_file`). With two, every record set is signed by both and both keys are
-/// published, so the parent's `DS` can move from one to the other. Signatures are valid for
-/// `signature_days`.
-pub(crate) fn signers(signing: &ZoneSigning, origin: &Name) -> Result<Vec<DnssecSigner>, String> {
-    let mut out = vec![signer_for(
-        &signing.key_file,
-        signing.algorithm,
-        signing,
-        origin,
-    )?];
-    if let Some(next) = &signing.next_key_file {
-        let choice = signing.next_algorithm.unwrap_or(signing.algorithm);
-        let second = signer_for(next, choice, signing, origin)?;
-        if second
+/// Build the pre-publish/double-sign set, or the set left after a scheduled handoff.
+pub(crate) fn signers_for_phase(
+    signing: &ZoneSigning,
+    origin: &Name,
+    after_rollover: bool,
+) -> Result<Vec<DnssecSigner>, String> {
+    let mut out = Vec::new();
+    let mut add = |path: &Path, choice, role| -> Result<(), String> {
+        let signer = signer_for(path, choice, signing, origin, role)?;
+        let public = signer
             .key()
             .to_public_key()
-            .ok()
-            .map(|k| k.public_bytes().to_vec())
-            == out[0]
+            .map_err(|_| "zone signing key has no usable public key")?;
+        if out.iter().any(|current: &DnssecSigner| {
+            current
                 .key()
                 .to_public_key()
-                .ok()
-                .map(|k| k.public_bytes().to_vec())
-        {
-            return Err("next_key_file holds the same key as key_file".into());
+                .is_ok_and(|key| key.public_bytes() == public.public_bytes())
+        }) {
+            return Err("zone dnssec key files hold the same key".into());
         }
-        out.push(second);
+        out.push(signer);
+        Ok(())
+    };
+
+    if !signing.key_file.as_os_str().is_empty() {
+        if !after_rollover || signing.next_key_file.is_none() {
+            add(&signing.key_file, signing.algorithm, KeyRole::Combined)?;
+        }
+        if let Some(next) = &signing.next_key_file {
+            add(
+                next,
+                signing.next_algorithm.unwrap_or(signing.algorithm),
+                KeyRole::Combined,
+            )?;
+        }
+        return Ok(out);
+    }
+
+    let ksk = signing
+        .ksk_file
+        .as_ref()
+        .ok_or("zone dnssec needs ksk_file")?;
+    let zsk = signing
+        .zsk_file
+        .as_ref()
+        .ok_or("zone dnssec needs zsk_file")?;
+    if !after_rollover || signing.next_ksk_file.is_none() {
+        add(ksk, signing.ksk_algorithm, KeyRole::Ksk)?;
+    }
+    if let Some(next) = &signing.next_ksk_file {
+        add(
+            next,
+            signing.next_ksk_algorithm.unwrap_or(signing.ksk_algorithm),
+            KeyRole::Ksk,
+        )?;
+    }
+    if !after_rollover || signing.next_zsk_file.is_none() {
+        add(zsk, signing.zsk_algorithm, KeyRole::Zsk)?;
+    }
+    if let Some(next) = &signing.next_zsk_file {
+        add(
+            next,
+            signing.next_zsk_algorithm.unwrap_or(signing.zsk_algorithm),
+            KeyRole::Zsk,
+        )?;
     }
     Ok(out)
 }
@@ -185,4 +236,62 @@ fn write_new_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .open(path)
         .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
         .map_err(|_| "cannot write the key file".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn separate_ksk_zsk_sets_publish_then_retire_successors_by_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = ["ksk.pem", "zsk.pem", "next-ksk.pem", "next-zsk.pem"]
+            .into_iter()
+            .map(|name| dir.path().join(name))
+            .collect();
+        for path in &paths {
+            zone_key(path, "signed.test", SigningAlgorithm::Ed25519).unwrap();
+        }
+        let signing = ZoneSigning {
+            ksk_file: Some(paths[0].clone()),
+            zsk_file: Some(paths[1].clone()),
+            next_ksk_file: Some(paths[2].clone()),
+            next_zsk_file: Some(paths[3].clone()),
+            ..Default::default()
+        };
+        let origin = Name::from_ascii("signed.test.").unwrap();
+        let before = signers_for_phase(&signing, &origin, false).unwrap();
+        assert_eq!(before.len(), 4);
+        assert_eq!(
+            before
+                .iter()
+                .filter(|signer| signer.dnskey().secure_entry_point())
+                .count(),
+            2
+        );
+        assert_eq!(
+            before
+                .iter()
+                .filter(|signer| !signer.dnskey().secure_entry_point())
+                .count(),
+            2
+        );
+
+        let after = signers_for_phase(&signing, &origin, true).unwrap();
+        assert_eq!(after.len(), 2);
+        assert_eq!(
+            after
+                .iter()
+                .filter(|signer| signer.dnskey().secure_entry_point())
+                .count(),
+            1
+        );
+        assert_eq!(
+            after
+                .iter()
+                .filter(|signer| !signer.dnskey().secure_entry_point())
+                .count(),
+            1
+        );
+    }
 }

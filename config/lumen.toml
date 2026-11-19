@@ -152,6 +152,9 @@ max_message_bytes = 4096
 # enabled = true
 # interfaces = ["eth0"]
 # domain = "mdns.home.example"
+# publish_name = "lumen"
+# DNS Push uses the [listen] certificate and private_key. The certificate must cover the domain.
+# push_listen = ["0.0.0.0:853"]
 
 # DHCP server for IPv4 and IPv6 (off by default). A network needs exactly one DHCP server:
 # turn your router's off first. See docs/guides/dhcp.md.

@@ -17,6 +17,7 @@ Lumen can hand out addresses on your network, and turn every lease into a DNS na
 | DNS names | The host name a device sends (or the reservation's name) is published under `domain` as an `A`/`AAAA` record and a `PTR` record. Names are sanitized to one safe label. |
 | Storage | Leases live in a SQLite file (mode `0600`) and survive restarts. Expired leases are removed every 30 seconds, together with their DNS names. |
 | Console | The optional **DHCP** module shows your networks, how full they are, and every lease. |
+| Device link | When Network is on, live leases and configured reservations attach their client ID, addresses, and name to one device identity. Address changes do not create a second device. |
 
 ## Configure it
 

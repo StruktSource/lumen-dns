@@ -298,3 +298,21 @@ dialog::backdrop{background:#000a;backdrop-filter:blur(2px)}dialog[open]{animati
 body.tm-lock{overflow:hidden}
 @media(max-width:700px){.tm-view{height:clamp(320px,62vh,640px)}.tm-hint{display:none}}
 @media(prefers-reduced-motion:reduce){.tm-world.smooth{transition:none}}
+
+/* Network module */
+.net-ic{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border:1px solid var(--rule);background:var(--surface-2);flex:none}
+.net-click{cursor:pointer}.net-click:hover,.net-click:focus-visible{background:var(--surface-2)}.net-gone{opacity:.55}
+.net-group td{background:var(--surface-2);padding:8px 12px}
+.net-facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px 24px}.net-fact{display:flex;flex-direction:column;gap:2px;font-size:13px;min-width:0;overflow-wrap:anywhere}
+.net-h{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-2)}
+.net-list{list-style:none;margin:0;padding:0;display:grid;gap:8px;font-size:13px}.net-list.card-b{padding:16px}
+.net-strip{display:block;width:100%;height:28px;background:var(--surface-2);border:1px solid var(--rule)}
+.net-chart{display:block;width:100%;height:auto;background:var(--surface-2);border:1px solid var(--rule)}
+.net-topo-wrap{overflow:hidden;background:var(--surface-2);border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
+.net-topo{display:block;width:100%;height:min(70vh,760px);cursor:grab;touch-action:none;user-select:none}.net-topo.drag{cursor:grabbing}
+.net-edge{stroke:var(--text-2);stroke-width:1.8;cursor:pointer}.net-edge.inferred{stroke:var(--warn);stroke-dasharray:6 5}.net-edge:hover,.net-edge:focus-visible{stroke-width:3.5}
+.net-node{cursor:pointer;color:var(--text)}.net-node:focus{outline:none}.net-disc{fill:var(--surface);stroke-width:2.5}.net-node:hover .net-disc,.net-node:focus-visible .net-disc{fill:var(--surface-2);stroke-width:4}
+.net-name{font:12px var(--sans);fill:var(--text)}.net-cap{font:10px var(--mono);fill:var(--text-2)}
+.net-legend{display:flex;flex-wrap:wrap;gap:16px;font-size:12px;color:var(--text-2)}.net-legend svg{vertical-align:middle}.net-legend .net-edge{cursor:default}
+.chip.warn{border-color:var(--warn);color:var(--warn)}
+@media(prefers-reduced-motion:reduce){.net-edge{transition:none}}

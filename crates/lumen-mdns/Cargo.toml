@@ -13,6 +13,9 @@ lumen-resolver = { path = "../lumen-resolver" }
 hickory-proto = { workspace = true, features = ["mdns"] }
 async-trait = "0.1"
 tokio.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+ipnet.workspace = true
 socket2 = { version = "0.6", features = ["all"] }
 
 [target.'cfg(unix)'.dependencies]

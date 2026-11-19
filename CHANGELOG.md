@@ -4,6 +4,22 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-19
+
+### Added
+
+- **Completed mDNS publishing and DNS Push.** Published names now use RFC 6762-style probes and move to `-2`, `-3`, and later suffixes on a conflict. Optional `mdns.push_listen` serves RFC 8765 DNS Push over TLS/DSO with subscribe, unsubscribe, keepalive, normal queries, initial state, live add/remove updates, bounded sessions, and `_dns-push-tls._tcp` discovery.
+- **DHCP-linked device identities and rooms.** Network discovery now joins live leases and configured IPv4/IPv6 reservations by stable DHCP client ID before MAC or IP, so address changes stay on one device. The console shows identity confidence and lets an administrator correct IP, MAC, or client-ID matches. A full Rooms tab adds nested room CRUD, device assignment, grouping, and management API routes without requiring IPAM.
+- **Device names in Activity and automatic naming.** With the network module on, the Activity page shows the inventory's device name instead of the bare IP (a **Names** switch turns it off). Devices with no host name now get a readable `Maker xxxx` name from the hardware address and keep upgrading it as better names arrive; a name you typed never changes.
+- **Read-only FRITZ!Box import (optional).** `[network.fritzbox]` reads the box's host list, model, and firmware over TR-064 with Digest sign-in and merges the names into the inventory. Only devices inside your scopes are kept, no setting is ever written, and the host must be a private address. See the [network guide](docs/guides/network.md#fritzbox-optional).
+
+- **Full DNSSEC lifecycle for operator zones.** Zones can use separate KSK/ZSK files, pre-publish successor keys, and schedule their handoff with `rollover_at_unix`. KSKs sign DNSKEY while ZSKs sign zone data. Dynamic RFC 2136 zones and each split-horizon view can now be signed, and daily signature renewal remains active.
+- **mDNS self-publishing and per-service reflection filters.** `mdns.publish_name` answers for and announces `<name>.local` on each listed interface. `mdns.reflect_services` and `mdns.reflect_block_services` limit which service types the reflector repeats; plain host lookups always pass. See [Multicast DNS bridge](docs/guides/mdns.md).
+
+- **IP address management (IPAM), an optional module.** A new **IPAM** console module keeps an inventory of IPv4 and IPv6 subnets (nested), VLANs, locations (sites, buildings, floors, rooms, racks), and addresses (assigned, reserved, DHCP-leased, available), with per-subnet utilization, conflict detection, and next-free-address allocation (`first`, `last`, `random`) that is atomic and works without DHCP. DHCP leases are shown and never handed out by IPAM. Optional DNS names (`ipam.dns_domain`) publish `A`/`AAAA` and `PTR` records for addresses that ask for it, without touching your own zones. The same inventory is available through the token-authenticated management API under `/v1/ipam` (viewer reads, operator handles addresses, admin changes structure). IPAM only records; it never configures a device. The page is English-only for now. See [IP address management](docs/guides/ipam.md).
+
+- **Network discovery, device inventory, topology, and monitoring (optional module).** The new **Network** console module finds devices on the networks you list (`[network]`), with the ARP and NDP neighbor tables, ICMP echo, DHCP leases, reverse DNS, and SNMP, and merges what it finds into one entry per device (several addresses, manufacturer from the IEEE registry, a guessed type you can override, first and last seen, location, subnet and VLAN from IPAM). Devices missing from enough runs are marked gone, never deleted. An interactive topology shows links that a device reported (LLDP) or you added as confirmed, and links inferred from bridge forwarding tables as dashed. SNMPv2c and SNMPv3 (SHA-1/SHA-2 authentication, AES-128 privacy) poll standard MIBs for system facts, interface state, traffic rates, errors, CPU, memory, and temperature; secrets stay in `0600` files. Availability checks over ICMP, TCP, or SNMP use a failure threshold so a lost packet is never an outage, and record response times, loss, history, and outage and recovery events. Off by default, read-only toward devices, bounded in probes and rate, and available through the management API under `/v1/network`. English-only for now. See [Network discovery](docs/guides/network.md).
+
 ## [0.7.0] - 2026-11-12
 
 ### Added

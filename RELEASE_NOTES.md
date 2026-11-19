@@ -1,32 +1,19 @@
-# Lumen 0.7.0
+# Lumen 0.8.0
 
-Lumen 0.7.0 adds optional stale answers, a persistent cache, stronger filtering, two new encrypted transports, and your own DNS zones. All new features are off by default.
+Lumen 0.8.0 adds optional network management: discovery, a device and room inventory, IPAM, a FRITZ!Box import, and a complete DNSSEC and mDNS toolset. Everything new is off by default.
 
 ## Highlights
 
-- **Serve-stale (RFC 8767).** Enable `[resolver.serve_stale]` to keep answering from an expired entry (up to a bounded age) while one background refresh runs. Expired DNSSEC-authenticated data is never served.
-- **Persistent DNS cache.** Enable `[resolver.persistent_cache]` to keep bounded responses across restarts in a separate SQLite file. It holds queried names and answers, never clients. Exclude it from backups.
-- **Regex rules, CNAME blocking, SafeSearch.** `regex_allow`/`regex_block` rules, filtering of CNAME targets in upstream answers, and per-profile `safe_search` for Google, Bing, and YouTube.
-
-- **DoH over HTTP/3 and DNSCrypt v2.** `listen.doh3` serves `/dns-query` over QUIC. `[dnscrypt]` serves encrypted queries over UDP and TCP with rotating signed certificates.
-- **Your own DNS zones.** `[[zones]]` serves records from zone files, with split-horizon `views` and `[[forwarders]]` for conditional forwarding. See [Your own DNS zones](docs/guides/authoritative-dns.md).
-- **Easy local DNS manager.** Administrators can manage typed local zones and records in **DNS → Local DNS**. `home.arpa` is the recommended home zone; `.local` stays with mDNS. Changes are staged, validated, and applied with restart and rollback, while advanced zones remain read-only in the console.
-- **Dynamic updates and zone transfers.** TSIG-signed RFC 2136 updates scoped per key to names and types, saved to a SQLite journal, and TSIG-protected AXFR/IXFR over TCP. Dynamic zones answer IXFR with the differences from their last 32 updates (kept in memory), and with the whole zone otherwise. Listed secondaries get a NOTIFY at startup and after each accepted update.
-- **DNSSEC for your own zones and automatic root key rollover.** `[zones.dnssec]` signs a plain zone (Ed25519 or ECDSA P-256, NSEC), and `lumen --zone-key` creates the key and prints the `DS` record. `resolver.trust_anchor_state` follows RFC 5011 root key rollovers, applied at restart.
-- **Automatic certificates (ACME).** `[acme]` gets and renews the encrypted-DNS certificate from Let's Encrypt or another ACME CA (HTTP-01 or DNS-01, including wildcards), with no restart on renewal.
-- **DHCP server for IPv4 and IPv6 (off by default).** `[dhcp]` hands out addresses with reservations and bounded ranges, keeps leases in SQLite, and publishes every named lease as a DNS name, forward and reverse. Relay agents, prefix delegation, temporary addresses, Reconfigure, network boot options, and a hot-standby failover between two Lumen servers are included. The console gets an optional DHCP module. See [DHCP server](docs/guides/dhcp.md).
-- **EDNS padding on encrypted DNS.** Queries to encrypted upstreams are padded to 128-byte blocks, and answers on Lumen's encrypted listeners to 468-byte blocks when the client asks (RFC 7830, RFC 8467). EDNS Client Subnet is not sent. See [Encrypted DNS](docs/guides/encrypted-dns.md#padding).
-- **IPv6 Router Advertisements and IPv4 FORCERENEW (off by default).** `[[dhcp.router_advertisements]]` tells devices on a network which IPv6 prefix to use, whether to ask DHCPv6, and which DNS servers and search domains to use (RFC 4861, RFC 8106). It says it is not a default router unless you set that. `forcerenew = true` lets **Ask to renew** work for IPv4 devices that support it. See [DHCP server](docs/guides/dhcp.md#router-advertisements-ipv6).
-- **Multicast DNS bridge (off by default).** `[mdns]` answers DNS questions under your own domain from what `.local` devices announce, and can repeat mDNS between networks. See [Multicast DNS bridge](docs/guides/mdns.md).
-- **Certificate renewal without restart.** Renewed DoT, DoH, DoH3, and DoQ certificates are picked up within 30 seconds; a bad file keeps the old pair serving.
-
-## Fixed
-
-- **Forward mode and unsigned child zones (Issue #35).** With local DNSSEC validation on, names such as `clients4.google.com` no longer return `SERVFAIL`: Lumen proves an unsigned ancestor and repeats the lookup once without validation. Signed zones with bad signatures and bogus ancestors still fail.
+- **Network discovery, device inventory, topology, and monitoring (optional).** The **Network** module finds devices on the networks you list, keeps one identity per device across address changes (DHCP client ID, then MAC, then IP), draws topology from LLDP and SNMP, and checks availability. Devices get readable automatic names and can be organized in nested rooms.
+- **Device names in Activity.** The query history shows the inventory's device name instead of the IP address. A **Names** switch turns it off.
+- **FRITZ!Box import (optional, read-only).** `[network.fritzbox]` reads the host list over TR-064 and uses the names you gave devices in the box. Only devices inside your scopes are kept and nothing is ever written to the router. See the [network guide](docs/guides/network.md#fritzbox-optional).
+- **IP address management (optional).** Nested subnets, VLANs, locations, and addresses with conflict detection and atomic next-free-address allocation.
+- **Full DNSSEC lifecycle for your own zones.** Separate KSK/ZSK keys, pre-published successors with timer-driven handoff, and signing for dynamic and split-horizon zones.
+- **Completed mDNS.** Self-publishing with probing and conflict renaming, per-service reflection filters, and optional RFC 8765 DNS Push.
 
 ## Not in this release
 
-Automatic (timer-driven) zone key rollover, TLS-ALPN-01 ACME challenges, native ECH, DNSCrypt upstreams, and Anonymized DNSCrypt. DNSCrypt has not been tested against a third-party client.
+Linking the device inventory to filtering profiles, native ECH, and a live-tested FRITZ!Box mesh or WAN import. The FRITZ!Box import and DNS Push are tested only against local fakes, not a real box or an external client.
 
 ## Check the download
 
@@ -34,7 +21,7 @@ Download the archive for your system plus `SHA256SUMS`, then run:
 
 ```sh
 sha256sum --check SHA256SUMS --ignore-missing
-gh attestation verify lumen-v0.7.0-<platform>.<extension> --repo StruktSource/lumen-dns
+gh attestation verify lumen-v0.8.0-<platform>.<extension> --repo StruktSource/lumen-dns
 ```
 
 On macOS, use `shasum -a 256 -c` with the matching `.sha256` file if `sha256sum` is not installed.
@@ -43,4 +30,5 @@ While a release is still publishing, its page lists only the platforms that are 
 
 ## Upgrade notes
 
-- No state-database schema change. Config schema 1 stays compatible; the new tables are optional.
+- The state database migrates one way to its new schema on first start; back up the state file first. Config schema 1 stays compatible, and every new table is optional.
+- Nothing new is enabled by an upgrade.

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Versioned startup configuration. Unknown fields and unsafe limits fail closed.
 
+pub mod network;
+pub use network::{
+    DiscoveryMethods, Fritzbox, Monitor, Network, NetworkScope, SnmpAuth, SnmpPrivacy, SnmpProfile,
+    SnmpVersion,
+};
+
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -30,6 +36,12 @@ pub struct Config {
     /// Optional DHCP server (IPv4 and IPv6) that also feeds Lumen's DNS. Off by default.
     pub dhcp: Dhcp,
     pub mdns: Mdns,
+    /// IP address management settings. The inventory itself lives in the web console's state and
+    /// is switched on as a console module; this only holds what needs the daemon.
+    pub ipam: Ipam,
+    /// Optional network discovery, device inventory, topology, and monitoring. Off by default,
+    /// and it only looks at networks listed in its scopes.
+    pub network: Network,
     /// Authoritative zones served from operator-managed records.
     pub zones: Vec<Zone>,
     /// Conditional forwarding: names under `domain` go to these resolvers.
@@ -69,7 +81,7 @@ pub struct Zone {
     pub transfer_keys: Vec<String>,
     /// Secondary servers to tell (NOTIFY, RFC 1996) when this zone changes, and at startup.
     pub notify: Vec<SocketAddr>,
-    /// Sign this zone with DNSSEC. Only plain zones: no views, journal, or transfers.
+    /// Sign this zone with DNSSEC. Plain, dynamic, and split-horizon zones are supported.
     pub dnssec: Option<ZoneSigning>,
 }
 
@@ -171,12 +183,12 @@ pub enum Denial {
     Nsec3,
 }
 
-/// How Lumen signs one zone: one combined signing key (or two during a rollover), `NSEC` or
-/// `NSEC3` denial of existence, and signatures that are renewed every day.
+/// How Lumen signs one zone: either one legacy combined key or separate KSK/ZSK keys, optional
+/// pre-published successor keys, `NSEC` or `NSEC3` denial, and daily signature renewal.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ZoneSigning {
-    /// PKCS#8 PEM private key. Create one with `lumen --zone-key FILE --zone NAME`.
+    /// Legacy combined PKCS#8 PEM key. Mutually exclusive with `ksk_file` and `zsk_file`.
     pub key_file: PathBuf,
     pub algorithm: SigningAlgorithm,
     /// How long each signature stays valid, in days (2 to 90).
@@ -187,6 +199,24 @@ pub struct ZoneSigning {
     pub next_key_file: Option<PathBuf>,
     /// Algorithm of `next_key_file`. Defaults to `algorithm`; set it to change algorithm.
     pub next_algorithm: Option<SigningAlgorithm>,
+    /// Key-signing key. Set together with `zsk_file` instead of `key_file`.
+    pub ksk_file: Option<PathBuf>,
+    pub ksk_algorithm: SigningAlgorithm,
+    /// Zone-signing key. Set together with `ksk_file` instead of `key_file`.
+    pub zsk_file: Option<PathBuf>,
+    pub zsk_algorithm: SigningAlgorithm,
+    /// Pre-published successor KSK. Before `rollover_at_unix`, both KSKs are published and sign
+    /// DNSKEY. At that time the old KSK is retired without a service reload.
+    pub next_ksk_file: Option<PathBuf>,
+    pub next_ksk_algorithm: Option<SigningAlgorithm>,
+    /// Pre-published successor ZSK. Before `rollover_at_unix`, both ZSKs sign zone data. At that
+    /// time the old ZSK is retired without a service reload.
+    pub next_zsk_file: Option<PathBuf>,
+    pub next_zsk_algorithm: Option<SigningAlgorithm>,
+    /// Unix timestamp for the scheduled successor-key handoff. The operator must update a
+    /// parent DS before a KSK handoff. Without this field, successor keys stay in manual
+    /// double-signing mode until configuration is changed.
+    pub rollover_at_unix: Option<u64>,
     pub denial: Denial,
     /// `NSEC3` salt in hex, at most 8 bytes. RFC 9276 advises against a salt, so none is the
     /// default. Only with `denial = "nsec3"`.
@@ -203,6 +233,15 @@ impl Default for ZoneSigning {
             signature_days: 14,
             next_key_file: None,
             next_algorithm: None,
+            ksk_file: None,
+            ksk_algorithm: SigningAlgorithm::default(),
+            zsk_file: None,
+            zsk_algorithm: SigningAlgorithm::default(),
+            next_ksk_file: None,
+            next_ksk_algorithm: None,
+            next_zsk_file: None,
+            next_zsk_algorithm: None,
+            rollover_at_unix: None,
             denial: Denial::Nsec,
             nsec3_salt: None,
             nsec3_opt_out: false,
@@ -277,6 +316,21 @@ pub struct Mdns {
     /// Repeat mDNS between all listed interfaces. Needs at least two. Crosses network
     /// boundaries by design: read the guide before turning it on.
     pub reflect: bool,
+    /// Reflect only these service types, such as `_airplay._tcp`. Empty repeats every service.
+    /// Plain host lookups (`tv.local`) are always repeated so a found service stays reachable.
+    pub reflect_services: Vec<String>,
+    /// Never reflect these service types. Wins over `reflect_services`.
+    pub reflect_block_services: Vec<String>,
+    /// Publish this machine over mDNS as `<publish_name>.local` (A and AAAA for each listed
+    /// interface). Unset publishes nothing. Lumen probes before use and adds `-2`, `-3`, and so
+    /// on when another host already owns the name.
+    pub publish_name: Option<String>,
+    /// DNS Push (RFC 8765) TLS listeners. Uses the encrypted DNS certificate and key.
+    pub push_listen: Vec<SocketAddr>,
+    /// Most simultaneous DNS Push TLS sessions.
+    pub push_max_connections: u16,
+    /// Most active subscriptions in one DNS Push session.
+    pub push_max_subscriptions: u16,
     /// Also use IPv6 (`ff02::fb`) next to IPv4.
     pub ipv6: bool,
     /// How long a question waits for devices to answer, in milliseconds (100 to 3000).
@@ -298,6 +352,12 @@ impl Default for Mdns {
             interfaces: Vec::new(),
             domain: None,
             reflect: false,
+            reflect_services: Vec::new(),
+            reflect_block_services: Vec::new(),
+            publish_name: None,
+            push_listen: Vec::new(),
+            push_max_connections: 64,
+            push_max_subscriptions: 128,
             ipv6: true,
             wait_ms: 700,
             ttl_cap_secs: 120,
@@ -306,6 +366,18 @@ impl Default for Mdns {
             group6: None,
         }
     }
+}
+
+/// IP address management (the console's IPAM module). The inventory is stored with the console
+/// state; this section only names where its DNS records go.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Ipam {
+    /// DNS domain for names given to addresses in IPAM, for example `net.home.example` (no
+    /// trailing dot). Addresses with a host name and DNS publishing on become `name.<domain>`
+    /// (A or AAAA) with a matching PTR. Unset publishes nothing. Must not overlap a zone, the
+    /// DHCP domain or the mDNS domain.
+    pub dns_domain: Option<String>,
 }
 
 /// Optional DHCP server. It never starts on its own: nothing is served until `enabled` is true,
@@ -632,6 +704,89 @@ pub fn parse_hex(text: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
         .collect()
+}
+
+fn validate_zone_signing(value: &ZoneSigning) -> Result<(), String> {
+    let combined = !value.key_file.as_os_str().is_empty();
+    let split = value.ksk_file.is_some() || value.zsk_file.is_some();
+    if combined == split || !(2..=90).contains(&value.signature_days) {
+        return Err("zone dnssec needs either key_file or both ksk_file and zsk_file, plus 2..=90 signature_days".into());
+    }
+    if split
+        && (value
+            .ksk_file
+            .as_ref()
+            .is_none_or(|path| path.as_os_str().is_empty())
+            || value
+                .zsk_file
+                .as_ref()
+                .is_none_or(|path| path.as_os_str().is_empty()))
+    {
+        return Err("zone dnssec needs both ksk_file and zsk_file".into());
+    }
+    if combined
+        && (value.ksk_file.is_some()
+            || value.zsk_file.is_some()
+            || value.next_ksk_file.is_some()
+            || value.next_zsk_file.is_some()
+            || value.next_ksk_algorithm.is_some()
+            || value.next_zsk_algorithm.is_some())
+    {
+        return Err("combined key_file cannot be mixed with KSK/ZSK fields".into());
+    }
+    if split && (value.next_key_file.is_some() || value.next_algorithm.is_some()) {
+        return Err("separate KSK/ZSK fields cannot use next_key_file".into());
+    }
+    if value
+        .next_key_file
+        .as_ref()
+        .is_some_and(|next| next == &value.key_file || next.as_os_str().is_empty())
+    {
+        return Err("zone dnssec next_key_file must be a different key".into());
+    }
+    if value.next_algorithm.is_some() && value.next_key_file.is_none() {
+        return Err("zone dnssec next_algorithm needs next_key_file".into());
+    }
+    if value.next_ksk_algorithm.is_some() && value.next_ksk_file.is_none() {
+        return Err("zone dnssec next_ksk_algorithm needs next_ksk_file".into());
+    }
+    if value.next_zsk_algorithm.is_some() && value.next_zsk_file.is_none() {
+        return Err("zone dnssec next_zsk_algorithm needs next_zsk_file".into());
+    }
+    let paths: Vec<&PathBuf> = [
+        Some(&value.key_file).filter(|path| !path.as_os_str().is_empty()),
+        value.next_key_file.as_ref(),
+        value.ksk_file.as_ref(),
+        value.zsk_file.as_ref(),
+        value.next_ksk_file.as_ref(),
+        value.next_zsk_file.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let unique: std::collections::HashSet<&PathBuf> = paths.iter().copied().collect();
+    if paths.len() != unique.len() {
+        return Err("zone dnssec key files must be different".into());
+    }
+    if value.rollover_at_unix.is_some()
+        && value.next_key_file.is_none()
+        && value.next_ksk_file.is_none()
+        && value.next_zsk_file.is_none()
+    {
+        return Err("zone dnssec rollover_at_unix needs a successor key".into());
+    }
+    let nsec3 = value.denial == Denial::Nsec3;
+    if !nsec3 && (value.nsec3_salt.is_some() || value.nsec3_opt_out) {
+        return Err("nsec3_salt and nsec3_opt_out need denial = \"nsec3\"".into());
+    }
+    if value
+        .nsec3_salt
+        .as_deref()
+        .is_some_and(|salt| parse_hex(salt).is_none_or(|bytes| bytes.len() > 8))
+    {
+        return Err("nsec3_salt must be 1 to 8 bytes in hex".into());
+    }
+    Ok(())
 }
 
 /// How the certificate authority checks that you control the names.
@@ -1329,6 +1484,7 @@ impl Config {
             &mut config.web.private_key,
             &mut config.web.oidc.client_secret_file,
             &mut config.web.oidc.ca_file,
+            &mut config.network.oui_file,
         ]
         .into_iter()
         .flatten()
@@ -1339,8 +1495,12 @@ impl Config {
         }
         for zone in &mut config.zones {
             if let Some(signing) = &mut zone.dnssec {
-                for path in
-                    std::iter::once(&mut signing.key_file).chain(signing.next_key_file.as_mut())
+                for path in std::iter::once(&mut signing.key_file)
+                    .chain(signing.next_key_file.as_mut())
+                    .chain(signing.ksk_file.as_mut())
+                    .chain(signing.zsk_file.as_mut())
+                    .chain(signing.next_ksk_file.as_mut())
+                    .chain(signing.next_zsk_file.as_mut())
                 {
                     if path.is_relative() {
                         *path = base.join(&*path);
@@ -1369,6 +1529,25 @@ impl Config {
                 && path.is_relative()
             {
                 *path = base.join(&*path);
+            }
+        }
+        if let Some(path) = &mut config.network.fritzbox.password_file
+            && path.is_relative()
+        {
+            *path = base.join(&*path);
+        }
+        for profile in &mut config.network.snmp_profiles {
+            for path in [
+                &mut profile.community_file,
+                &mut profile.auth_password_file,
+                &mut profile.privacy_password_file,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if path.is_relative() {
+                    *path = base.join(&*path);
+                }
             }
         }
         for webhook in &mut config.management.webhooks {
@@ -1495,6 +1674,8 @@ impl Config {
         self.validate_dnscrypt()?;
         self.validate_acme()?;
         self.validate_dhcp()?;
+        self.validate_ipam()?;
+        self.network.validate()?;
         self.validate_mdns()?;
         self.validate_zones()?;
         if self.listen.allow_clients.is_empty() || self.listen.allow_clients.len() > 128 {
@@ -1503,7 +1684,8 @@ impl Config {
         let encrypted = !self.listen.dot.is_empty()
             || !self.listen.doh.is_empty()
             || !self.listen.doq.is_empty()
-            || !self.listen.doh3.is_empty();
+            || !self.listen.doh3.is_empty()
+            || !self.mdns.push_listen.is_empty();
         if encrypted && (self.listen.certificate.is_none() || self.listen.private_key.is_none()) {
             return Err("encrypted listeners require certificate and private_key".into());
         }
@@ -1790,38 +1972,7 @@ impl Config {
                 return Err("transfer_keys must name at most 8 configured tsig_keys".into());
             }
             if let Some(signing) = &zone.dnssec {
-                if signing.key_file.as_os_str().is_empty()
-                    || !(2..=90).contains(&signing.signature_days)
-                {
-                    return Err("zone dnssec needs a key_file and 2..=90 signature_days".into());
-                }
-                if signing
-                    .next_key_file
-                    .as_ref()
-                    .is_some_and(|next| next == &signing.key_file || next.as_os_str().is_empty())
-                {
-                    return Err("zone dnssec next_key_file must be a different key".into());
-                }
-                if signing.next_algorithm.is_some() && signing.next_key_file.is_none() {
-                    return Err("zone dnssec next_algorithm needs next_key_file".into());
-                }
-                let nsec3 = signing.denial == Denial::Nsec3;
-                if !nsec3 && (signing.nsec3_salt.is_some() || signing.nsec3_opt_out) {
-                    return Err("nsec3_salt and nsec3_opt_out need denial = \"nsec3\"".into());
-                }
-                if signing
-                    .nsec3_salt
-                    .as_deref()
-                    .is_some_and(|salt| parse_hex(salt).is_none_or(|bytes| bytes.len() > 8))
-                {
-                    return Err("nsec3_salt must be 1 to 8 bytes in hex".into());
-                }
-                if zone.journal.is_some()
-                    || !zone.views.is_empty()
-                    || !zone.transfer_keys.is_empty()
-                {
-                    return Err("a signed zone cannot have views, a journal, or transfers".into());
-                }
+                validate_zone_signing(signing)?;
             }
             if zone.journal.is_some() {
                 if zone.file.is_none() || !zone.views.is_empty() || zone.update_rules.is_empty() {
@@ -1861,9 +2012,13 @@ impl Config {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn validate_mdns(&self) -> Result<(), String> {
         let mdns = &self.mdns;
         if !mdns.enabled {
+            if !mdns.push_listen.is_empty() {
+                return Err("mdns.push_listen needs mdns.enabled = true".into());
+            }
             return Ok(());
         }
         if mdns.interfaces.is_empty()
@@ -1883,8 +2038,60 @@ impl Config {
         {
             return Err("mdns.interfaces must not repeat an interface".into());
         }
-        if mdns.domain.is_none() && !mdns.reflect {
-            return Err("mdns needs a domain (discovery proxy), reflect = true, or both".into());
+        if mdns.domain.is_none() && !mdns.reflect && mdns.publish_name.is_none() {
+            return Err(
+                "mdns needs a domain (discovery proxy), reflect = true, or a publish_name".into(),
+            );
+        }
+        if !mdns.push_listen.is_empty() && mdns.domain.is_none() {
+            return Err("mdns.push_listen needs mdns.domain".into());
+        }
+        if mdns.push_listen.len() > 8
+            || mdns.push_listen.iter().any(|address| address.port() == 0)
+            || mdns.push_listen.first().is_some_and(|first| {
+                mdns.push_listen
+                    .iter()
+                    .any(|item| item.port() != first.port())
+            })
+            || !(1..=1024).contains(&mdns.push_max_connections)
+            || !(1..=1024).contains(&mdns.push_max_subscriptions)
+        {
+            return Err("mdns DNS Push listeners or limits are out of range".into());
+        }
+        let service_ok = |s: &String| {
+            let parts: Vec<&str> = s.split('.').collect();
+            parts.len() == 2
+                && parts[0].starts_with('_')
+                && matches!(parts[1], "_tcp" | "_udp")
+                && s.len() <= 63 + 5
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        };
+        if mdns.reflect_services.len() > 64
+            || mdns.reflect_block_services.len() > 64
+            || !mdns
+                .reflect_services
+                .iter()
+                .chain(&mdns.reflect_block_services)
+                .all(service_ok)
+        {
+            return Err("mdns service filters must look like _airplay._tcp (at most 64)".into());
+        }
+        if (!mdns.reflect_services.is_empty() || !mdns.reflect_block_services.is_empty())
+            && !mdns.reflect
+        {
+            return Err("mdns service filters need reflect = true".into());
+        }
+        if let Some(label) = &mdns.publish_name
+            && (label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+        {
+            return Err("mdns.publish_name must be one DNS label (letters, digits, -)".into());
         }
         if mdns.reflect && mdns.interfaces.len() < 2 {
             return Err("mdns.reflect needs at least two interfaces".into());
@@ -1925,6 +2132,43 @@ impl Config {
             {
                 return Err("mdns.domain overlaps a zone or the dhcp.domain".into());
             }
+        }
+        Ok(())
+    }
+
+    fn validate_ipam(&self) -> Result<(), String> {
+        let Some(domain) = self.ipam.dns_domain.as_deref() else {
+            return Ok(());
+        };
+        let label_ok = |label: &str| {
+            (1..=63).contains(&label.len())
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        };
+        if domain.len() > 200 || domain.ends_with('.') || !domain.split('.').all(label_ok) {
+            return Err("ipam.dns_domain must be a DNS name without a trailing dot".into());
+        }
+        let lower = domain.to_ascii_lowercase();
+        let overlaps = |other: &str| {
+            let other = other.to_ascii_lowercase();
+            other == lower
+                || other.ends_with(&format!(".{lower}"))
+                || lower.ends_with(&format!(".{other}"))
+        };
+        let last = lower.rsplit('.').next().unwrap_or_default();
+        if last == "local"
+            || last == "arpa"
+            || self.zones.iter().any(|zone| overlaps(&zone.name))
+            || (self.dhcp.enabled && self.dhcp.domain.as_deref().is_some_and(overlaps))
+            || (self.mdns.enabled && self.mdns.domain.as_deref().is_some_and(overlaps))
+        {
+            return Err(
+                "ipam.dns_domain must not be .local or .arpa, or overlap a zone, dhcp.domain or mdns.domain"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -2911,6 +3155,24 @@ mod tests {
     }
 
     #[test]
+    fn ipam_domain_is_optional_and_must_not_overlap_other_names() {
+        assert!(Config::default().validate_ipam().is_ok());
+        let with = |domain: &str| {
+            let mut config = Config::default();
+            config.ipam.dns_domain = Some(domain.into());
+            config
+        };
+        assert!(with("net.home.example").validate_ipam().is_ok());
+        for bad in ["", "net.", "a b.example", "x.local", "10.in-addr.arpa"] {
+            assert!(with(bad).validate_ipam().is_err(), "{bad}");
+        }
+        let mut config = with("net.home.example");
+        config.dhcp.enabled = true;
+        config.dhcp.domain = Some("home.example".into());
+        assert!(config.validate_ipam().is_err());
+    }
+
+    #[test]
     fn mdns_is_off_by_default_and_validates_its_interfaces_domain_and_limits() {
         let on = || {
             let mut config = Config::default();
@@ -2960,6 +3222,17 @@ mod tests {
         );
         reflect.mdns.interfaces = vec!["eth0".into(), "eth1".into()];
         assert!(reflect.validate_mdns().is_ok());
+        let mut push = on();
+        push.mdns.push_listen = vec![
+            "127.0.0.1:853".parse().unwrap(),
+            "[::1]:853".parse().unwrap(),
+        ];
+        assert!(push.validate_mdns().is_ok());
+        push.mdns.push_listen[1] = "[::1]:8853".parse().unwrap();
+        assert!(
+            push.validate_mdns().is_err(),
+            "DNS Push advertises one port"
+        );
         // The domain must not overlap the DHCP domain.
         let mut dhcp = on();
         dhcp.dhcp.enabled = true;
@@ -3329,6 +3602,51 @@ preference = "low"
                 s.nsec3_salt = Some("xyz".into());
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn separate_zone_signing_keys_and_schedules_are_complete() {
+        let validate = |signing| {
+            Config {
+                zones: vec![Zone {
+                    name: "a.test".into(),
+                    text: Some("x".into()),
+                    dnssec: Some(signing),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+            .validate_zones()
+        };
+        let split = ZoneSigning {
+            ksk_file: Some("ksk.pem".into()),
+            zsk_file: Some("zsk.pem".into()),
+            ..Default::default()
+        };
+        assert!(validate(split.clone()).is_ok());
+        assert!(
+            validate(ZoneSigning {
+                zsk_file: None,
+                ..split.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate(ZoneSigning {
+                rollover_at_unix: Some(1_900_000_000),
+                ..split.clone()
+            })
+            .is_err(),
+            "a schedule needs a successor"
+        );
+        assert!(
+            validate(ZoneSigning {
+                next_zsk_file: Some("next-zsk.pem".into()),
+                rollover_at_unix: Some(1_900_000_000),
+                ..split
+            })
+            .is_ok()
         );
     }
 

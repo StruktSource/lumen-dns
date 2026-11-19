@@ -240,6 +240,10 @@ impl DnssecZoneHandler for FileZoneHandler {
         self.in_memory.add_zone_signing_key(signer).await
     }
 
+    async fn set_zone_signing_keys(&self, signers: Vec<DnssecSigner>) -> DnsSecResult<()> {
+        self.in_memory.set_zone_signing_keys(signers).await
+    }
+
     /// Sign the zone for DNSSEC
     async fn secure_zone(&self) -> DnsSecResult<()> {
         DnssecZoneHandler::secure_zone(&self.in_memory).await

@@ -22,9 +22,9 @@ use hickory_server::{
     store::in_memory::InMemoryZoneHandler,
     store::sqlite::{SqliteConfig, SqliteZoneHandler},
     zone_handler::{
-        AuthLookup, AxfrPolicy, AxfrRecords, Catalog, LookupControlFlow, LookupError,
-        LookupOptions, LookupRecords, Nsec3QueryInfo, UpdateRequest, ZoneHandler, ZoneTransfer,
-        ZoneType,
+        AuthLookup, AxfrPolicy, AxfrRecords, Catalog, DnssecZoneHandler, LookupControlFlow,
+        LookupError, LookupOptions, LookupRecords, Nsec3QueryInfo, UpdateRequest, ZoneHandler,
+        ZoneTransfer, ZoneType,
     },
 };
 use ipnet::IpNet;
@@ -38,9 +38,21 @@ use std::{fmt::Write, net::IpAddr, sync::Arc, time::Duration};
 pub(crate) struct Built {
     pub handlers: Vec<Arc<dyn ZoneHandler>>,
     /// Signed zones, which need their signatures renewed on a schedule.
-    pub resign: Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
+    pub resign: Vec<Signed>,
     /// Zones with secondaries to notify at startup.
     pub notify: Vec<(Name, Vec<std::net::SocketAddr>)>,
+}
+
+pub(crate) struct Signed {
+    pub handler: Arc<dyn DnssecZoneHandler>,
+    pub signing: lumen_config::ZoneSigning,
+    pub origin: Name,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Build every configured zone and conditional forwarder.
@@ -198,7 +210,8 @@ fn signed_zone(
         Some(crate::signing::proof_kind(signing)?),
     )
     .map_err(|_| format!("zone {name} needs a SOA record at its apex"))?;
-    for signer in crate::signing::signers(signing, &origin)? {
+    let after_rollover = signing.rollover_at_unix.is_some_and(|at| at <= unix_now());
+    for signer in crate::signing::signers_for_phase(signing, &origin, after_rollover)? {
         handler
             .add_zone_signing_key_mut(signer)
             .map_err(|_| format!("cannot use the signing key for zone {name}"))?;
@@ -213,15 +226,41 @@ fn zone_handler(
     zone: &Zone,
     signers: &std::collections::HashMap<String, TSigner>,
     persist: bool,
-    resign: &mut Vec<Arc<InMemoryZoneHandler<TokioRuntimeProvider>>>,
+    resign: &mut Vec<Signed>,
 ) -> Result<Arc<dyn ZoneHandler>, String> {
-    if let Some(signing) = &zone.dnssec {
-        let handler = signed_zone(&zone.name, &zone_source(zone)?, signing)?;
-        resign.push(Arc::clone(&handler));
-        return Ok(handler);
-    }
     if zone.journal.is_some() || !zone.transfer_keys.is_empty() {
-        return managed_zone(zone, signers, persist);
+        return managed_zone(zone, signers, persist, resign);
+    }
+    if let Some(signing) = &zone.dnssec {
+        let origin = Name::from_ascii(format!("{}.", zone.name))
+            .map_err(|_| format!("invalid zone name {}", zone.name))?;
+        let default = signed_zone(&zone.name, &zone_source(zone)?, signing)?;
+        resign.push(Signed {
+            handler: Arc::clone(&default) as Arc<dyn DnssecZoneHandler>,
+            signing: signing.clone(),
+            origin: origin.clone(),
+        });
+        if zone.views.is_empty() {
+            return Ok(default);
+        }
+        let mut views = Vec::new();
+        for view in &zone.views {
+            let handler = signed_zone(
+                &zone.name,
+                &read_source(view.file.as_ref(), view.text.as_ref())?,
+                signing,
+            )?;
+            resign.push(Signed {
+                handler: Arc::clone(&handler) as Arc<dyn DnssecZoneHandler>,
+                signing: signing.clone(),
+                origin: origin.clone(),
+            });
+            views.push(View {
+                clients: view.clients.clone(),
+                handler,
+            });
+        }
+        return Ok(Arc::new(ViewZoneHandler { default, views }));
     }
     let default = static_zone(&zone.name, &zone_source(zone)?)?;
     if zone.views.is_empty() {
@@ -291,7 +330,7 @@ impl Rule {
 
 /// A zone with TSIG-authenticated transfers and, when journaled, scoped RFC 2136 updates.
 struct ManagedZone {
-    inner: SqliteZoneHandler<TokioRuntimeProvider>,
+    inner: Arc<SqliteZoneHandler<TokioRuntimeProvider>>,
     rules: Vec<Rule>,
     transfer_keys: Vec<LowerName>,
     notify: Vec<std::net::SocketAddr>,
@@ -333,14 +372,45 @@ fn key_name(name: &str) -> Result<LowerName, String> {
         .map_err(|_| format!("invalid name {name}"))
 }
 
+fn sign_managed_zone(
+    inner: &Arc<SqliteZoneHandler<TokioRuntimeProvider>>,
+    zone: &Zone,
+    origin: Name,
+    resign: &mut Vec<Signed>,
+) -> Result<(), String> {
+    let Some(signing) = &zone.dnssec else {
+        return Ok(());
+    };
+    let after_rollover = signing.rollover_at_unix.is_some_and(|at| at <= unix_now());
+    let keys = crate::signing::signers_for_phase(signing, &origin, after_rollover)?;
+    futures_executor::block_on(async {
+        inner
+            .set_zone_signing_keys(keys)
+            .await
+            .map_err(|_| format!("cannot sign zone {} with its signing keys", zone.name))
+    })?;
+    resign.push(Signed {
+        handler: Arc::clone(inner) as Arc<dyn DnssecZoneHandler>,
+        signing: signing.clone(),
+        origin,
+    });
+    Ok(())
+}
+
 fn managed_zone(
     zone: &Zone,
     signers: &std::collections::HashMap<String, TSigner>,
     persist: bool,
+    resign: &mut Vec<Signed>,
 ) -> Result<Arc<dyn ZoneHandler>, String> {
     let origin = Name::from_ascii(format!("{}.", zone.name))
         .map_err(|_| format!("invalid zone name {}", zone.name))?;
     let dynamic = zone.journal.is_some();
+    let proof = zone
+        .dnssec
+        .as_ref()
+        .map(crate::signing::proof_kind)
+        .transpose()?;
     let mut inner = if let (Some(journal), true) = (&zone.journal, persist) {
         let file = zone.file.clone().ok_or("a dynamic zone needs a file")?;
         let config = SqliteConfig {
@@ -350,13 +420,13 @@ fn managed_zone(
             tsig_keys: Vec::new(),
         };
         let handler = futures_executor::block_on(SqliteZoneHandler::try_from_config(
-            origin,
+            origin.clone(),
             ZoneType::Primary,
             AxfrPolicy::AllowSigned,
             false,
             None,
             &config,
-            None::<NxProofKind>,
+            proof.clone(),
         ))?;
         restrict_journal(journal);
         handler
@@ -366,11 +436,11 @@ fn managed_zone(
             .parse()
             .map_err(|_| format!("zone {} is not valid zone data", zone.name))?;
         let in_memory = InMemoryZoneHandler::<TokioRuntimeProvider>::new(
-            origin,
+            origin.clone(),
             records,
             ZoneType::Primary,
             AxfrPolicy::AllowAll, // The wrapper applies its own transfer policy first.
-            None::<NxProofKind>,
+            proof,
         )
         .map_err(|_| format!("zone {} needs a SOA record at its apex", zone.name))?;
         SqliteZoneHandler::new(in_memory, AxfrPolicy::AllowSigned, dynamic, false)
@@ -412,6 +482,8 @@ fn managed_zone(
         .collect::<Result<Vec<_>, _>>()?;
     inner.set_tsig_signers(list);
     inner.set_allow_update(dynamic);
+    let inner = Arc::new(inner);
+    sign_managed_zone(&inner, zone, origin, resign)?;
     Ok(Arc::new(ManagedZone {
         inner,
         rules,
@@ -561,7 +633,7 @@ impl ZoneHandler for ManagedZone {
         self.inner.nsec3_records(info, options).await
     }
     fn nx_proof_kind(&self) -> Option<&NxProofKind> {
-        None
+        self.inner.nx_proof_kind()
     }
     async fn update(
         &self,
@@ -770,7 +842,7 @@ impl ZoneHandler for ViewZoneHandler {
         Some((Err(LookupError::from(ResponseCode::Refused)), None))
     }
     fn nx_proof_kind(&self) -> Option<&NxProofKind> {
-        None
+        self.default.nx_proof_kind()
     }
 }
 

@@ -47,9 +47,9 @@ Send `Authorization: Bearer TOKEN`. Token comparison is constant-time. Each toke
 
 | Role | Can do |
 | :--- | :--- |
-| `viewer` | Read status and devices |
-| `operator` | Everything a viewer can, plus refresh and roll back filter lists |
-| `admin` | Everything an operator can, plus audit, config, devices, reload, and shutdown |
+| `viewer` | Read status, devices, the IPAM inventory, and the network inventory |
+| `operator` | Everything a viewer can, plus refresh and roll back filter lists, assign, reserve, allocate, and release IPAM addresses, and ask for network discovery |
+| `admin` | Everything an operator can, plus audit, config, devices, IPAM subnets, VLANs, and locations, network devices and links, reload, and shutdown |
 
 **Audit log.** Every accepted or rejected call is recorded with the token name, role, action, target, outcome, and source IP. Tokens and request bodies are never recorded. The newest 10,000 events are kept.
 
@@ -67,6 +67,45 @@ Send `Authorization: Bearer TOKEN`. Token comparison is constant-time. Each toke
 | `POST /v1/reload` | admin | Queue a configuration reload |
 | `POST /v1/config` | admin | Stage an `application/toml` body and queue a reload |
 | `POST /v1/shutdown` | admin | Queue a clean shutdown |
+
+### IPAM
+
+Routes under `/v1/ipam` manage the inventory of the optional [IPAM module](../guides/ipam.md). They answer `404` until an administrator switches the module on in the console. Bodies are `application/json`. Names given to addresses reach DNS, and DHCP leases are taken into account, through the running daemon within a few seconds.
+
+| Method and path | Role | Result |
+| :--- | :--- | :--- |
+| `GET /v1/ipam` | viewer | Subnet utilization and totals |
+| `GET /v1/ipam/subnets`, `/vlans`, `/locations` | viewer | The lists |
+| `GET /v1/ipam/addresses?subnet=ID&location=ID&state=assigned\|reserved\|leased\|available&q=TEXT&limit=N` | viewer | Addresses (default 500, at most 2000). `available` needs a `subnet` |
+| `GET /v1/ipam/conflicts` | viewer | Addresses that IPAM and DHCP both claim |
+| `POST /v1/ipam/subnets/ID/allocate` | operator | Pick and record the next free address. Body: optional `strategy` (`first`, `last`, `random`), `state` (`assigned`, `reserved`), `hostname`, `description`, `device`, `location_id`, `dns` |
+| `PUT /v1/ipam/addresses` | operator | Assign or reserve a given address. Body: `ip`, `state`, and the same optional fields |
+| `DELETE /v1/ipam/addresses/IP` | operator | Release an address |
+| `POST /v1/ipam/subnets`, `PUT`/`DELETE /v1/ipam/subnets/ID` | admin | Subnets. Body: `cidr` (create only), `name`, `description`, `group`, `vlan_id`, `location_id`, `gateway`, `metadata` |
+| `POST /v1/ipam/vlans`, `PUT`/`DELETE /v1/ipam/vlans/ID` | admin | VLANs. Body: `vid`, `name`, `description`, `location_id` |
+| `POST /v1/ipam/locations`, `PUT`/`DELETE /v1/ipam/locations/ID` | admin | Locations. Body: `kind` (`site`, `building`, `floor`, `room`, `rack`), `name`, `description`, `parent_id` |
+
+An allocation is atomic: concurrent requests never receive the same address. Refusals return `400` with a short reason, such as the subnet having no free address.
+
+### Network
+
+Routes under `/v1/network` manage the inventory of the optional [Network module](../guides/network.md). They answer `404` until an administrator switches the module on in the console. Bodies are `application/json`.
+
+| Method and path | Role | Result |
+| :--- | :--- | :--- |
+| `GET /v1/network` | viewer | Counts, recent runs, recent events |
+| `GET /v1/network/devices?q=&kind=&status=&subnet=&vlan=&location=&gone=1&sort=&dir=&limit=&offset=` | viewer | Devices (`sort`: `last_seen`, `name`, `ip`, `status`, `kind`, `first_seen`) |
+| `GET /v1/network/devices/ID` | viewer | One device with interfaces, recent checks, availability, events, and links |
+| `GET /v1/network/devices/ID/checks?since=&limit=` | viewer | Availability checks |
+| `GET /v1/network/devices/ID/interfaces`, `.../interfaces/INDEX/history` | viewer | Interfaces and traffic history |
+| `GET /v1/network/links`, `/topology?subnet=&vlan=&location=&kind=`, `/events`, `/scans`, `/locations`, `/rooms` | viewer | Links, topology, events, discovery runs, IPAM locations, and nested network rooms |
+| `POST /v1/network/scan` | operator | Ask the daemon to run discovery |
+| `POST /v1/network/devices`, `PUT`/`DELETE /v1/network/devices/ID` | admin | Devices. Body also accepts `room_id` and `dhcp_ids` with the existing identity, detail, monitoring, address, and MAC fields |
+| `POST /v1/network/rooms`, `PUT`/`DELETE /v1/network/rooms/ID` | admin | Nested rooms. Body: `name`, optional `parent_id`, `description` |
+| `POST /v1/network/devices/ID/merge` | admin | Body `{"other": ID}`: fold the other device into this one |
+| `DELETE /v1/network/devices/ID/addresses/VALUE` | admin | Remove an IP, hardware address, or DHCP client ID from a device |
+| `POST /v1/network/devices/ID/ipam` | admin | Body `{"ip": "...", "dns": false}`: record the address in IPAM |
+| `POST /v1/network/links`, `PUT`/`DELETE /v1/network/links/ID` | admin | Links. Body: `a_device`, `a_port`, `b_device`, `b_port`, `speed_mbps` |
 
 **Limits.** Headers stop at 16 KiB and bodies at 64 KiB. Chunked bodies are rejected, and connections and reads have hard time limits. Error bodies are generic JSON and never include config, database, token, or parser details.
 

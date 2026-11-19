@@ -34,6 +34,8 @@ pub struct RunningServer {
     _dhcp: Option<lumen_dhcp::Running>,
     /// Keeps the multicast DNS bridge running for as long as the service does.
     _mdns: Option<lumen_mdns::Running>,
+    /// Keeps network discovery and monitoring running for as long as the service does.
+    _network: Option<lumen_netmon::Running>,
 }
 
 /// Optional managed-mode inputs for the web console.
@@ -80,6 +82,7 @@ impl RunningServer {
             && config.listen.doh.is_empty()
             && config.listen.doq.is_empty()
             && config.listen.doh3.is_empty()
+            && config.mdns.push_listen.is_empty()
         {
             (None, None)
         } else {
@@ -116,6 +119,7 @@ impl RunningServer {
             config: Arc::new(config),
             metrics: Arc::clone(&metrics),
             dhcp: std::sync::OnceLock::new(),
+            network: std::sync::OnceLock::new(),
         });
         if let Some(not_after) = cert_not_after {
             service
@@ -206,6 +210,7 @@ impl RunningServer {
             }
         }
         let metrics_listener = config.metrics.map(tcp_listener).transpose()?;
+        let state_path = console.state.clone();
         let console = console.state.map(|state| {
             lumen_web::Console::new(
                 state,
@@ -329,7 +334,36 @@ impl RunningServer {
             None
         };
         let mdns = if config.mdns.enabled {
-            Some(lumen_mdns::start(&config.mdns, &service.resolver).await?)
+            let push_tls = if config.mdns.push_listen.is_empty() {
+                None
+            } else {
+                Some(tls_config(
+                    tls.as_ref()
+                        .ok_or_else(|| io::Error::other("missing DNS Push TLS credentials"))?,
+                    b"",
+                )?)
+            };
+            Some(
+                lumen_mdns::start(
+                    &config.mdns,
+                    &service.resolver,
+                    push_tls,
+                    &config.listen.allow_clients,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let network = if config.network.enabled {
+            let state = state_path.as_deref().ok_or_else(|| {
+                io::Error::other("network discovery needs managed mode (--state): its inventory lives in the console state")
+            })?;
+            let environment = Arc::new(crate::netenv::Environment(Arc::clone(&service)));
+            let running = lumen_netmon::start(&config.network, state, environment)
+                .map_err(io::Error::other)?;
+            let _ = service.network.set(running.handle());
+            Some(running)
         } else {
             None
         };
@@ -349,6 +383,7 @@ impl RunningServer {
             certificates: tls_handle,
             _dhcp: dhcp,
             _mdns: mdns,
+            _network: network,
         })
     }
 
@@ -502,7 +537,9 @@ fn tls_config(keys: &Credentials, alpn: &[u8]) -> io::Result<ServerConfig> {
             .map_err(io::Error::other)?
             .with_no_client_auth()
             .with_cert_resolver(Arc::clone(keys) as Arc<dyn rustls::server::ResolvesServerCert>);
-    config.alpn_protocols = vec![alpn.to_vec()];
+    if !alpn.is_empty() {
+        config.alpn_protocols = vec![alpn.to_vec()];
+    }
     config.max_early_data_size = 0;
     Ok(config)
 }

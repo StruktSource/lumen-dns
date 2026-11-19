@@ -4,18 +4,24 @@
 use crate::{
     cache::{Cache, acceptable},
     link::{Datagram, Family, Link},
-    reflect::{Limiter, Recent},
+    reflect::{Limiter, Recent, ServiceFilter},
     rewrite::Mapper,
 };
 use async_trait::async_trait;
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{Name, RData, Record, RecordType, rdata::SOA},
+    rr::{
+        Name, RData, Record, RecordType,
+        rdata::{A, AAAA, SOA, SRV},
+    },
 };
 use lumen_resolver::BridgeAnswer;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::Notify;
@@ -39,9 +45,26 @@ pub struct Settings {
     pub wait: Duration,
     pub ttl_cap: u32,
     pub max_records: usize,
+    /// Service types that may be reflected (`_airplay._tcp`). Empty: all.
+    pub reflect_allow: Vec<String>,
+    /// Service types that are never reflected.
+    pub reflect_block: Vec<String>,
+    /// Label to publish this machine under, as `<label>.local`. `None`: publish nothing.
+    pub publish: Option<String>,
+    /// DNS Push port advertised through `_dns-push-tls._tcp.<domain>`.
+    pub push_port: Option<u16>,
 }
 
+/// TTL of the records this machine publishes about itself (RFC 6762 recommends 120 seconds).
+const OWN_TTL: u32 = 120;
+
 pub struct Bridge {
+    filter: ServiceFilter,
+    own: Mutex<Option<Name>>,
+    publish_label: Option<String>,
+    published: AtomicBool,
+    conflict: AtomicBool,
+    conflicts: Notify,
     links: Vec<Arc<dyn Link>>,
     cache: Cache,
     mapper: Option<Mapper>,
@@ -65,7 +88,18 @@ impl Bridge {
     pub fn new(links: Vec<Arc<dyn Link>>, settings: Settings) -> Result<Arc<Self>, String> {
         let mapper = settings.domain.as_deref().map(Mapper::new).transpose()?;
         let now = Instant::now();
+        let own = settings
+            .publish
+            .as_deref()
+            .map(|label| Name::from_ascii(format!("{label}.local.")).map_err(|e| e.to_string()))
+            .transpose()?;
         Ok(Arc::new(Self {
+            filter: ServiceFilter::new(&settings.reflect_allow, &settings.reflect_block),
+            own: Mutex::new(own),
+            publish_label: settings.publish.clone(),
+            published: AtomicBool::new(false),
+            conflict: AtomicBool::new(false),
+            conflicts: Notify::new(),
             links,
             cache: Cache::new(settings.max_records),
             mapper,
@@ -103,8 +137,14 @@ impl Bridge {
         {
             return;
         }
+        if self.name_conflicts(datagram.link, &message) {
+            self.conflict.store(true, Ordering::Release);
+            self.published.store(false, Ordering::Release);
+            self.conflicts.notify_one();
+        }
         if self.settings.reflect
             && datagram.source.port() == 5353
+            && self.filter.permits(&message)
             && lock(&self.recent).first_time(&datagram.bytes, now)
             && lock(&self.reflect_limit).allow(now)
         {
@@ -113,6 +153,9 @@ impl Bridge {
                     let _ = other.send(&datagram.bytes).await;
                 }
             }
+        }
+        if message.metadata.message_type == MessageType::Query {
+            self.answer_for_self(datagram.link, &message, now).await;
         }
         if self.mapper.is_some() && message.metadata.message_type == MessageType::Response {
             let mut news = false;
@@ -124,6 +167,170 @@ impl Bridge {
             if news {
                 self.news.notify_waiters();
             }
+        }
+    }
+
+    /// The address records for this machine's published name on one link.
+    fn own_records(&self, link: usize) -> Vec<Record> {
+        let name = lock(&self.own).clone();
+        let (Some(name), Some(link)) = (name, self.links.get(link)) else {
+            return Vec::new();
+        };
+        link.addresses()
+            .into_iter()
+            .map(|address| {
+                let data = match address {
+                    std::net::IpAddr::V4(v4) => RData::A(A(v4)),
+                    std::net::IpAddr::V6(v6) => RData::AAAA(AAAA(v6)),
+                };
+                let mut record = Record::from_rdata(name.clone(), OWN_TTL, data);
+                record.mdns_cache_flush = true;
+                record
+            })
+            .collect()
+    }
+
+    async fn send_own(&self, link: usize, records: Vec<Record>, now: Instant) {
+        if records.is_empty() {
+            return;
+        }
+        let mut message = Message::response(0, OpCode::Query);
+        message.metadata.authoritative = true;
+        for record in records {
+            message.add_answer(record);
+        }
+        let (Ok(bytes), Some(link)) = (message.to_vec(), self.links.get(link)) else {
+            return;
+        };
+        // Our own packet comes back through multicast loopback: do not repeat it.
+        lock(&self.recent).first_time(&bytes, now);
+        let _ = link.send(&bytes).await;
+    }
+
+    /// Answer questions for this machine's own name, on the link they came from.
+    async fn answer_for_self(&self, link: usize, message: &Message, now: Instant) {
+        if !self.published.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(own) = lock(&self.own).clone() else {
+            return;
+        };
+        let wanted = message.queries.iter().any(|q| {
+            q.name().to_lowercase() == own
+                && matches!(
+                    q.query_type(),
+                    RecordType::A | RecordType::AAAA | RecordType::ANY
+                )
+        });
+        if wanted && lock(&self.reflect_limit).allow(now) {
+            self.send_own(link, self.own_records(link), now).await;
+        }
+    }
+
+    /// Announce this machine's name on every link. Call twice, a second apart, at startup.
+    pub async fn announce(&self) {
+        if lock(&self.own).is_none() {
+            return;
+        }
+        self.published.store(true, Ordering::Release);
+        let now = Instant::now();
+        for link in 0..self.links.len() {
+            self.send_own(link, self.own_records(link), now).await;
+        }
+    }
+
+    fn name_conflicts(&self, link: usize, message: &Message) -> bool {
+        let Some(own) = lock(&self.own).clone() else {
+            return false;
+        };
+        let ours = self.own_records(link);
+        let foreign: Vec<&Record> = message
+            .answers
+            .iter()
+            .chain(&message.authorities)
+            .chain(&message.additionals)
+            .filter(|record| {
+                record.name.to_lowercase() == own
+                    && matches!(record.record_type(), RecordType::A | RecordType::AAAA)
+                    && !ours.iter().any(|item| item.data == record.data)
+            })
+            .collect();
+        if foreign.is_empty() {
+            return false;
+        }
+        if message.metadata.message_type == MessageType::Response {
+            return true;
+        }
+        // Simultaneous probes use the RFC 6762 tie-break. The lexicographically later record set
+        // wins; only the loser moves to another name, so two fresh hosts do not rename forever.
+        let key = |record: &Record| (u16::from(record.record_type()), record.data.to_string());
+        let mut theirs: Vec<_> = foreign.into_iter().map(key).collect();
+        let mut ours: Vec<_> = ours.iter().map(key).collect();
+        theirs.sort();
+        ours.sort();
+        theirs > ours
+    }
+
+    async fn send_probe(&self) {
+        let Some(name) = lock(&self.own).clone() else {
+            return;
+        };
+        for (index, link) in self.links.iter().enumerate() {
+            let records = self.own_records(index);
+            let mut message = Message::query();
+            message.metadata.id = 0;
+            message.metadata.recursion_desired = false;
+            message.add_query(Query::query(name.clone(), RecordType::ANY));
+            message.authorities.extend(records);
+            if let Ok(bytes) = message.to_vec() {
+                let _ = link.send(&bytes).await;
+            }
+        }
+    }
+
+    /// Probe before publishing, then defend the selected name. A conflict picks the next
+    /// `<name>-N` label and probes again. This task runs for the lifetime of the bridge.
+    pub async fn publish(self: Arc<Self>) {
+        let Some(base) = self.publish_label.clone() else {
+            return;
+        };
+        let mut suffix = 1u16;
+        loop {
+            let label = if suffix == 1 {
+                base.clone()
+            } else {
+                let tail = format!("-{suffix}");
+                let keep = 63usize.saturating_sub(tail.len()).min(base.len());
+                format!("{}{}", &base[..keep], tail)
+            };
+            let Ok(name) = Name::from_ascii(format!("{label}.local.")) else {
+                return;
+            };
+            *lock(&self.own) = Some(name);
+            self.conflict.store(false, Ordering::Release);
+            for _ in 0..3 {
+                self.send_probe().await;
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if self.conflict.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+            if self.conflict.load(Ordering::Acquire) {
+                suffix = suffix.saturating_add(1);
+                if suffix == u16::MAX {
+                    *lock(&self.own) = None;
+                    return;
+                }
+                continue;
+            }
+            self.published.store(true, Ordering::Release);
+            self.announce().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            self.announce().await;
+            if !self.conflict.load(Ordering::Acquire) {
+                self.conflicts.notified().await;
+            }
+            suffix = suffix.saturating_add(1);
         }
     }
 
@@ -222,12 +429,35 @@ impl Bridge {
         )
     }
 
-    async fn resolve(&self, name: &Name, rtype: RecordType) -> Option<BridgeAnswer> {
+    pub(crate) async fn resolve(&self, name: &Name, rtype: RecordType) -> Option<BridgeAnswer> {
         let mapper = self.mapper.as_ref()?;
         if !mapper.handles(name) {
             return None;
         }
         let soa = Self::soa(mapper);
+        if let Some(port) = self.settings.push_port {
+            let service =
+                Name::from_ascii(format!("_dns-push-tls._tcp.{}", mapper.domain().to_ascii()))
+                    .ok()?;
+            if name.to_lowercase() == service.to_lowercase() {
+                let record = Record::from_rdata(
+                    service,
+                    self.settings.ttl_cap,
+                    RData::SRV(SRV::new(0, 0, port, mapper.domain().clone())),
+                );
+                return Some(if matches!(rtype, RecordType::SRV | RecordType::ANY) {
+                    BridgeAnswer {
+                        answers: vec![record],
+                        ..BridgeAnswer::default()
+                    }
+                } else {
+                    BridgeAnswer {
+                        authorities: vec![soa],
+                        ..BridgeAnswer::default()
+                    }
+                });
+            }
+        }
         if mapper.is_apex(name) {
             // The domain itself: a SOA, and nothing else.
             return Some(if matches!(rtype, RecordType::SOA | RecordType::ANY) {
@@ -275,6 +505,58 @@ impl Bridge {
                 .collect(),
             ..BridgeAnswer::default()
         })
+    }
+
+    pub(crate) fn handles(&self, name: &Name) -> bool {
+        self.mapper
+            .as_ref()
+            .is_some_and(|mapper| mapper.handles(name))
+    }
+
+    /// Current records only. DNS Push uses this after the first lookup so refreshes never make
+    /// one multicast query per subscription.
+    pub(crate) fn snapshot(&self, name: &Name, rtype: RecordType) -> Option<Vec<Record>> {
+        let mapper = self.mapper.as_ref()?;
+        if !mapper.handles(name) {
+            return None;
+        }
+        if let Some(port) = self.settings.push_port {
+            let service =
+                Name::from_ascii(format!("_dns-push-tls._tcp.{}", mapper.domain().to_ascii()))
+                    .ok()?;
+            if name.to_lowercase() == service.to_lowercase() {
+                return Some(
+                    matches!(rtype, RecordType::SRV | RecordType::ANY)
+                        .then(|| {
+                            vec![Record::from_rdata(
+                                service,
+                                self.settings.ttl_cap,
+                                RData::SRV(SRV::new(0, 0, port, mapper.domain().clone())),
+                            )]
+                        })
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        if mapper.is_apex(name) {
+            return Some(
+                matches!(rtype, RecordType::SOA | RecordType::ANY)
+                    .then(|| vec![Self::soa(mapper)])
+                    .unwrap_or_default(),
+            );
+        }
+        let local = mapper.to_local(name)?;
+        Some(
+            self.lookup(&local, rtype)
+                .iter()
+                .map(|record| mapper.record_to_domain(record, self.settings.ttl_cap))
+                .collect(),
+        )
+    }
+
+    /// Wait for a learned record set to change.
+    pub(crate) async fn changed(&self) {
+        self.news.notified().await;
     }
 
     /// How many links speak each family, for logs.
@@ -339,6 +621,9 @@ mod tests {
         fn on_link(&self, source: IpAddr) -> bool {
             source.to_string().starts_with("192.168.")
         }
+        fn addresses(&self) -> Vec<IpAddr> {
+            vec!["192.168.1.2".parse().unwrap(), "fd00::2".parse().unwrap()]
+        }
     }
 
     fn name(text: &str) -> Name {
@@ -376,6 +661,10 @@ mod tests {
             wait: Duration::from_millis(400),
             ttl_cap: 120,
             max_records: 1000,
+            reflect_allow: Vec::new(),
+            reflect_block: Vec::new(),
+            publish: None,
+            push_port: None,
         }
     }
 
@@ -666,5 +955,117 @@ mod tests {
             "20 clients, {} packets",
             link.sent().len()
         );
+    }
+
+    fn ask_bytes(host: &str, rtype: RecordType) -> Vec<u8> {
+        let mut message = Message::query();
+        message.metadata.id = 0;
+        message.add_query(Query::query(name(host), rtype));
+        message.to_vec().unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_machine_answers_for_and_announces_its_own_name() {
+        let link = MemoryLink::new("eth0");
+        let mut config = settings(None, false);
+        config.publish = Some("lumen".into());
+        let bridge = Bridge::new(vec![link.clone()], config).unwrap();
+        bridge.announce().await;
+        let announced = Message::from_vec(&link.sent()[0]).unwrap();
+        assert_eq!(announced.answers.len(), 2, "A and AAAA");
+        assert!(
+            announced
+                .answers
+                .iter()
+                .all(|r| r.name == name("lumen.local.") && r.mdns_cache_flush && r.ttl == OWN_TTL)
+        );
+        // A question for the name is answered on the same link; another name is not.
+        let before = link.sent().len();
+        bridge
+            .handle(
+                datagram(
+                    0,
+                    "192.168.1.9",
+                    5353,
+                    ask_bytes("Lumen.local.", RecordType::A),
+                ),
+                Instant::now(),
+            )
+            .await;
+        assert_eq!(link.sent().len(), before + 1);
+        bridge
+            .handle(
+                datagram(
+                    0,
+                    "192.168.1.9",
+                    5353,
+                    ask_bytes("other.local.", RecordType::A),
+                ),
+                Instant::now(),
+            )
+            .await;
+        assert_eq!(link.sent().len(), before + 1);
+        // Off by default: nothing is announced.
+        let quiet = MemoryLink::new("eth0");
+        Bridge::new(vec![quiet.clone()], settings(None, false))
+            .unwrap()
+            .announce()
+            .await;
+        assert!(quiet.sent().is_empty());
+    }
+
+    #[tokio::test]
+    async fn publishing_probes_and_renames_after_a_conflict() {
+        let link = MemoryLink::new("lan");
+        let mut config = settings(None, false);
+        config.publish = Some("lumen".into());
+        let bridge = Bridge::new(vec![link], config).unwrap();
+        let publisher = tokio::spawn(bridge.clone().publish());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        bridge
+            .handle(
+                datagram(
+                    0,
+                    "192.168.1.9",
+                    5353,
+                    response(vec![Record::from_rdata(
+                        name("lumen.local."),
+                        120,
+                        RData::A(A::new(192, 168, 1, 9)),
+                    )]),
+                ),
+                Instant::now(),
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert_eq!(
+            lock(&bridge.own).as_ref().map(Name::to_ascii).as_deref(),
+            Some("lumen-2.local.")
+        );
+        assert!(bridge.published.load(Ordering::Acquire));
+        publisher.abort();
+    }
+
+    #[tokio::test]
+    async fn reflection_follows_the_service_filters() {
+        let (one, two) = (MemoryLink::new("eth0"), MemoryLink::new("eth1"));
+        let mut config = settings(None, true);
+        config.reflect_allow = vec!["_airplay._tcp".into()];
+        let bridge = Bridge::new(vec![one, two.clone()], config).unwrap();
+        for query in [
+            ask_bytes("_airplay._tcp.local.", RecordType::PTR),
+            ask_bytes("_ssh._tcp.local.", RecordType::PTR),
+            ask_bytes("tv.local.", RecordType::A),
+        ] {
+            bridge
+                .handle(datagram(0, "192.168.1.9", 5353, query), Instant::now())
+                .await;
+        }
+        let repeated: Vec<String> = two
+            .sent()
+            .iter()
+            .map(|p| Message::from_vec(p).unwrap().queries[0].name().to_ascii())
+            .collect();
+        assert_eq!(repeated, ["_airplay._tcp.local.", "tv.local."]);
     }
 }

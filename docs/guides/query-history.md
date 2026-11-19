@@ -72,3 +72,7 @@ Deleting is permanent. In the console, lookups still waiting to be written are d
 - [Web console](web-console.md)
 - [`lumenctl` reference](../reference/cli.md#query-history)
 - [Threat model](../design/threat-model.md)
+
+## Device names
+
+When the [network module](network.md) is on, the **Activity** page shows the device name from the inventory instead of the bare IP address, with the address underneath. Names are looked up when the page loads, so a rename also shows on older lookups; the log itself still stores only the address. The **Names** button switches it off and on (remembered in your browser). It only appears when history records which device asked.

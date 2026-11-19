@@ -27,4 +27,8 @@ pub trait Link: Send + Sync {
     async fn send(&self, packet: &[u8]) -> io::Result<()>;
     /// Whether `source` could be a device on this link.
     fn on_link(&self, source: IpAddr) -> bool;
+    /// This machine's own addresses on the link, for publishing its name.
+    fn addresses(&self) -> Vec<IpAddr> {
+        Vec::new()
+    }
 }
