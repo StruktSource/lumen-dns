@@ -190,7 +190,7 @@ L.views.ipam = () => {
   const head = L.pageHead('IPAM', 'Subnets, addresses, VLANs and locations in one inventory. It records what you use; it never changes a device.',
     h('button', { class: 'btn', onclick: reload }, 'Refresh'));
   if (!I()) return [head, L.empty('Loading', 'One moment.')];
-  const tab = VIEWS[L.route().sub] ? L.route().sub : 'overview';
+  const tab = TABS.some(([id]) => id === L.route().sub) ? L.route().sub : 'overview';
   return [head, L.tabs(TABS, tab, id => L.go('ipam', id)), h('div', { style: 'margin-top:16px' }, VIEWS[tab]())];
 };
 })();

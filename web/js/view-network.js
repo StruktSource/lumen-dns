@@ -393,7 +393,7 @@ L.views.network = () => {
   start();
   const head = L.pageHead('Network', 'Devices on your networks, how they connect, and whether they are up. Lumen only looks at networks you list, and it never changes a device.', h('button', { class: 'btn', onclick: reload }, 'Refresh'));
   if (!N()) return [head, L.empty('Loading', 'One moment.')];
-  const tab = VIEWS[L.route().sub] ? L.route().sub : 'overview';
+  const tab = TABS.some(([id]) => id === L.route().sub) ? L.route().sub : 'overview';
   return [head, L.tabs(TABS, tab, id => L.go('network', id)), h('div', { style: 'margin-top:16px' }, VIEWS[tab]())];
 };
 })();
