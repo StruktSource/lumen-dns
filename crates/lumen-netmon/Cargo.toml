@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 aes = "0.8"
-cfb-mode = "0.8"
+cfb-mode = "0.9"
 ipnet.workspace = true
 lumen-config = { path = "../lumen-config" }
 lumen-ipam = { path = "../lumen-ipam" }
