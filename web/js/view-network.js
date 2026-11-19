@@ -388,12 +388,12 @@ const topologyTab = () => {
     h('div', { class: 'net-topo-wrap' }, svg), h('div', { class: 'card-b' }, legend, h('p', { class: 'hint', style: 'margin:8px 0 0' }, 'Pings and neighbor tables cannot show how devices are wired. A link is confirmed only when a switch reports it (LLDP) or you add it; the rest is inferred and drawn dashed.')))];
 };
 
-const VIEWS = { overview: overviewTab, devices: devicesTab, rooms: roomsTab, topology: topologyTab, monitoring: monitoringTab, discovery: discoveryTab };
+const VIEWS = new Map(Object.entries({ overview: overviewTab, devices: devicesTab, rooms: roomsTab, topology: topologyTab, monitoring: monitoringTab, discovery: discoveryTab }));
 L.views.network = () => {
   start();
   const head = L.pageHead('Network', 'Devices on your networks, how they connect, and whether they are up. Lumen only looks at networks you list, and it never changes a device.', h('button', { class: 'btn', onclick: reload }, 'Refresh'));
   if (!N()) return [head, L.empty('Loading', 'One moment.')];
-  const tab = TABS.some(([id]) => id === L.route().sub) ? L.route().sub : 'overview';
-  return [head, L.tabs(TABS, tab, id => L.go('network', id)), h('div', { style: 'margin-top:16px' }, VIEWS[tab]())];
+  const tab = VIEWS.has(L.route().sub) ? L.route().sub : 'overview';
+  return [head, L.tabs(TABS, tab, id => L.go('network', id)), h('div', { style: 'margin-top:16px' }, VIEWS.get(tab)())];
 };
 })();
