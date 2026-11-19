@@ -2,7 +2,7 @@
 //! management API. The caller authenticates, checks the module is on, and checks [`access`].
 
 use crate::{
-    model::{Device, DeviceFilter, DeviceInput, Link, LinkInput, Status},
+    model::{Device, DeviceFilter, DeviceInput, Link, LinkInput, RoomInput, Status},
     oui::Oui,
     store::{Netmon, now},
 };
@@ -27,7 +27,10 @@ pub enum Access {
 #[allow(clippy::unnested_or_patterns)] // Flat match arms read best as a route table.
 pub fn access(method: &str, parts: &[&str]) -> Option<Access> {
     match (method, parts) {
-        ("GET", [] | ["devices" | "links" | "topology" | "events" | "scans" | "locations"])
+        (
+            "GET",
+            [] | ["devices" | "links" | "topology" | "events" | "scans" | "locations" | "rooms"],
+        )
         | (
             "GET",
             ["devices", _]
@@ -35,8 +38,8 @@ pub fn access(method: &str, parts: &[&str]) -> Option<Access> {
             | ["devices", _, "interfaces", _, "history"],
         ) => Some(Access::Read),
         ("POST", ["scan"]) => Some(Access::Operate),
-        ("POST", ["devices" | "links"])
-        | ("PUT" | "DELETE", ["devices" | "links", _])
+        ("POST", ["devices" | "links" | "rooms"])
+        | ("PUT" | "DELETE", ["devices" | "links" | "rooms", _])
         | ("POST", ["devices", _, "merge" | "ipam"])
         | ("DELETE", ["devices", _, "addresses", _]) => Some(Access::Manage),
         _ => None,
@@ -392,6 +395,7 @@ fn run(request: &Request<'_>) -> Result<Outcome, Outcome> {
         ("GET", ["locations"]) => {
             Outcome::of(lumen_ipam::Ipam::open(request.state).and_then(|i| i.locations()))
         }
+        ("GET", ["rooms"]) => Outcome::of(nm.rooms()),
         ("POST", ["scan"]) => match nm.request_scan() {
             Ok(()) => {
                 let mut o = Outcome::json(200, json!({ "requested": true }));
@@ -408,6 +412,27 @@ fn run(request: &Request<'_>) -> Result<Outcome, Outcome> {
                 input.name,
             )
         }
+        ("POST", ["rooms"]) => {
+            let input: RoomInput = parse(body)?;
+            Outcome::done(nm.add_room(&input), "network.room.add", input.name)
+        }
+        ("PUT", ["rooms", raw]) => {
+            let (room, input) = (id(raw)?, parse::<RoomInput>(body)?);
+            Outcome::done(
+                nm.update_room(room, &input),
+                "network.room.edit",
+                input.name,
+            )
+        }
+        ("DELETE", ["rooms", raw]) => match nm.delete_room(id(raw)?) {
+            Ok(true) => {
+                let mut outcome = Outcome::json(200, json!({ "deleted": true }));
+                outcome.audit = Some(("network.room.delete", (*raw).to_owned()));
+                outcome
+            }
+            Ok(false) => Outcome::error(404, "not found"),
+            Err(message) => Outcome::fail(&message),
+        },
         ("PUT", ["devices", raw]) => {
             let (n, input) = (id(raw)?, parse::<DeviceInput>(body)?);
             Outcome::done(

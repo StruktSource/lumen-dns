@@ -303,14 +303,19 @@ mod tests {
         let result = tcp_check(open, 2, Duration::from_millis(500)).await;
         assert_eq!((result.sent, result.received), (2, 2));
         drop(listener);
+        // Use a fresh port with no established connections waiting in its accept queue. Reusing
+        // `open` can still complete one queued handshake after the listener is dropped.
+        let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed = closed_listener.local_addr().unwrap();
+        drop(closed_listener);
         // A closed port answers with a refusal. (Some systems rate-limit those answers when the
         // machine is busy, so silence is accepted too; an open port is not.)
         assert!(!matches!(
-            tcp(open, Duration::from_millis(500)).await,
+            tcp(closed, Duration::from_millis(500)).await,
             Tcp::Open(_)
         ));
         assert_eq!(
-            tcp_check(open, 1, Duration::from_millis(500))
+            tcp_check(closed, 1, Duration::from_millis(500))
                 .await
                 .received,
             0

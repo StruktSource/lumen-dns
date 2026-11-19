@@ -38,9 +38,10 @@ _Last updated 2026-11-13 for version 0.7.0._
 **Still ahead**
 
 - Timer-driven DNSSEC key rollover, separate KSK/ZSK keys, and signing for dynamic and split-horizon zones
-- mDNS self-publishing, DNS Push, and per-service reflection filters
-- DHCP lease and reservation links to device and local-DNS policy
-- A device and room manager with multiple addresses, optional FRITZ!Box discovery, manual matching, and DNS policy links
+- mDNS self-publishing, conflict probing, DNS Push, and per-service reflection filters
+- DHCP lease and reservation links to stable device identities
+- A device and room manager with multiple addresses, nested rooms, confidence, and manual matching
+- Network-inventory links to filtering policy; optional FRITZ!Box import
 - Optional DNS threat feeds and enterprise policy
 - Finish HTTPS/SVCB and ECH-record interoperability
 
@@ -151,7 +152,7 @@ Principles that shape every decision:
 - [x] Automatic trust-anchor rollover (RFC 5011): persistent state, 30-day hold-down, revocation, daily signed check. Opt-in with `trust_anchor_state`. Changes apply at the next restart; not yet run across a real root KSK rollover
 - [x] Authoritative DNS zones and operator-managed records from zone files or inline text, separate from Lumen's built-in empty local zones. Unsigned; see the DNSSEC signing item
 - [x] **Split-horizon views** by client network, **conditional forwarding**, and DNS-SD as ordinary records. mDNS bridging (discovery proxy and reflector, 0.7.0) is a separate opt-in module
-- [x] Multicast DNS bridge (0.7.0): a discovery proxy (`.local` devices answered under your own domain, service browsing included) and a reflector between interfaces. Opt-in, Linux and macOS. Self-publishing (`publish_name`, no conflict probing) and per-service reflection filters are in. Open: DNS Push
+- [x] Multicast DNS bridge: discovery proxy, reflector, filtered reflection, conflict-safe self-publishing, and DNS Push over TLS/DSO with live updates
 - [x] Dynamic DNS updates (RFC 2136) with TSIG authentication, per-key name and type scope, a SQLite journal, and bounded size
 - [x] Zone transfers over TCP with TSIG-keyed policy and a one-message size bound. Dynamic zones answer IXFR with the differences from the last 32 updates (in memory; a full transfer after a restart or for older serials), NOTIFY is sent to `notify` secondaries at startup and after accepted updates
 - [x] DNSSEC signing for operator zones: NSEC/NSEC3, daily signature renewal, combined or separate KSK/ZSK roles, manual double signing or a scheduled successor-key handoff, and signed dynamic and split-horizon zones. Dynamic updates re-sign before their new data is served (unreleased). Real parent/registrar handoff remains validation work
@@ -201,11 +202,9 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 ### Active feature queue
 
 1. **DNSSEC zone lifecycle (implemented, validation open).** Timer-driven successor handoff, separate KSK/ZSK keys, and signing for dynamic and split-horizon zones are implemented. Full hosted CI and a real parent/registrar KSK handoff remain under validation.
-2. **mDNS completion (partly implemented).** Self-publishing and per-service reflection filters are done. DNS Push (RFC 8765) and conflict probing remain.
-3. **DHCP policy links.** Connect live leases and reservations to device identities and local-DNS policy.
-4. **Device and room manager.** Group multiple IPv4/IPv6 addresses under one identity, add rooms, optional FRITZ!Box discovery, manual matching and corrections, and DNS policy links.
-5. **Threat feeds and enterprise policy.** Optional and disabled by default, without changing privacy defaults.
-6. **HTTPS/SVCB and ECH-record interoperability.** Finish the remaining Issue #36 paths. Native TLS ECH stays in smaller tails until dependencies expose it.
+2. **Network policy links.** The stable device identity, DHCP lease/reservation link, nested rooms, confidence, and correction UI are implemented. Still open: link that inventory to filtering profiles and optional FRITZ!Box import.
+3. **Threat feeds and enterprise policy.** Optional and disabled by default, without changing privacy defaults.
+4. **HTTPS/SVCB and ECH-record interoperability.** Finish the remaining Issue #36 paths. Native TLS ECH stays in smaller tails until dependencies expose it.
 
 ### Lower priority: later
 

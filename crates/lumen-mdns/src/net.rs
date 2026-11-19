@@ -3,11 +3,14 @@
 use crate::{
     bridge::{Bridge, Settings},
     link::{Datagram, Family, Link},
+    push,
     reflect::{on_link_v4, on_link_v6},
 };
 use async_trait::async_trait;
+use ipnet::IpNet;
 use lumen_config::Mdns;
 use lumen_resolver::Resolver;
+use rustls::ServerConfig;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io,
@@ -188,7 +191,12 @@ impl Drop for Running {
 /// # Errors
 /// An interface does not exist or has no address, or a socket cannot be opened.
 #[allow(clippy::too_many_lines)]
-pub async fn start(config: &Mdns, resolver: &Resolver) -> io::Result<Running> {
+pub async fn start(
+    config: &Mdns,
+    resolver: &Resolver,
+    push_tls: Option<ServerConfig>,
+    push_clients: &[IpNet],
+) -> io::Result<Running> {
     let test_mode = config.group4.is_some() || config.group6.is_some();
     let found = if test_mode {
         config
@@ -265,21 +273,26 @@ pub async fn start(config: &Mdns, resolver: &Resolver) -> io::Result<Running> {
             reflect_allow: config.reflect_services.clone(),
             reflect_block: config.reflect_block_services.clone(),
             publish: config.publish_name.clone(),
+            push_port: config.push_listen.first().map(SocketAddr::port),
         },
     )
     .map_err(io::Error::other)?;
+    let mut tasks = if config.push_listen.is_empty() {
+        Vec::new()
+    } else {
+        let tls = push_tls.ok_or_else(|| io::Error::other("DNS Push needs TLS credentials"))?;
+        push::start(
+            &config.push_listen,
+            Arc::new(tls),
+            bridge.clone(),
+            usize::from(config.push_max_connections),
+            usize::from(config.push_max_subscriptions),
+            push_clients.to_vec(),
+        )
+        .await?
+    };
     if config.domain.is_some() {
         resolver.set_bridge(bridge.clone());
-    }
-    let mut tasks = Vec::new();
-    if config.publish_name.is_some() {
-        let announcer = bridge.clone();
-        tasks.push(tokio::spawn(async move {
-            // RFC 6762 section 8.3: announce at least twice, a second apart.
-            announcer.announce().await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            announcer.announce().await;
-        }));
     }
     for (index, socket) in sockets.into_iter().enumerate() {
         let tx = tx.clone();
@@ -305,5 +318,9 @@ pub async fn start(config: &Mdns, resolver: &Resolver) -> io::Result<Running> {
             engine.handle(datagram, Instant::now()).await;
         }
     }));
+    if config.publish_name.is_some() {
+        let publisher = bridge.clone();
+        tasks.push(tokio::spawn(async move { publisher.publish().await }));
+    }
     Ok(Running { bridge, tasks })
 }

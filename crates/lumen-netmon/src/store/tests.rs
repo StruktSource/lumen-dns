@@ -9,6 +9,7 @@ fn seen(source: Source, ip: &str, mac: Option<&str>, host: Option<&str>) -> Obse
     Observation {
         ip: Some(ip.parse().unwrap()),
         mac: mac.map(|m| parse_mac(m).unwrap()),
+        dhcp_id: None,
         hostname: host.map(str::to_owned),
         source,
         sys: None,
@@ -21,6 +22,65 @@ fn all(db: &Netmon) -> Vec<Device> {
         ..DeviceFilter::default()
     })
     .unwrap()
+}
+
+#[test]
+fn a_dhcp_client_id_keeps_one_device_across_address_changes() {
+    let (mut db, oui) = (db(), Oui::new());
+    let mut first = seen(Source::Dhcp, "192.168.1.20", None, Some("laptop"));
+    first.dhcp_id = Some("01-aa-bb-cc-dd-ee-ff".into());
+    let id = db.observe(&first, &oui).unwrap().unwrap().device_id;
+    let mut next = seen(Source::Dhcp, "192.168.1.44", None, Some("laptop"));
+    next.dhcp_id = Some("01:aa:bb:cc:dd:ee:ff".into());
+    assert_eq!(db.observe(&next, &oui).unwrap().unwrap().device_id, id);
+    let device = db.device(id).unwrap().unwrap();
+    assert_eq!(device.addresses.len(), 2);
+    assert_eq!(device.dhcp_ids, vec!["01aabbccddeeff"]);
+    assert_eq!(device.identity_confidence, "probable");
+    assert!(db.detach(id, "01-aa-bb-cc-dd-ee-ff").unwrap());
+    assert!(db.device(id).unwrap().unwrap().dhcp_ids.is_empty());
+}
+
+#[test]
+fn rooms_nest_assign_and_refuse_cycles() {
+    let (mut db, oui) = (db(), Oui::new());
+    let floor = db
+        .add_room(&RoomInput {
+            name: "First floor".into(),
+            ..RoomInput::default()
+        })
+        .unwrap();
+    let office = db
+        .add_room(&RoomInput {
+            parent_id: Some(floor.id),
+            name: "Office".into(),
+            ..RoomInput::default()
+        })
+        .unwrap();
+    assert!(
+        db.update_room(
+            floor.id,
+            &RoomInput {
+                parent_id: Some(office.id),
+                name: floor.name.clone(),
+                description: String::new(),
+            },
+        )
+        .is_err()
+    );
+    let device = db
+        .add_device(
+            &DeviceInput {
+                name: "Desk phone".into(),
+                room_id: Some(office.id),
+                ..DeviceInput::default()
+            },
+            &oui,
+        )
+        .unwrap();
+    assert_eq!(device.room_id, Some(office.id));
+    assert!(db.delete_room(office.id).unwrap());
+    assert_eq!(db.device(device.id).unwrap().unwrap().room_id, None);
 }
 
 #[test]

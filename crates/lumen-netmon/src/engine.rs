@@ -44,6 +44,8 @@ pub struct DhcpHost {
     /// The client identifier as hex.
     pub client: String,
     pub hostname: Option<String>,
+    /// A configured reservation, whether or not it currently has a live lease.
+    pub reserved: bool,
 }
 
 /// How to reach a group of devices with SNMP. Secrets come from files and stay in memory.
@@ -481,6 +483,7 @@ impl Shared {
                     let mut o = Observation::new(Source::Dhcp);
                     o.ip = Some(lease.ip);
                     o.mac = mac_from_client(&lease.client);
+                    o.dhcp_id = Some(lease.client);
                     o.hostname = lease.hostname;
                     observations.push(o);
                 }

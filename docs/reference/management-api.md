@@ -98,11 +98,12 @@ Routes under `/v1/network` manage the inventory of the optional [Network module]
 | `GET /v1/network/devices/ID` | viewer | One device with interfaces, recent checks, availability, events, and links |
 | `GET /v1/network/devices/ID/checks?since=&limit=` | viewer | Availability checks |
 | `GET /v1/network/devices/ID/interfaces`, `.../interfaces/INDEX/history` | viewer | Interfaces and traffic history |
-| `GET /v1/network/links`, `/topology?subnet=&vlan=&location=&kind=`, `/events`, `/scans`, `/locations` | viewer | Links, the topology graph (links say whether they are confirmed), events, discovery runs, IPAM locations |
+| `GET /v1/network/links`, `/topology?subnet=&vlan=&location=&kind=`, `/events`, `/scans`, `/locations`, `/rooms` | viewer | Links, topology, events, discovery runs, IPAM locations, and nested network rooms |
 | `POST /v1/network/scan` | operator | Ask the daemon to run discovery |
-| `POST /v1/network/devices`, `PUT`/`DELETE /v1/network/devices/ID` | admin | Devices. Body: `name`, `hostname`, `kind`, `os`, `icon`, `description`, `notes`, `location_id`, `monitoring`, `snmp_profile`, `addresses`, `macs` |
+| `POST /v1/network/devices`, `PUT`/`DELETE /v1/network/devices/ID` | admin | Devices. Body also accepts `room_id` and `dhcp_ids` with the existing identity, detail, monitoring, address, and MAC fields |
+| `POST /v1/network/rooms`, `PUT`/`DELETE /v1/network/rooms/ID` | admin | Nested rooms. Body: `name`, optional `parent_id`, `description` |
 | `POST /v1/network/devices/ID/merge` | admin | Body `{"other": ID}`: fold the other device into this one |
-| `DELETE /v1/network/devices/ID/addresses/VALUE` | admin | Remove an address or hardware address from a device |
+| `DELETE /v1/network/devices/ID/addresses/VALUE` | admin | Remove an IP, hardware address, or DHCP client ID from a device |
 | `POST /v1/network/devices/ID/ipam` | admin | Body `{"ip": "...", "dns": false}`: record the address in IPAM |
 | `POST /v1/network/links`, `PUT`/`DELETE /v1/network/links/ID` | admin | Links. Body: `a_device`, `a_port`, `b_device`, `b_port`, `speed_mbps` |
 

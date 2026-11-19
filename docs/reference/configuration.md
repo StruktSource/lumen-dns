@@ -113,7 +113,10 @@ Off unless `enabled = true`. See [Multicast DNS bridge](../guides/mdns.md).
 | `reflect` | `false` | Needs two or more interfaces | Repeat mDNS between the interfaces. Crosses network boundaries |
 | `reflect_services` | `[]` | Up to 64 entries like `_airplay._tcp`; needs `reflect` | Repeat only these service types. Empty repeats every service. Plain host lookups (`tv.local`) are always repeated |
 | `reflect_block_services` | `[]` | Same shape; needs `reflect` | Never repeat these service types. Wins over `reflect_services` |
-| `publish_name` | unset | One DNS label | Answer for and announce `<publish_name>.local` (A and AAAA for each listed interface). No conflict probing: pick a unique label |
+| `publish_name` | unset | One DNS label | Probe, answer for, and announce `<publish_name>.local`; conflicts use `-2`, `-3`, and so on |
+| `push_listen` | `[]` | Up to 8 addresses, one nonzero port; needs `domain` and the encrypted-listener certificate/key | DNS Push (RFC 8765) over TLS; `_dns-push-tls._tcp.<domain>` advertises the port |
+| `push_max_connections` | `64` | 1 to 1024 | Simultaneous DNS Push TLS sessions |
+| `push_max_subscriptions` | `128` | 1 to 1024 | Subscriptions in one DNS Push session |
 | `ipv6` | `true` | | Also use `ff02::fb` |
 | `wait_ms` | `700` | 100 to 3000 | How long a question waits for devices |
 | `ttl_cap_secs` | `120` | 1 to 3600 | Longest TTL given to an answer |

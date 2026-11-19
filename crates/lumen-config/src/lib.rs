@@ -322,8 +322,15 @@ pub struct Mdns {
     /// Never reflect these service types. Wins over `reflect_services`.
     pub reflect_block_services: Vec<String>,
     /// Publish this machine over mDNS as `<publish_name>.local` (A and AAAA for each listed
-    /// interface). Unset publishes nothing. There is no conflict probing: pick a unique label.
+    /// interface). Unset publishes nothing. Lumen probes before use and adds `-2`, `-3`, and so
+    /// on when another host already owns the name.
     pub publish_name: Option<String>,
+    /// DNS Push (RFC 8765) TLS listeners. Uses the encrypted DNS certificate and key.
+    pub push_listen: Vec<SocketAddr>,
+    /// Most simultaneous DNS Push TLS sessions.
+    pub push_max_connections: u16,
+    /// Most active subscriptions in one DNS Push session.
+    pub push_max_subscriptions: u16,
     /// Also use IPv6 (`ff02::fb`) next to IPv4.
     pub ipv6: bool,
     /// How long a question waits for devices to answer, in milliseconds (100 to 3000).
@@ -348,6 +355,9 @@ impl Default for Mdns {
             reflect_services: Vec::new(),
             reflect_block_services: Vec::new(),
             publish_name: None,
+            push_listen: Vec::new(),
+            push_max_connections: 64,
+            push_max_subscriptions: 128,
             ipv6: true,
             wait_ms: 700,
             ttl_cap_secs: 120,
@@ -1669,7 +1679,8 @@ impl Config {
         let encrypted = !self.listen.dot.is_empty()
             || !self.listen.doh.is_empty()
             || !self.listen.doq.is_empty()
-            || !self.listen.doh3.is_empty();
+            || !self.listen.doh3.is_empty()
+            || !self.mdns.push_listen.is_empty();
         if encrypted && (self.listen.certificate.is_none() || self.listen.private_key.is_none()) {
             return Err("encrypted listeners require certificate and private_key".into());
         }
@@ -2000,6 +2011,9 @@ impl Config {
     fn validate_mdns(&self) -> Result<(), String> {
         let mdns = &self.mdns;
         if !mdns.enabled {
+            if !mdns.push_listen.is_empty() {
+                return Err("mdns.push_listen needs mdns.enabled = true".into());
+            }
             return Ok(());
         }
         if mdns.interfaces.is_empty()
@@ -2023,6 +2037,21 @@ impl Config {
             return Err(
                 "mdns needs a domain (discovery proxy), reflect = true, or a publish_name".into(),
             );
+        }
+        if !mdns.push_listen.is_empty() && mdns.domain.is_none() {
+            return Err("mdns.push_listen needs mdns.domain".into());
+        }
+        if mdns.push_listen.len() > 8
+            || mdns.push_listen.iter().any(|address| address.port() == 0)
+            || mdns.push_listen.first().is_some_and(|first| {
+                mdns.push_listen
+                    .iter()
+                    .any(|item| item.port() != first.port())
+            })
+            || !(1..=1024).contains(&mdns.push_max_connections)
+            || !(1..=1024).contains(&mdns.push_max_subscriptions)
+        {
+            return Err("mdns DNS Push listeners or limits are out of range".into());
         }
         let service_ok = |s: &String| {
             let parts: Vec<&str> = s.split('.').collect();
@@ -3188,6 +3217,17 @@ mod tests {
         );
         reflect.mdns.interfaces = vec!["eth0".into(), "eth1".into()];
         assert!(reflect.validate_mdns().is_ok());
+        let mut push = on();
+        push.mdns.push_listen = vec![
+            "127.0.0.1:853".parse().unwrap(),
+            "[::1]:853".parse().unwrap(),
+        ];
+        assert!(push.validate_mdns().is_ok());
+        push.mdns.push_listen[1] = "[::1]:8853".parse().unwrap();
+        assert!(
+            push.validate_mdns().is_err(),
+            "DNS Push advertises one port"
+        );
         // The domain must not overlap the DHCP domain.
         let mut dhcp = on();
         dhcp.dhcp.enabled = true;

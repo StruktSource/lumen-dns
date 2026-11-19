@@ -36,19 +36,43 @@ fn reverse_name(ip: IpAddr) -> String {
 #[async_trait]
 impl lumen_netmon::Environment for Environment {
     fn dhcp_hosts(&self) -> Vec<DhcpHost> {
-        let Some(dhcp) = self.0.dhcp.get() else {
-            return Vec::new();
-        };
-        dhcp.snapshot()
-            .leases
+        let mut hosts: Vec<DhcpHost> = self
+            .0
+            .dhcp
+            .get()
             .into_iter()
+            .flat_map(|dhcp| dhcp.snapshot().leases)
             .filter(|l| l.prefix_len.is_none() && !l.temporary)
             .map(|l| DhcpHost {
                 ip: l.ip,
                 client: l.client,
                 hostname: l.hostname,
+                reserved: false,
             })
-            .collect()
+            .collect();
+        if self.0.config.dhcp.enabled {
+            for scope in &self.0.config.dhcp.scopes {
+                hosts.extend(scope.reservations.iter().map(|reservation| DhcpHost {
+                    ip: reservation.ip.into(),
+                    client: reservation.mac.replace([':', '-'], "").to_ascii_lowercase(),
+                    hostname: reservation.hostname.clone(),
+                    reserved: true,
+                }));
+            }
+            for scope in &self.0.config.dhcp.scopes6 {
+                hosts.extend(scope.reservations.iter().map(|reservation| DhcpHost {
+                    ip: reservation.ip.into(),
+                    client: reservation.duid.to_ascii_lowercase(),
+                    hostname: reservation.hostname.clone(),
+                    reserved: true,
+                }));
+            }
+        }
+        hosts.sort_by(|left, right| {
+            (left.ip, &left.client, left.reserved).cmp(&(right.ip, &right.client, right.reserved))
+        });
+        hosts.dedup_by(|left, right| left.ip == right.ip && left.client == right.client);
+        hosts
     }
 
     /// Ask this daemon's own resolver, as a local client, so what it answers (local zones, DHCP

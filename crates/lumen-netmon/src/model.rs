@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 pub const MAX_DEVICES: usize = 20_000;
 pub const MAX_LINKS: usize = 50_000;
+pub const MAX_ROOMS: usize = 1_024;
 
 /// What a device is. Discovery guesses; an administrator can always set it.
 pub const KINDS: &[&str] = &[
@@ -141,6 +142,8 @@ pub struct Device {
     pub notes: String,
     /// An IPAM location.
     pub location_id: Option<i64>,
+    /// A room managed by this module. It does not require IPAM.
+    pub room_id: Option<i64>,
     /// Created by an administrator rather than found.
     pub manual: bool,
     /// Fields an administrator set. Discovery never overwrites these.
@@ -156,6 +159,10 @@ pub struct Device {
     pub snmp_profile: Option<String>,
     pub addresses: Vec<DeviceAddress>,
     pub macs: Vec<DeviceMac>,
+    /// Stable DHCP client identifiers attached to this identity.
+    pub dhcp_ids: Vec<String>,
+    /// `confirmed`, `probable`, or `uncertain`.
+    pub identity_confidence: String,
     /// Facts read over SNMP, when available.
     pub sys: Option<SysInfo>,
     /// The IPAM subnet and VLAN of the first address, when IPAM knows it.
@@ -199,6 +206,8 @@ pub struct DeviceInput {
     #[serde(default)]
     pub location_id: Option<i64>,
     #[serde(default)]
+    pub room_id: Option<i64>,
+    #[serde(default)]
     pub monitoring: Option<Monitoring>,
     #[serde(default)]
     pub snmp_profile: Option<String>,
@@ -207,6 +216,27 @@ pub struct DeviceInput {
     pub addresses: Vec<String>,
     #[serde(default)]
     pub macs: Vec<String>,
+    #[serde(default)]
+    pub dhcp_ids: Vec<String>,
+}
+
+/// A user-managed room or area. Rooms may be nested.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct Room {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoomInput {
+    #[serde(default)]
+    pub parent_id: Option<i64>,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]

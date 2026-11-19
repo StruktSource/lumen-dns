@@ -6,7 +6,7 @@
 use crate::{
     model::{
         Counts, Device, DeviceAddress, DeviceFilter, DeviceInput, DeviceMac, Event, ICONS, KINDS,
-        MAX_DEVICES, Monitoring, Status, SysInfo,
+        MAX_DEVICES, MAX_ROOMS, Monitoring, Room, RoomInput, Status, SysInfo,
     },
     oui::{Mac, Oui, format_mac, is_usable, parse_mac},
 };
@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS nm_devices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL, hostname TEXT, kind TEXT NOT NULL DEFAULT 'unknown', os TEXT, vendor TEXT,
     icon TEXT, description TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
-    location_id INTEGER, manual INTEGER NOT NULL DEFAULT 0, locked TEXT NOT NULL DEFAULT '[]',
+    location_id INTEGER, room_id INTEGER REFERENCES nm_rooms(id) ON DELETE SET NULL,
+    manual INTEGER NOT NULL DEFAULT 0, locked TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'unknown', first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
     last_ok INTEGER, missed INTEGER NOT NULL DEFAULT 0, gone INTEGER NOT NULL DEFAULT 0,
     fail_streak INTEGER NOT NULL DEFAULT 0,
@@ -38,6 +39,15 @@ CREATE TABLE IF NOT EXISTS nm_macs (
     mac TEXT PRIMARY KEY, device_id INTEGER NOT NULL REFERENCES nm_devices(id) ON DELETE CASCADE,
     source TEXT NOT NULL, last_seen INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS nm_macs_device ON nm_macs(device_id);
+CREATE TABLE IF NOT EXISTS nm_dhcp_ids (
+    client TEXT PRIMARY KEY, device_id INTEGER NOT NULL REFERENCES nm_devices(id) ON DELETE CASCADE,
+    source TEXT NOT NULL, last_seen INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS nm_dhcp_device ON nm_dhcp_ids(device_id);
+CREATE TABLE IF NOT EXISTS nm_rooms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id INTEGER REFERENCES nm_rooms(id) ON DELETE SET NULL,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    description TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS nm_links (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     a_device INTEGER NOT NULL REFERENCES nm_devices(id) ON DELETE CASCADE, a_port TEXT NOT NULL DEFAULT '',
@@ -126,6 +136,7 @@ impl Source {
 pub struct Observation {
     pub ip: Option<IpAddr>,
     pub mac: Option<Mac>,
+    pub dhcp_id: Option<String>,
     pub hostname: Option<String>,
     pub source: Source,
     pub sys: Option<SysInfo>,
@@ -137,6 +148,7 @@ impl Observation {
         Self {
             ip: None,
             mac: None,
+            dhcp_id: None,
             hostname: None,
             source,
             sys: None,
@@ -366,6 +378,21 @@ impl Netmon {
         conn.pragma_update(None, "foreign_keys", true)
             .map_err(sql)?;
         conn.execute_batch(SCHEMA).map_err(sql)?;
+        let columns = conn
+            .prepare("PRAGMA table_info(nm_devices)")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(sql)?;
+        if !columns.iter().any(|column| column == "room_id") {
+            conn.execute(
+                "ALTER TABLE nm_devices ADD COLUMN room_id INTEGER REFERENCES nm_rooms(id) ON DELETE SET NULL",
+                [],
+            )
+            .map_err(sql)?;
+        }
         Ok(Self { conn })
     }
 
@@ -424,6 +451,132 @@ impl Netmon {
         Ok(counts)
     }
 
+    /// All rooms, ordered by name.
+    ///
+    /// # Errors
+    /// The state database could not be read.
+    pub fn rooms(&self) -> Result<Vec<Room>, String> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, parent_id, name, description FROM nm_rooms ORDER BY name, id")
+            .map_err(sql)?;
+        statement
+            .query_map([], |row| {
+                Ok(Room {
+                    id: row.get(0)?,
+                    parent_id: row.get(1)?,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                })
+            })
+            .map_err(sql)?
+            .collect::<Result<_, _>>()
+            .map_err(sql)
+    }
+
+    /// Add a room or area.
+    ///
+    /// # Errors
+    /// A field or parent is invalid, the room already exists, or the database failed.
+    pub fn add_room(&mut self, input: &RoomInput) -> Result<Room, String> {
+        let tx = self.write()?;
+        if count(&tx, "nm_rooms")? >= MAX_ROOMS {
+            return Err("too many rooms".into());
+        }
+        let name = label("room name", &input.name, 80, true)?;
+        let description = label("room description", &input.description, 500, false)?;
+        if let Some(parent) = input.parent_id
+            && !exists(&tx, "nm_rooms", parent)?
+        {
+            return Err("no such parent room".into());
+        }
+        tx.execute(
+            "INSERT INTO nm_rooms (parent_id, name, description) VALUES (?1, ?2, ?3)",
+            params![input.parent_id, name, description],
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::SqliteFailure(_, Some(message)) if message.contains("UNIQUE") => {
+                "a room with that name already exists".into()
+            }
+            other => sql(other),
+        })?;
+        let id = tx.last_insert_rowid();
+        tx.commit().map_err(sql)?;
+        self.rooms()?
+            .into_iter()
+            .find(|room| room.id == id)
+            .ok_or_else(|| "the room disappeared".into())
+    }
+
+    /// Change a room or area.
+    ///
+    /// # Errors
+    /// The room or parent is missing, the move makes a cycle, a field is invalid, or the
+    /// database failed.
+    pub fn update_room(&mut self, id: i64, input: &RoomInput) -> Result<Room, String> {
+        let tx = self.write()?;
+        if !exists(&tx, "nm_rooms", id)? {
+            return Err("no such room".into());
+        }
+        if input.parent_id == Some(id) {
+            return Err("a room cannot contain itself".into());
+        }
+        if let Some(parent) = input.parent_id
+            && !exists(&tx, "nm_rooms", parent)?
+        {
+            return Err("no such parent room".into());
+        }
+        let mut parent = input.parent_id;
+        for _ in 0..MAX_ROOMS {
+            let Some(at) = parent else { break };
+            if at == id {
+                return Err("a room cannot be moved inside one of its child rooms".into());
+            }
+            parent = tx
+                .query_row(
+                    "SELECT parent_id FROM nm_rooms WHERE id = ?1",
+                    [at],
+                    |row| row.get(0),
+                )
+                .map_err(sql)?;
+        }
+        let name = label("room name", &input.name, 80, true)?;
+        let description = label("room description", &input.description, 500, false)?;
+        tx.execute(
+            "UPDATE nm_rooms SET parent_id = ?2, name = ?3, description = ?4 WHERE id = ?1",
+            params![id, input.parent_id, name, description],
+        )
+        .map_err(sql)?;
+        tx.commit().map_err(sql)?;
+        self.rooms()?
+            .into_iter()
+            .find(|room| room.id == id)
+            .ok_or_else(|| "the room disappeared".into())
+    }
+
+    /// Delete a room. Devices become unassigned and child rooms move to the top level.
+    ///
+    /// # Errors
+    /// The state database could not be changed.
+    pub fn delete_room(&mut self, id: i64) -> Result<bool, String> {
+        let tx = self.write()?;
+        tx.execute(
+            "UPDATE nm_devices SET room_id = NULL WHERE room_id = ?1",
+            [id],
+        )
+        .map_err(sql)?;
+        tx.execute(
+            "UPDATE nm_rooms SET parent_id = NULL WHERE parent_id = ?1",
+            [id],
+        )
+        .map_err(sql)?;
+        let changed = tx
+            .execute("DELETE FROM nm_rooms WHERE id = ?1", [id])
+            .map_err(sql)?;
+        tx.commit().map_err(sql)?;
+        Ok(changed > 0)
+    }
+
     // ---- manual management ----
 
     /// Register a device by hand.
@@ -440,6 +593,12 @@ impl Netmon {
         let ts = now();
         let ips = parse_addresses(&input.addresses)?;
         let macs = parse_macs(&input.macs)?;
+        let dhcp_ids = parse_dhcp_ids(&input.dhcp_ids)?;
+        if let Some(room) = input.room_id
+            && !exists(&tx, "nm_rooms", room)?
+        {
+            return Err("no such room".into());
+        }
         for ip in &ips {
             if owner_of_ip(&tx, *ip)?.is_some() {
                 return Err(format!("{ip} already belongs to another device"));
@@ -453,6 +612,13 @@ impl Netmon {
                 ));
             }
         }
+        for client in &dhcp_ids {
+            if owner_of_dhcp(&tx, client)?.is_some() {
+                return Err(format!(
+                    "DHCP client {client} already belongs to another device"
+                ));
+            }
+        }
         let monitoring = input.monitoring.clone().unwrap_or_default();
         check_monitoring(&monitoring)?;
         let vendor = macs.iter().find_map(|m| oui.vendor(m));
@@ -460,9 +626,9 @@ impl Netmon {
             guess_kind(vendor.as_deref(), fields.hostname.as_deref(), None, None).to_owned()
         });
         tx.execute(
-            "INSERT INTO nm_devices (name, hostname, kind, os, vendor, icon, description, notes, location_id,
+            "INSERT INTO nm_devices (name, hostname, kind, os, vendor, icon, description, notes, location_id, room_id,
                  manual, locked, first_seen, last_seen, mon_enabled, mon_method, mon_port, mon_interval, snmp_profile)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, '[\"name\",\"kind\"]', ?10, ?10, ?11, ?12, ?13, ?14, ?15)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, '[\"name\",\"kind\"]', ?11, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 fields.name,
                 fields.hostname,
@@ -473,6 +639,7 @@ impl Netmon {
                 fields.description,
                 fields.notes,
                 input.location_id,
+                input.room_id,
                 ts,
                 i64::from(monitoring.enabled),
                 monitoring.method.as_str(),
@@ -488,6 +655,9 @@ impl Netmon {
         }
         for mac in macs {
             attach_mac(&tx, id, &mac, "manual", ts)?;
+        }
+        for client in dhcp_ids {
+            attach_dhcp(&tx, id, &client, "manual", ts)?;
         }
         add_event(
             &tx,
@@ -521,6 +691,11 @@ impl Netmon {
             .clone()
             .unwrap_or_else(|| current.monitoring.clone());
         check_monitoring(&monitoring)?;
+        if let Some(room) = input.room_id
+            && !exists(&tx, "nm_rooms", room)?
+        {
+            return Err("no such room".into());
+        }
         // Only what the administrator actually changed is locked against discovery.
         let mut locked: HashSet<String> = current.locked.iter().cloned().collect();
         if fields.name != current.name {
@@ -543,8 +718,8 @@ impl Netmon {
         let kind = fields.kind.clone().unwrap_or(current.kind.clone());
         tx.execute(
             "UPDATE nm_devices SET name = ?2, hostname = ?3, kind = ?4, os = ?5, icon = ?6, description = ?7,
-                 notes = ?8, location_id = ?9, locked = ?10, mon_enabled = ?11, mon_method = ?12, mon_port = ?13,
-                 mon_interval = ?14, snmp_profile = ?15 WHERE id = ?1",
+                 notes = ?8, location_id = ?9, room_id = ?10, locked = ?11, mon_enabled = ?12, mon_method = ?13, mon_port = ?14,
+                 mon_interval = ?15, snmp_profile = ?16 WHERE id = ?1",
             params![
                 id,
                 fields.name,
@@ -555,6 +730,7 @@ impl Netmon {
                 fields.description,
                 fields.notes,
                 input.location_id,
+                input.room_id,
                 serde_json::to_string(&locked).map_err(|e| e.to_string())?,
                 i64::from(monitoring.enabled),
                 monitoring.method.as_str(),
@@ -596,12 +772,23 @@ impl Netmon {
                 }
             }
         }
+        for client in parse_dhcp_ids(&input.dhcp_ids)? {
+            match owner_of_dhcp(&tx, &client)? {
+                Some(owner) if owner != id => {
+                    return Err(format!(
+                        "DHCP client {client} already belongs to another device"
+                    ));
+                }
+                Some(_) => {}
+                None => attach_dhcp(&tx, id, &client, "manual", ts)?,
+            }
+        }
         tx.commit().map_err(sql)?;
         self.device(id)?
             .ok_or_else(|| "the device disappeared".into())
     }
 
-    /// Remove an address or MAC from a device (a wrong match, for example).
+    /// Remove an address, MAC, or DHCP client ID from a device.
     ///
     /// # Errors
     /// The value is neither an address nor a MAC.
@@ -617,8 +804,14 @@ impl Netmon {
                 "DELETE FROM nm_macs WHERE mac = ?1 AND device_id = ?2",
                 params![format_mac(&mac), id],
             )
+        } else if parse_dhcp_ids(&[value.to_owned()]).is_ok() {
+            let normalized = value.trim().replace([':', '-'], "").to_ascii_lowercase();
+            tx.execute(
+                "DELETE FROM nm_dhcp_ids WHERE client = ?1 AND device_id = ?2",
+                params![normalized, id],
+            )
         } else {
-            return Err("give an IP address or a MAC address".into());
+            return Err("give an IP address, MAC address, or DHCP client ID".into());
         }
         .map_err(sql)?;
         tx.commit().map_err(sql)?;
@@ -676,7 +869,13 @@ impl Netmon {
     #[allow(clippy::too_many_lines)]
     pub fn observe(&mut self, seen: &Observation, oui: &Oui) -> Result<Option<Merged>, String> {
         let mac = seen.mac.filter(is_usable);
-        if seen.ip.is_none() && mac.is_none() {
+        let dhcp_id = seen
+            .dhcp_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.replace([':', '-'], "").to_ascii_lowercase());
+        if seen.ip.is_none() && mac.is_none() && dhcp_id.is_none() {
             return Ok(None);
         }
         let tx = self.write()?;
@@ -689,8 +888,18 @@ impl Netmon {
             Some(ip) => owner_of_ip(&tx, ip)?,
             None => None,
         };
+        let by_dhcp = match &dhcp_id {
+            Some(client) => owner_of_dhcp(&tx, client)?,
+            None => None,
+        };
+        if let (Some(by_dhcp), Some(by_mac)) = (by_dhcp, by_mac)
+            && by_dhcp != by_mac
+        {
+            return Err("the DHCP client ID and MAC belong to different devices; correct the identity before scanning again".into());
+        }
+        let by_identity = by_dhcp.or(by_mac);
         let mut merged = Merged::default();
-        let id = match (by_mac, by_ip) {
+        let id = match (by_identity, by_ip) {
             (Some(a), Some(b)) if a != b => {
                 // The device that held this address has hardware addresses of its own: it is a
                 // different device and the address simply changed hands (it moves below).
@@ -754,6 +963,9 @@ impl Netmon {
         }
         if let Some(mac) = &mac {
             attach_mac(&tx, id, mac, seen.source.as_str(), ts)?;
+        }
+        if let Some(client) = &dhcp_id {
+            attach_dhcp(&tx, id, client, seen.source.as_str(), ts)?;
         }
         let device = load_devices(&tx, Some(id))?
             .into_iter()
@@ -1167,6 +1379,24 @@ fn parse_macs(list: &[String]) -> Result<Vec<Mac>, String> {
         .collect()
 }
 
+fn parse_dhcp_ids(list: &[String]) -> Result<Vec<String>, String> {
+    if list.len() > 16 {
+        return Err("at most 16 DHCP client IDs per device".into());
+    }
+    list.iter()
+        .map(|value| {
+            let value = value.trim().replace([':', '-'], "").to_ascii_lowercase();
+            if value.is_empty()
+                || value.len() > 256
+                || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(format!("{value} is not a DHCP client ID"));
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
 pub(crate) fn count(conn: &Connection, table: &str) -> Result<usize, String> {
     let total: i64 = conn
         .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
@@ -1204,6 +1434,16 @@ fn owner_of_mac(conn: &Connection, mac: &Mac) -> Result<Option<i64>, String> {
     .map_err(sql)
 }
 
+fn owner_of_dhcp(conn: &Connection, client: &str) -> Result<Option<i64>, String> {
+    conn.query_row(
+        "SELECT device_id FROM nm_dhcp_ids WHERE client = ?1",
+        [client],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(sql)
+}
+
 fn attach_ip(
     tx: &Transaction<'_>,
     id: i64,
@@ -1232,6 +1472,22 @@ fn attach_mac(
         "INSERT INTO nm_macs (mac, device_id, source, last_seen) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(mac) DO UPDATE SET device_id = ?2, last_seen = MAX(last_seen, ?4), source = ?3",
         params![format_mac(mac), id, source, seen],
+    )
+    .map_err(sql)?;
+    Ok(())
+}
+
+fn attach_dhcp(
+    tx: &Transaction<'_>,
+    id: i64,
+    client: &str,
+    source: &str,
+    seen: i64,
+) -> Result<(), String> {
+    tx.execute(
+        "INSERT INTO nm_dhcp_ids (client, device_id, source, last_seen) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(client) DO UPDATE SET device_id = ?2, source = ?3, last_seen = MAX(last_seen, ?4)",
+        params![client, id, source, seen],
     )
     .map_err(sql)?;
     Ok(())
@@ -1274,6 +1530,11 @@ fn absorb(tx: &Transaction<'_>, keep: i64, drop: i64) -> Result<(), String> {
     .map_err(sql)?;
     tx.execute(
         "UPDATE nm_macs SET device_id = ?1 WHERE device_id = ?2",
+        [keep, drop],
+    )
+    .map_err(sql)?;
+    tx.execute(
+        "UPDATE nm_dhcp_ids SET device_id = ?1 WHERE device_id = ?2",
         [keep, drop],
     )
     .map_err(sql)?;
@@ -1450,9 +1711,24 @@ pub(crate) fn load_devices(conn: &Connection, only: Option<i64>) -> Result<Vec<D
             sys.insert(id, s);
         }
     }
+    let mut dhcp: HashMap<i64, Vec<String>> = HashMap::new();
+    {
+        let mut statement = conn
+            .prepare("SELECT device_id, client FROM nm_dhcp_ids ORDER BY client")
+            .map_err(sql)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sql)?;
+        for row in rows {
+            let (id, client) = row.map_err(sql)?;
+            dhcp.entry(id).or_default().push(client);
+        }
+    }
     let mut st = conn
         .prepare(
-            "SELECT id, name, hostname, kind, os, vendor, icon, description, notes, location_id, manual, locked,
+            "SELECT id, name, hostname, kind, os, vendor, icon, description, notes, location_id, room_id, manual, locked,
                     status, first_seen, last_seen, last_ok, gone, mon_enabled, mon_method, mon_port, mon_interval,
                     snmp_profile FROM nm_devices WHERE (?1 IS NULL OR id = ?1) ORDER BY last_seen DESC, id",
         )
@@ -1460,7 +1736,7 @@ pub(crate) fn load_devices(conn: &Connection, only: Option<i64>) -> Result<Vec<D
     let rows = st
         .query_map([only], |r| {
             let id: i64 = r.get(0)?;
-            let locked: String = r.get(11)?;
+            let locked: String = r.get(12)?;
             Ok(Device {
                 id,
                 name: r.get(1)?,
@@ -1472,22 +1748,25 @@ pub(crate) fn load_devices(conn: &Connection, only: Option<i64>) -> Result<Vec<D
                 description: r.get(7)?,
                 notes: r.get(8)?,
                 location_id: r.get(9)?,
-                manual: r.get::<_, i64>(10)? != 0,
+                room_id: r.get(10)?,
+                manual: r.get::<_, i64>(11)? != 0,
                 locked: serde_json::from_str(&locked).unwrap_or_default(),
-                status: Status::parse(&r.get::<_, String>(12)?),
-                first_seen: r.get(13)?,
-                last_seen: r.get(14)?,
-                last_ok: r.get(15)?,
-                gone: r.get::<_, i64>(16)? != 0,
+                status: Status::parse(&r.get::<_, String>(13)?),
+                first_seen: r.get(14)?,
+                last_seen: r.get(15)?,
+                last_ok: r.get(16)?,
+                gone: r.get::<_, i64>(17)? != 0,
                 monitoring: Monitoring {
-                    enabled: r.get::<_, i64>(17)? != 0,
-                    method: crate::model::CheckMethod::parse(&r.get::<_, String>(18)?),
-                    tcp_port: r.get(19)?,
-                    interval_secs: r.get(20)?,
+                    enabled: r.get::<_, i64>(18)? != 0,
+                    method: crate::model::CheckMethod::parse(&r.get::<_, String>(19)?),
+                    tcp_port: r.get(20)?,
+                    interval_secs: r.get(21)?,
                 },
-                snmp_profile: r.get(21)?,
+                snmp_profile: r.get(22)?,
                 addresses: Vec::new(),
                 macs: Vec::new(),
+                dhcp_ids: Vec::new(),
+                identity_confidence: String::new(),
                 sys: None,
                 subnet: None,
                 vlan: None,
@@ -1499,6 +1778,14 @@ pub(crate) fn load_devices(conn: &Connection, only: Option<i64>) -> Result<Vec<D
         let mut d = row.map_err(sql)?;
         d.addresses = addrs.remove(&d.id).unwrap_or_default();
         d.macs = macs.remove(&d.id).unwrap_or_default();
+        d.dhcp_ids = dhcp.remove(&d.id).unwrap_or_default();
+        d.identity_confidence = if d.manual || d.locked.iter().any(|field| field == "name") {
+            "confirmed".to_owned()
+        } else if !d.macs.is_empty() || !d.dhcp_ids.is_empty() {
+            "probable".to_owned()
+        } else {
+            "uncertain".to_owned()
+        };
         d.sys = sys.remove(&d.id);
         out.push(d);
     }

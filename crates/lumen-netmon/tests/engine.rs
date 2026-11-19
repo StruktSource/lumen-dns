@@ -18,12 +18,14 @@ impl Environment for Env {
                 ip: "127.0.0.1".parse().unwrap(),
                 client: "01b827eb000042".into(),
                 hostname: Some("Loopback-Host".into()),
+                reserved: false,
             },
             // Outside the scope: must never be stored.
             DhcpHost {
                 ip: "10.99.99.99".parse().unwrap(),
                 client: "b827eb000043".into(),
                 hostname: Some("elsewhere".into()),
+                reserved: false,
             },
         ]
     }

@@ -1561,11 +1561,14 @@ version = "0.8.0"
 dependencies = [
  "async-trait",
  "hickory-proto",
+ "ipnet",
  "lumen-config",
  "lumen-resolver",
  "nix",
+ "rustls",
  "socket2",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

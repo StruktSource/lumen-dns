@@ -6,7 +6,7 @@ const L = window.L, h = L.h;
 const NS = 'http://www.w3.org/2000/svg';
 const sv = (tag, a = {}, ...k) => { const e = document.createElementNS(NS, tag); for (const [x, y] of Object.entries(a)) if (y != null && y !== false) e.setAttribute(x, y); k.flat().forEach(c => { if (c != null && c !== false) e.append(c.nodeType ? c : document.createTextNode(c)); }); return e; };
 
-const TABS = [['overview', 'Overview'], ['devices', 'Devices'], ['topology', 'Topology'], ['monitoring', 'Monitoring'], ['discovery', 'Discovery']];
+const TABS = [['overview', 'Overview'], ['devices', 'Devices'], ['rooms', 'Rooms'], ['topology', 'Topology'], ['monitoring', 'Monitoring'], ['discovery', 'Discovery']];
 const KINDS = ['router', 'switch', 'access-point', 'firewall', 'server', 'workstation', 'laptop', 'phone', 'tablet', 'printer', 'nas', 'camera', 'tv', 'iot', 'other', 'unknown'];
 const ICONS = ['router', 'switch', 'wifi', 'shield', 'server', 'desktop', 'laptop', 'phone', 'tablet', 'printer', 'storage', 'camera', 'tv', 'chip', 'device'];
 const KIND_ICON = { router: 'router', switch: 'switch', 'access-point': 'wifi', firewall: 'shield', server: 'server', workstation: 'desktop', laptop: 'laptop', phone: 'phone', tablet: 'tablet', printer: 'printer', nas: 'storage', camera: 'camera', tv: 'tv', iot: 'chip' };
@@ -49,13 +49,13 @@ const send = async (method, path, payload, done) => { const r = await L.api(meth
 
 L.loadNetwork = async () => {
   const sub = L.route().sub || 'overview';
-  const [home, list] = await Promise.all([L.api('GET', '/api/network'), L.api('GET', '/api/network/devices?' + qs({ q: fl.q, kind: fl.kind, status: fl.status, subnet: fl.subnet, location: fl.location, vlan: fl.vlan, sort: fl.sort, dir: fl.dir, gone: fl.gone, limit: 2000 }))]);
+  const [home, list, rooms] = await Promise.all([L.api('GET', '/api/network'), L.api('GET', '/api/network/devices?' + qs({ q: fl.q, kind: fl.kind, status: fl.status, subnet: fl.subnet, location: fl.location, vlan: fl.vlan, sort: fl.sort, dir: fl.dir, gone: fl.gone, limit: 2000 })), L.api('GET', '/api/network/rooms')]);
   const every = await L.api('GET', '/api/network/devices?limit=5000&gone=1').catch(() => list);
   const locations = home.ipam ? await L.api('GET', '/api/network/locations').catch(() => []) : [];
   const topology = sub === 'topology' ? await L.api('GET', '/api/network/topology?' + qs({ subnet: tf.subnet, vlan: tf.vlan, location: tf.location, kind: tf.kind })) : (N()?.topology || null);
   const events = sub === 'monitoring' ? await L.api('GET', '/api/network/events?limit=100') : (N()?.events || []);
   const scans = sub === 'discovery' ? await L.api('GET', '/api/network/scans') : (N()?.scans || []);
-  L.S.network = { ...home, devices: list.devices, total: list.total, everyone: every.devices, locations, topology, allEvents: events, allScans: scans };
+  L.S.network = { ...home, devices: list.devices, total: list.total, everyone: every.devices, locations, rooms, topology, allEvents: events, allScans: scans };
 };
 const reload = async () => { try { await L.loadNetwork(); L.rerender(); } catch (e) { L.toast(e.message, 'bad'); } };
 const start = () => {
@@ -69,6 +69,7 @@ const start = () => {
 L.stopModule = (old => id => { if (id === 'network' && timer) { clearInterval(timer); timer = null; } old?.(id); })(L.stopModule);
 
 const locName = id => { const l = N().locations.find(x => x.id === id); if (!l) return ''; const out = []; for (let at = l, n = 0; at && n < 20; at = at.parent_id ? N().locations.find(x => x.id === at.parent_id) : null, n++) out.unshift(at.name); return out.join(' › '); };
+const roomName = id => { const room = N().rooms.find(x => x.id === id); if (!room) return ''; const out = []; for (let at = room, n = 0; at && n < 20; at = at.parent_id ? N().rooms.find(x => x.id === at.parent_id) : null, n++) out.unshift(at.name); return out.join(' › '); };
 const byId = id => N().everyone.find(d => d.id === id);
 const addr = d => d.addresses.length ? d.addresses.map(a => a.ip) : [];
 
@@ -89,27 +90,30 @@ const form = ({ title, fields, value, label = 'Save', onSave, wide = true }) => 
 const num = v => v === '' || v == null ? null : Number(v);
 const none = v => v === '' || v == null ? null : v;
 const locOptions = () => [['', '— None —'], ...N().locations.map(l => [String(l.id), locName(l.id)])];
+const roomOptions = except => [['', '— None —'], ...N().rooms.filter(r => r.id !== except).map(r => [String(r.id), roomName(r.id)])];
 const MAC = /^([0-9a-f]{1,2}[:-]){5}[0-9a-f]{1,2}$|^[0-9a-f]{12}$/i;
 const IPV = s => /^[0-9a-f:.]+$/i.test(s) && (s.includes('.') || s.includes(':'));
 
 /* ---------- editing ---------- */
 const editDevice = d => form({
   title: d ? 'Edit device' : 'Add device',
-  value: d ? { name: d.name, hostname: d.hostname || '', kind: d.kind, icon: d.icon || '', os: d.os || '', description: d.description, notes: d.notes, location_id: d.location_id ? String(d.location_id) : '', enabled: d.monitoring.enabled, method: d.monitoring.method, tcp_port: d.monitoring.tcp_port ? String(d.monitoring.tcp_port) : '', interval: d.monitoring.interval_secs ? String(d.monitoring.interval_secs) : '', snmp_profile: d.snmp_profile || '', addresses: [], macs: [] }
-    : { name: '', hostname: '', kind: 'unknown', icon: '', os: '', description: '', notes: '', location_id: '', enabled: true, method: 'icmp', tcp_port: '', interval: '', snmp_profile: '', addresses: [], macs: [] },
+  value: d ? { name: d.name, hostname: d.hostname || '', kind: d.kind, icon: d.icon || '', os: d.os || '', description: d.description, notes: d.notes, location_id: d.location_id ? String(d.location_id) : '', room_id: d.room_id ? String(d.room_id) : '', enabled: d.monitoring.enabled, method: d.monitoring.method, tcp_port: d.monitoring.tcp_port ? String(d.monitoring.tcp_port) : '', interval: d.monitoring.interval_secs ? String(d.monitoring.interval_secs) : '', snmp_profile: d.snmp_profile || '', addresses: [], macs: [], dhcp_ids: d.dhcp_ids || [] }
+    : { name: '', hostname: '', kind: 'unknown', icon: '', os: '', description: '', notes: '', location_id: '', room_id: '', enabled: true, method: 'icmp', tcp_port: '', interval: '', snmp_profile: '', addresses: [], macs: [], dhcp_ids: [] },
   fields: [{ key: 'name', label: 'Name' }, { key: 'hostname', label: 'Host name', hint: 'Optional. Discovery fills this in when you leave it empty.' },
     { key: 'kind', label: 'Type', type: 'select', options: KINDS.map(k => [k, cap(k)]) }, { key: 'icon', label: 'Icon', type: 'select', options: [['', 'Automatic'], ...ICONS.map(i => [i, cap(i)])] },
     { key: 'os', label: 'Operating system' }, { key: 'location_id', label: 'Location', type: 'select', options: locOptions(), hint: N().ipam ? 'Locations come from IPAM.' : 'Turn on the IPAM module to organize devices by location.' },
+    { key: 'room_id', label: 'Room', type: 'select', options: roomOptions(), hint: 'Rooms are independent from IPAM locations and can be nested.' },
     { key: 'addresses', label: d ? 'Add addresses' : 'IP addresses', type: 'tags', validate: IPV, what: 'IP address', placeholder: 'Add an IPv4 or IPv6 address' },
     { key: 'macs', label: d ? 'Add hardware addresses' : 'MAC addresses', type: 'tags', validate: s => MAC.test(s), what: 'MAC address', placeholder: 'Add a MAC address' },
+    { key: 'dhcp_ids', label: 'DHCP client IDs', type: 'tags', validate: s => /^[0-9a-f:-]{2,256}$/i.test(s), what: 'DHCP client ID', placeholder: 'Stable client ID from DHCP' },
     { key: 'description', label: 'Description' }, { key: 'notes', label: 'Notes', type: 'area' },
     { key: 'enabled', label: 'Monitor availability', type: 'switch', hint: 'Check this device regularly and tell you when it stops answering.' },
     { key: 'method', label: 'Check with', type: 'select', options: [['icmp', 'Ping (ICMP)'], ['tcp', 'TCP connection'], ['snmp', 'SNMP']] },
     { key: 'tcp_port', label: 'TCP port', mono: true, hint: 'Only for TCP checks.' }, { key: 'interval', label: 'Check interval (seconds)', mono: true, hint: 'Empty uses the module default. 10 to 3600.' },
     { key: 'snmp_profile', label: 'SNMP profile', type: 'select', options: [['', 'From the scope'], ...(N().engine?.snmp_profiles || []).map(p => [p, p])], hint: 'Profiles are set up in the configuration; their secrets stay in files.' }],
   onSave: o => send(d ? 'PUT' : 'POST', d ? '/devices/' + d.id : '/devices', {
-    name: o.name, hostname: none(o.hostname), kind: d ? o.kind : (o.kind === 'unknown' ? null : o.kind), icon: none(o.icon), os: none(o.os), description: o.description || '', notes: o.notes || '', location_id: num(o.location_id),
-    monitoring: { enabled: !!o.enabled, method: o.method, tcp_port: num(o.tcp_port), interval_secs: num(o.interval) }, snmp_profile: none(o.snmp_profile), addresses: o.addresses, macs: o.macs }, 'Saved.') });
+    name: o.name, hostname: none(o.hostname), kind: d ? o.kind : (o.kind === 'unknown' ? null : o.kind), icon: none(o.icon), os: none(o.os), description: o.description || '', notes: o.notes || '', location_id: num(o.location_id), room_id: num(o.room_id),
+    monitoring: { enabled: !!o.enabled, method: o.method, tcp_port: num(o.tcp_port), interval_secs: num(o.interval) }, snmp_profile: none(o.snmp_profile), addresses: o.addresses, macs: o.macs, dhcp_ids: o.dhcp_ids }, 'Saved.') });
 
 const removeDevice = async d => {
   if (!(await L.confirm({ title: 'Delete this device?', text: L.t('{name} and its history are removed. If it is still on the network, discovery may add it again.', { name: d.name }), label: 'Delete', danger: true }))) return;
@@ -119,7 +123,7 @@ const mergeDevice = d => form({ title: L.t('Merge into {name}', { name: d.name }
   fields: [{ key: 'other', label: 'The other entry for the same device', type: 'select', options: [['', 'Choose a device'], ...N().everyone.filter(x => x.id !== d.id).map(x => [String(x.id), x.name + ' · ' + (x.addresses[0]?.ip || x.macs[0]?.mac || '')])], hint: 'Its addresses, hardware addresses, links and history move here. What you set on this device stays.' }],
   onSave: async o => { if (!o.other) throw new Error('Choose a device.'); await send('POST', '/devices/' + d.id + '/merge', { other: Number(o.other) }, 'Merged.'); } });
 const detach = async (d, value) => {
-  if (!(await L.confirm({ title: 'Remove this address?', text: L.t('{value} no longer belongs to {name}. Use this to correct a wrong match; discovery may match it again if it still points here.', { value, name: d.name }), label: 'Remove', danger: true }))) return;
+  if (!(await L.confirm({ title: 'Remove this identity value?', text: L.t('{value} no longer belongs to {name}. Use this to correct a wrong match; discovery may match it again if it still points here.', { value, name: d.name }), label: 'Remove', danger: true }))) return;
   try { await L.api('DELETE', '/api/network/devices/' + d.id + '/addresses/' + encodeURIComponent(value)); L.toast('Removed.'); await L.loadNetwork(); L.rerender(); } catch (e) { L.toast(e.message, 'bad'); }
 };
 const toIpam = async (d, ip) => {
@@ -170,13 +174,14 @@ const openDevice = async id => {
   const fact = (k, v) => v == null || v === '' ? null : h('div', { class: 'net-fact' }, h('span', { class: 'muted' }, k), h('span', {}, v));
   const body = h('div', { class: 'stack' },
     h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'row' }, h('span', { class: 'net-ic' }, glyph(iconOf(d), 26)), h('div', {}, h('strong', {}, d.name), h('div', { class: 'hint' }, [cap(d.kind), d.vendor, d.os].filter(Boolean).join(' · ')))), pill(d.status)),
-    h('div', { class: 'net-facts' }, fact('Host name', d.hostname), fact('Subnet', d.subnet), fact('VLAN', d.vlan), fact('Location', d.location_id ? locName(d.location_id) : ''), fact('First seen', L.fmt.time(d.first_seen * 1000)), fact('Last seen', L.fmt.time(d.last_seen * 1000)), fact('Last answer', d.last_ok ? L.fmt.time(d.last_ok * 1000) : ''), fact('Description', d.description), fact('Notes', d.notes),
+    h('div', { class: 'net-facts' }, fact('Host name', d.hostname), fact('Subnet', d.subnet), fact('VLAN', d.vlan), fact('Location', d.location_id ? locName(d.location_id) : ''), fact('Room', d.room_id ? roomName(d.room_id) : ''), fact('Identity match', cap(d.identity_confidence)), fact('First seen', L.fmt.time(d.first_seen * 1000)), fact('Last seen', L.fmt.time(d.last_seen * 1000)), fact('Last answer', d.last_ok ? L.fmt.time(d.last_ok * 1000) : ''), fact('Description', d.description), fact('Notes', d.notes),
       d.gone ? fact('State', 'Gone: not seen in the last discovery runs. It is kept, with its history.') : null,
       fact('Availability, 24 hours', r.availability_24h == null ? '' : pct(r.availability_24h)), fact('Availability, 7 days', r.availability_7d == null ? '' : pct(r.availability_7d)),
       fact('Monitoring', d.monitoring.enabled ? L.t('{method} every {n} s', { method: d.monitoring.method.toUpperCase() + (d.monitoring.tcp_port ? ':' + d.monitoring.tcp_port : ''), n: d.monitoring.interval_secs || N().engine?.monitor_interval_secs || '—' }) : 'Off')),
-    h('div', {}, h('h3', { class: 'net-h' }, 'Addresses'), d.addresses.length || d.macs.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('tbody', {},
+    h('div', {}, h('h3', { class: 'net-h' }, 'Identity and addresses'), d.addresses.length || d.macs.length || d.dhcp_ids.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('tbody', {},
       d.addresses.map(a => h('tr', {}, h('td', { class: 'mono-c' }, a.ip), h('td', {}, h('span', { class: 'chip' }, a.source)), h('td', { class: 'act' }, N().ipam ? h('button', { class: 'btn sm flat', onclick: () => toIpam(d, a.ip) }, 'Record in IPAM') : null, h('button', { class: 'btn sm flat', onclick: () => detach(d, a.ip) }, 'Remove')))),
-      d.macs.map(m => h('tr', {}, h('td', { class: 'mono-c' }, m.mac), h('td', {}, m.vendor || h('span', { class: 'muted' }, 'Private or unknown maker')), h('td', { class: 'act' }, h('button', { class: 'btn sm flat', onclick: () => detach(d, m.mac) }, 'Remove'))))))) : h('p', { class: 'muted' }, 'No addresses.')),
+      d.macs.map(m => h('tr', {}, h('td', { class: 'mono-c' }, m.mac), h('td', {}, m.vendor || h('span', { class: 'muted' }, 'Private or unknown maker')), h('td', { class: 'act' }, h('button', { class: 'btn sm flat', onclick: () => detach(d, m.mac) }, 'Remove')))),
+      d.dhcp_ids.map(id => h('tr', {}, h('td', { class: 'mono-c' }, id), h('td', {}, h('span', { class: 'chip' }, 'DHCP client ID')), h('td', { class: 'act' }, h('button', { class: 'btn sm flat', onclick: () => detach(d, id) }, 'Remove'))))))) : h('p', { class: 'muted' }, 'No identity data.')),
     r.checks.length ? h('div', {}, h('h3', { class: 'net-h' }, 'Recent checks'), strip(r.checks), h('div', { class: 'hint' }, L.t('Green answered, amber answered with lost packets, red did not answer. Newest at the right.'))) : null,
     sys ? h('div', {}, h('h3', { class: 'net-h' }, 'Reported by the device (SNMP)'), h('div', { class: 'net-facts' }, fact('Name', sys.name), fact('Description', sys.descr), fact('Uptime', sys.uptime_secs != null ? L.fmt.dur(sys.uptime_secs) : ''), fact('Contact', sys.contact), fact('Location', sys.location), fact('CPU', sys.cpu_percent != null ? pct(sys.cpu_percent) : ''), fact('Memory', sys.memory_percent != null ? pct(sys.memory_percent) : ''), fact('Temperature', sys.temperature_c != null ? sys.temperature_c.toFixed(0) + ' °C' : ''), fact('Updated', ago(sys.updated)))) : null,
     r.interfaces.length ? h('div', {}, h('h3', { class: 'net-h' }, 'Interfaces'), h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Port', 'State', 'Speed', 'In', 'Out', 'Used', 'Errors', 'Discards'].map(x => h('th', {}, x)))),
@@ -212,8 +217,8 @@ const overviewTab = () => {
 };
 
 /* ---------- devices ---------- */
-const GROUPS = [['none', 'No grouping'], ['kind', 'Type'], ['status', 'Status'], ['subnet', 'Subnet'], ['vlan', 'VLAN'], ['location', 'Location']];
-const groupKey = d => ({ none: '', kind: cap(d.kind), status: STATUS[d.status]?.[1] || '', subnet: d.subnet || 'No subnet', vlan: d.vlan || 'No VLAN', location: d.location_id ? locName(d.location_id) : 'No location' })[fl.group];
+const GROUPS = [['none', 'No grouping'], ['room', 'Room'], ['kind', 'Type'], ['status', 'Status'], ['subnet', 'Subnet'], ['vlan', 'VLAN'], ['location', 'Location']];
+const groupKey = d => ({ none: '', room: d.room_id ? roomName(d.room_id) : 'No room', kind: cap(d.kind), status: STATUS[d.status]?.[1] || '', subnet: d.subnet || 'No subnet', vlan: d.vlan || 'No VLAN', location: d.location_id ? locName(d.location_id) : 'No location' })[fl.group];
 const refilter = async () => { try { await L.loadNetwork(); } catch (e) { L.toast(e.message, 'bad'); } L.paintMain(); };
 const sel = (label, value, options, on) => h('select', { class: 'select', 'aria-label': label, onchange: e => on(e.target.value) }, options.map(([v, t]) => h('option', { value: v, selected: v === value }, L.t(t))));
 
@@ -243,9 +248,29 @@ const devicesTab = () => {
       : L.empty('No devices', fl.q || fl.kind || fl.status || fl.subnet ? 'Nothing matches the filters.' : 'Devices show up here once discovery finds them. You can also add one by hand.'))];
 };
 
+/* ---------- rooms ---------- */
+const editRoom = room => form({
+  title: room ? 'Edit room' : 'Add room', wide: false,
+  value: room ? { name: room.name, parent_id: room.parent_id ? String(room.parent_id) : '', description: room.description || '' } : { name: '', parent_id: '', description: '' },
+  fields: [{ key: 'name', label: 'Name' }, { key: 'parent_id', label: 'Inside', type: 'select', options: roomOptions(room?.id), hint: 'Use a parent for a floor, building, or area.' }, { key: 'description', label: 'Description', type: 'area' }],
+  onSave: o => send(room ? 'PUT' : 'POST', room ? '/rooms/' + room.id : '/rooms', { name: o.name, parent_id: num(o.parent_id), description: o.description || '' }, 'Saved.')
+});
+const removeRoom = async room => {
+  if (!(await L.confirm({ title: 'Delete this room?', text: 'Devices and child rooms are kept, but they will no longer be assigned to this room.', label: 'Delete', danger: true }))) return;
+  try { await send('DELETE', '/rooms/' + room.id, null, 'Deleted.'); } catch (e) { L.toast(e.message, 'bad'); }
+};
+const roomsTab = () => {
+  const rows = [...N().rooms].sort((a, b) => roomName(a.id).localeCompare(roomName(b.id)));
+  return [h('div', { class: 'card' }, h('div', { class: 'card-h' }, h('div', {}, h('strong', {}, 'Rooms'), h('div', { class: 'hint' }, 'Group devices by room, floor, building, or any nested place.')), h('button', { class: 'btn primary', onclick: () => editRoom(null) }, L.ic('plus'), 'Add room')),
+    rows.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Room', 'Description', 'Devices', ''].map(x => h('th', {}, x)))), h('tbody', {}, rows.map(room => {
+      const count = N().everyone.filter(d => d.room_id === room.id).length;
+      return h('tr', {}, h('td', {}, h('strong', {}, roomName(room.id))), h('td', {}, room.description || dash), h('td', {}, L.fmt.n(count)), h('td', { class: 'act' }, h('button', { class: 'btn sm flat', onclick: () => editRoom(room) }, 'Edit'), h('button', { class: 'btn sm flat danger', onclick: () => removeRoom(room) }, 'Delete')));
+    })))) : L.empty('No rooms yet', 'Add rooms, then assign devices from the device editor.'))];
+};
+
 /* ---------- monitoring ---------- */
 const toggleMonitor = async (d, on) => {
-  try { await send('PUT', '/devices/' + d.id, { name: d.name, description: d.description, notes: d.notes, location_id: d.location_id, snmp_profile: d.snmp_profile, monitoring: { ...d.monitoring, enabled: on } }, on ? 'Monitoring is on.' : 'Monitoring is off.'); } catch (e) { L.toast(e.message, 'bad'); }
+  try { await send('PUT', '/devices/' + d.id, { name: d.name, description: d.description, notes: d.notes, location_id: d.location_id, room_id: d.room_id, snmp_profile: d.snmp_profile, monitoring: { ...d.monitoring, enabled: on } }, on ? 'Monitoring is on.' : 'Monitoring is off.'); } catch (e) { L.toast(e.message, 'bad'); }
 };
 const monitoringTab = () => {
   const order = { offline: 0, degraded: 1, unknown: 2, online: 3 };
@@ -360,7 +385,7 @@ const topologyTab = () => {
     h('div', { class: 'net-topo-wrap' }, svg), h('div', { class: 'card-b' }, legend, h('p', { class: 'hint', style: 'margin:8px 0 0' }, 'Pings and neighbor tables cannot show how devices are wired. A link is confirmed only when a switch reports it (LLDP) or you add it; the rest is inferred and drawn dashed.')))];
 };
 
-const VIEWS = { overview: overviewTab, devices: devicesTab, topology: topologyTab, monitoring: monitoringTab, discovery: discoveryTab };
+const VIEWS = { overview: overviewTab, devices: devicesTab, rooms: roomsTab, topology: topologyTab, monitoring: monitoringTab, discovery: discoveryTab };
 L.views.network = () => {
   start();
   const head = L.pageHead('Network', 'Devices on your networks, how they connect, and whether they are up. Lumen only looks at networks you list, and it never changes a device.', h('button', { class: 'btn', onclick: reload }, 'Refresh'));

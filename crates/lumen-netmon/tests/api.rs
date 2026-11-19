@@ -34,9 +34,12 @@ fn routes_have_the_right_access_level() {
         Some(Access::Read)
     );
     assert_eq!(access("GET", &["topology"]), Some(Access::Read));
+    assert_eq!(access("GET", &["rooms"]), Some(Access::Read));
     assert_eq!(access("POST", &["scan"]), Some(Access::Operate));
     for (method, parts) in [
         ("POST", vec!["devices"]),
+        ("POST", vec!["rooms"]),
+        ("PUT", vec!["rooms", "1"]),
         ("PUT", vec!["links", "1"]),
         ("DELETE", vec!["devices", "1"]),
         ("POST", vec!["devices", "1", "merge"]),
@@ -50,6 +53,65 @@ fn routes_have_the_right_access_level() {
     }
     assert_eq!(access("GET", &["nothing"]), None);
     assert_eq!(access("PATCH", &["devices"]), None);
+}
+
+#[test]
+fn rooms_are_managed_and_devices_can_be_assigned() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.db");
+    let floor = call(
+        &state,
+        "POST",
+        "/rooms",
+        &json!({"name": "Ground floor"}),
+        false,
+    );
+    assert_eq!(floor.status, 200, "{}", floor.body);
+    let room = call(
+        &state,
+        "POST",
+        "/rooms",
+        &json!({"name": "Living room", "parent_id": floor.body["id"]}),
+        false,
+    );
+    assert_eq!(room.status, 200, "{}", room.body);
+    let device = call(
+        &state,
+        "POST",
+        "/devices",
+        &json!({"name": "TV", "room_id": room.body["id"], "dhcp_ids": ["01-aa-bb-cc-dd-ee-ff"]}),
+        false,
+    );
+    assert_eq!(device.status, 200, "{}", device.body);
+    assert_eq!(device.body["room_id"], room.body["id"]);
+    assert_eq!(device.body["dhcp_ids"], json!(["01aabbccddeeff"]));
+    assert_eq!(
+        call(&state, "GET", "/rooms", &Value::Null, false)
+            .body
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        call(
+            &state,
+            "DELETE",
+            &format!("/rooms/{}", room.body["id"]),
+            &Value::Null,
+            false,
+        )
+        .status,
+        200
+    );
+    let detail = call(
+        &state,
+        "GET",
+        &format!("/devices/{}", device.body["id"]),
+        &Value::Null,
+        false,
+    );
+    assert!(detail.body["device"]["room_id"].is_null());
 }
 
 #[test]

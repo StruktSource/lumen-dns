@@ -9,9 +9,10 @@ The inventory lives in the web console's state database, next to [IPAM](ipam.md)
 | Part | Behavior |
 | :--- | :--- |
 | Discovery | Finds devices with the system's ARP and NDP neighbor tables, ICMP echo (IPv4 hosts one by one, IPv6 links through the all-nodes group), your [DHCP](dhcp.md) leases, reverse DNS, and SNMP. A run starts when you ask, and on a schedule if you set one. Only addresses in your scopes are probed, learned, or stored. |
-| One entry per device | A device seen by several methods is one entry: it is matched by hardware address first, then by IP address. A device with several addresses (IPv4 and IPv6, a link-local address) is one entry. If two entries turn out to be the same device, they are merged. If an address changes hands between two devices that each have their own hardware address, the address moves and they stay two. |
+| One entry per device | A device seen by several methods is one entry: stable DHCP client ID first, then hardware address, then IP address. A device with several IPv4 and IPv6 addresses is one entry. Reservations link before a lease is live. Conflicting stable IDs stop the merge for manual correction. |
 | Gone devices | A device not seen in the networks of a run counts as a miss. After `gone_after_scans` misses in a row it is marked **gone**. It is hidden by default, never deleted, keeps all its data, and comes back by itself when it is seen again. |
-| Device details | Name, host name, addresses, hardware addresses, manufacturer (from the IEEE registry), type, operating system, icon, description, notes, first and last seen, location, subnet, and VLAN. Types are guessed from the manufacturer, the name, and what SNMP reports. You can always set your own. |
+| Device details | Name, host name, addresses, hardware and DHCP client IDs, identity confidence, manufacturer, type, operating system, icon, description, notes, first and last seen, room, location, subnet, and VLAN. You can always correct the match and fields. |
+| Rooms | Rooms are nested areas managed by Network. They do not need IPAM. A device can be assigned to one room and device lists can be grouped by room. |
 | What you set stays | Anything you edit is locked against discovery. Fields you leave alone keep following what discovery learns. Merging never loses what you set. |
 | IPAM link | A device's subnet and VLAN come from [IPAM](ipam.md) by its address, locations come from IPAM, and **Record in IPAM** adds a device's address to the inventory. |
 | Topology | A map of devices and the links between them, with zoom, pan, filters, and click-through to the device. See [Topology](#topology). |
@@ -44,7 +45,7 @@ Without `enabled = true` and at least one scope, nothing is probed. IPv4 scopes 
 | :--- | :--- | :--- |
 | Neighbor tables | Hardware addresses of devices on the link, for IPv4 (ARP) and IPv6 (NDP), and the other addresses of the same device | Read with `ip`, `arp`, and `ndp`, run without a shell, or `/proc/net/arp`. Only this machine's own link is visible. |
 | ICMP echo | Which addresses answer | Uses the unprivileged "ping" socket. On Linux the account must be allowed by `net.ipv4.ping_group_range`. Without it, discovery still uses the neighbor table and DHCP, and the console says so. |
-| DHCP | Addresses, hardware addresses, and host names of leases | A lease alone is not a sighting: it creates or updates a device but does not mark it present. |
+| DHCP | Client IDs, addresses, hardware addresses, and host names from leases and configured reservations | The stable client ID keeps one identity when the address changes. A lease or reservation alone is not a live sighting. |
 | DNS | Host names, by reverse lookup of addresses that have none | Asks Lumen's own resolver, so local zones and DHCP and IPAM names answer. |
 | SNMP | Name, description, uptime, and type of devices in a scope with an SNMP profile | Off unless `methods.snmp = true`. |
 
@@ -58,15 +59,19 @@ Reverse DNS and SNMP run for at most a few hundred addresses per run, a few at a
 
 ## Devices
 
-The **Devices** tab lists every device. Search matches names, addresses, hardware addresses, manufacturers, and descriptions. Filter by type, status, subnet, VLAN, or location, sort by last seen, name, address, status, type, or first seen, and group by type, status, subnet, VLAN, or location. Open a device for its details, addresses, recent checks, SNMP facts, interfaces with traffic rates, connections, and history.
+The **Devices** tab lists every device. Search matches names, addresses, hardware addresses, manufacturers, and descriptions. Filter by type, status, subnet, VLAN, or location, sort by last seen, name, address, status, type, or first seen, and group by room, type, status, subnet, VLAN, or location. Open a device for its details, identity confidence, DHCP IDs, addresses, checks, SNMP facts, interfaces, connections, and history.
 
-- **Add or edit** a device, including several IP addresses and hardware addresses, a type, an icon, notes, a location, and how it is monitored.
+- **Add or edit** a device, including several IP addresses, hardware addresses and DHCP client IDs, a room, type, icon, notes, location, and monitoring.
 - **Merge** two entries that are the same device. The one you choose to keep keeps what you set.
-- **Remove an address** from a device to correct a wrong match.
+- **Remove an IP, hardware address, or DHCP client ID** to correct a wrong match.
 - **Delete** a device and its history. If it is still on the network, discovery may add it again.
 - A device with no address can exist, but is not checked.
 
 Device data stays when a device is offline or gone.
+
+## Rooms
+
+The **Rooms** tab creates, edits, nests, and deletes areas such as site, building, floor, room, or rack. Deleting a room keeps its devices and child rooms but unassigns them. Cycles are refused. Rooms are independent from IPAM locations, so the device manager works without the IPAM module.
 
 ## Topology
 
@@ -140,7 +145,7 @@ Everything the console does is also available under `/v1/network` with a bearer 
 
 ## Limits and not included
 
-- 20,000 devices and 50,000 links. Names are limited to 64 characters, descriptions to 500, notes to 2,000.
+- 20,000 devices, 50,000 links, and 1,024 rooms. Each device has at most 16 DHCP client IDs. Names are limited to 64 characters, descriptions to 500, notes to 2,000.
 - Only this machine's link shows in the neighbor tables. Devices on other networks are found by ping and, with an SNMP profile, by the neighbor and forwarding tables of the routers and switches that profile can read.
 - Not included: CDP, a vendor-specific protocol integration, SNMP traps and `SET`, flow data, device configuration or backup, and e-mail or push notifications. Events are shown in the console and kept for the retention period. (Audit entries for changes to the inventory go to the audit log, and [webhooks](../reference/management-api.md#signed-webhooks) carry management-API activity.)
 - The Network page is English-only for now.

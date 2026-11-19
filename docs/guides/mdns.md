@@ -18,6 +18,9 @@ domain = "mdns.home.example"        # discovery proxy: <name>.<domain> is <name>
 # reflect_services = ["_airplay._tcp"]   # repeat only these services (empty: all)
 # reflect_block_services = ["_ssh._tcp"] # never repeat these
 # publish_name = "lumen"            # answer for and announce lumen.local
+# push_listen = ["0.0.0.0:853"]     # DNS Push over TLS for the proxy domain
+# push_max_connections = 64
+# push_max_subscriptions = 128
 # ipv6 = true                       # also use ff02::fb next to 224.0.0.251
 # wait_ms = 700                     # how long a question waits for devices (100 to 3000)
 # ttl_cap_secs = 120                # longest TTL in an answer (1 to 3600)
@@ -55,7 +58,13 @@ With `reflect_services` set, only those service types cross between networks; `r
 
 ## Publishing this machine
 
-`publish_name = "lumen"` answers questions for `lumen.local` (A and AAAA, from each listed interface's addresses) and announces it twice at startup. There is no conflict probing yet, so choose a label no other device uses.
+`publish_name = "lumen"` probes three times before it uses `lumen.local`, then announces it twice. If another device already owns the name, or claims it later, Lumen tries `lumen-2.local`, `lumen-3.local`, and so on. A and AAAA records come from each listed interface.
+
+## DNS Push
+
+`push_listen` serves DNS Push Notifications (RFC 8765) over TLS and DSO. It uses the same certificate and private key as the encrypted DNS listeners. The certificate must cover `mdns.domain`, which is also the TLS server name. Lumen advertises the first listener's port as `_dns-push-tls._tcp.<domain>`; every configured address must use that port.
+
+Clients allowed by `listen.allow_clients` can subscribe to a name and type below the proxy domain. Lumen sends the current record set, then sends additions and TTL-zero removals when mDNS announcements change or expire. `SUBSCRIBE`, `UNSUBSCRIBE`, DSO keepalive, and ordinary DNS queries on the same TLS session are supported. Messages, sessions, and subscriptions are bounded by the configuration. A subscription never causes a repeated multicast query after its first lookup.
 
 ## Who can see what
 
@@ -63,7 +72,7 @@ The discovery proxy answers anyone who may query Lumen, so what devices announce
 
 ## Not included
 
-mDNS **responding** (publishing Lumen's own names), mDNS over unicast with `DNS Push` / `DNS-SD` Service Registration (RFC 8765), advertising or filtering by service type in the reflector, and a console page. Say so on the [roadmap](../project/roadmap.md) if you need one.
+DNS-SD Service Registration is not a part of DNS Push and is not included. Lumen does not accept remote service registrations. The mDNS bridge has no separate console page.
 
 ## Related
 

@@ -82,6 +82,7 @@ impl RunningServer {
             && config.listen.doh.is_empty()
             && config.listen.doq.is_empty()
             && config.listen.doh3.is_empty()
+            && config.mdns.push_listen.is_empty()
         {
             (None, None)
         } else {
@@ -333,7 +334,24 @@ impl RunningServer {
             None
         };
         let mdns = if config.mdns.enabled {
-            Some(lumen_mdns::start(&config.mdns, &service.resolver).await?)
+            let push_tls = if config.mdns.push_listen.is_empty() {
+                None
+            } else {
+                Some(tls_config(
+                    tls.as_ref()
+                        .ok_or_else(|| io::Error::other("missing DNS Push TLS credentials"))?,
+                    b"",
+                )?)
+            };
+            Some(
+                lumen_mdns::start(
+                    &config.mdns,
+                    &service.resolver,
+                    push_tls,
+                    &config.listen.allow_clients,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -519,7 +537,9 @@ fn tls_config(keys: &Credentials, alpn: &[u8]) -> io::Result<ServerConfig> {
             .map_err(io::Error::other)?
             .with_no_client_auth()
             .with_cert_resolver(Arc::clone(keys) as Arc<dyn rustls::server::ResolvesServerCert>);
-    config.alpn_protocols = vec![alpn.to_vec()];
+    if !alpn.is_empty() {
+        config.alpn_protocols = vec![alpn.to_vec()];
+    }
     config.max_early_data_size = 0;
     Ok(config)
 }
