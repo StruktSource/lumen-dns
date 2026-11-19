@@ -4,14 +4,14 @@ All notable user-facing changes are listed here. Lumen is still pre-release.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-19
+
 ### Added
 
 - **Completed mDNS publishing and DNS Push.** Published names now use RFC 6762-style probes and move to `-2`, `-3`, and later suffixes on a conflict. Optional `mdns.push_listen` serves RFC 8765 DNS Push over TLS/DSO with subscribe, unsubscribe, keepalive, normal queries, initial state, live add/remove updates, bounded sessions, and `_dns-push-tls._tcp` discovery.
 - **DHCP-linked device identities and rooms.** Network discovery now joins live leases and configured IPv4/IPv6 reservations by stable DHCP client ID before MAC or IP, so address changes stay on one device. The console shows identity confidence and lets an administrator correct IP, MAC, or client-ID matches. A full Rooms tab adds nested room CRUD, device assignment, grouping, and management API routes without requiring IPAM.
-
-## [0.8.0] - 2026-11-17
-
-### Added
+- **Device names in Activity and automatic naming.** With the network module on, the Activity page shows the inventory's device name instead of the bare IP (a **Names** switch turns it off). Devices with no host name now get a readable `Maker xxxx` name from the hardware address and keep upgrading it as better names arrive; a name you typed never changes.
+- **Read-only FRITZ!Box import (optional).** `[network.fritzbox]` reads the box's host list, model, and firmware over TR-064 with Digest sign-in and merges the names into the inventory. Only devices inside your scopes are kept, no setting is ever written, and the host must be a private address. See the [network guide](docs/guides/network.md#fritzbox-optional).
 
 - **Full DNSSEC lifecycle for operator zones.** Zones can use separate KSK/ZSK files, pre-publish successor keys, and schedule their handoff with `rollover_at_unix`. KSKs sign DNSKEY while ZSKs sign zone data. Dynamic RFC 2136 zones and each split-horizon view can now be signed, and daily signature renewal remains active.
 - **mDNS self-publishing and per-service reflection filters.** `mdns.publish_name` answers for and announces `<name>.local` on each listed interface. `mdns.reflect_services` and `mdns.reflect_block_services` limit which service types the reflector repeats; plain host lookups always pass. See [Multicast DNS bridge](docs/guides/mdns.md).
