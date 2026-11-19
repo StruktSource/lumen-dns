@@ -126,6 +126,31 @@ Polling happens every `snmp_interval_secs` (default 300), one device at a time p
 
 Rates come from counter changes between polls and handle 32-bit wraps; a counter that goes backwards (a reboot) gives no rate for that poll. A device that stops answering is reported once after three failed polls, and once when it answers again. Walks are bounded (8,192 rows).
 
+## FRITZ!Box (optional)
+
+A FRITZ!Box knows every device by the name you gave it in its own screens, including phones and tablets that no ping or DHCP lease names well. Lumen can read that list and use those names for its inventory, and so for the **Activity** page. It is off by default and **read-only**: Lumen asks for the box's model and its host list and never changes a setting, restarts anything, or sends any other action.
+
+```toml
+[network.fritzbox]
+enabled = true
+host = "fritz.box"                    # or a private IP such as "192.168.178.1"
+port = 49000                          # TR-064
+username = "lumen"
+password_file = "/run/secrets/fritzbox-password"   # mode 0600
+interval_secs = 300
+```
+
+In the box, open **System > FRITZ!Box users**, add a user just for Lumen, and give it only the right **FRITZ!Box settings**. Allow **Home network access via TR-064** (Home network > Network > Network settings > Further settings > "Allow access for applications"). Put the password alone in the file.
+
+What happens:
+
+- Each device the box lists with an address inside one of your scopes is merged into the inventory by hardware address (then address), so it joins the device Lumen already found instead of creating a second one. Devices outside your scopes are ignored.
+- The box's name for a device becomes its name, unless you named the device yourself. If you rename it in the box, it follows. A name you typed in Lumen always wins.
+- A device the box reports as connected counts as present. One it lists as not connected is recorded but not marked present.
+- The model, firmware, and last import show under **Network > Discovery**. A failed import (wrong password, box unreachable) shows there too; Lumen tries again at the next interval and with every discovery run.
+
+Limits: TR-064 is plain HTTP on your own network, so the password is not sent but the device list is readable by anyone who can watch that link. For that reason `host` must be a private address or a name. At most 1,024 hosts and 4 MiB are read per import. Mesh topology, WAN status, and guest-network details are not imported.
+
 ## Availability monitoring
 
 Every device with an address is checked every `monitor.interval_secs` (default 60; set a different interval per device), unless you turn monitoring off for it. A check sends `probes_per_check` probes (default 3) and passes if any is answered. Methods: **ICMP**, **TCP** (a connection to a port you choose), or **SNMP** (an answer to `sysUpTime`).
@@ -147,7 +172,7 @@ Everything the console does is also available under `/v1/network` with a bearer 
 
 - 20,000 devices, 50,000 links, and 1,024 rooms. Each device has at most 16 DHCP client IDs. Names are limited to 64 characters, descriptions to 500, notes to 2,000.
 - Only this machine's link shows in the neighbor tables. Devices on other networks are found by ping and, with an SNMP profile, by the neighbor and forwarding tables of the routers and switches that profile can read.
-- Not included: CDP, a vendor-specific protocol integration, SNMP traps and `SET`, flow data, device configuration or backup, and e-mail or push notifications. Events are shown in the console and kept for the retention period. (Audit entries for changes to the inventory go to the audit log, and [webhooks](../reference/management-api.md#signed-webhooks) carry management-API activity.)
+- Not included: CDP, a vendor integration other than the read-only FRITZ!Box import, SNMP traps and `SET`, flow data, device configuration or backup, and e-mail or push notifications. Events are shown in the console and kept for the retention period. (Audit entries for changes to the inventory go to the audit log, and [webhooks](../reference/management-api.md#signed-webhooks) carry management-API activity.)
 - The Network page is English-only for now.
 
 ## Data

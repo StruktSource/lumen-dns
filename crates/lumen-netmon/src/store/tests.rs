@@ -11,6 +11,7 @@ fn seen(source: Source, ip: &str, mac: Option<&str>, host: Option<&str>) -> Obse
         mac: mac.map(|m| parse_mac(m).unwrap()),
         dhcp_id: None,
         hostname: host.map(str::to_owned),
+        label: None,
         source,
         sys: None,
     }
@@ -659,4 +660,111 @@ fn kinds_are_guessed_from_what_is_known() {
         guess_kind(Some("Zyxel"), Some("host1"), None, None),
         "unknown"
     );
+}
+
+#[test]
+fn a_device_without_a_host_name_gets_a_readable_maker_name_and_keeps_it_apart() {
+    let (mut db, oui) = (db(), Oui::new());
+    // 00:1b:63 is Apple in the built-in table.
+    db.observe(
+        &seen(
+            Source::Neighbor,
+            "192.168.1.30",
+            Some("00:1b:63:84:45:e6"),
+            None,
+        ),
+        &oui,
+    )
+    .unwrap();
+    let devices = all(&db);
+    assert_eq!(devices[0].name, "Apple 45e6");
+    // A host name later replaces the stand-in.
+    db.observe(
+        &seen(Source::Dns, "192.168.1.30", None, Some("anns-phone.lan")),
+        &oui,
+    )
+    .unwrap();
+    assert_eq!(all(&db)[0].name, "anns-phone");
+}
+
+#[test]
+fn an_address_name_is_upgraded_once_the_maker_is_known_but_a_typed_name_is_not() {
+    let (mut db, oui) = (db(), Oui::new());
+    db.observe(&seen(Source::Icmp, "192.168.1.31", None, None), &oui)
+        .unwrap();
+    assert_eq!(all(&db)[0].name, "192.168.1.31");
+    db.observe(
+        &seen(
+            Source::Neighbor,
+            "192.168.1.31",
+            Some("00:1b:63:01:02:03"),
+            None,
+        ),
+        &oui,
+    )
+    .unwrap();
+    assert_eq!(all(&db)[0].name, "Apple 0203");
+    let id = all(&db)[0].id;
+    let mut input = DeviceInput {
+        name: "Kitchen iPad".into(),
+        ..DeviceInput::default()
+    };
+    input.addresses = vec!["192.168.1.31".into()];
+    db.update_device(id, &input, &oui).unwrap();
+    db.observe(
+        &seen(
+            Source::Neighbor,
+            "192.168.1.31",
+            Some("00:1b:63:01:02:03"),
+            None,
+        ),
+        &oui,
+    )
+    .unwrap();
+    assert_eq!(all(&db)[0].name, "Kitchen iPad");
+    assert_eq!(
+        db.names_by_ip()
+            .unwrap()
+            .get("192.168.1.31")
+            .map(String::as_str),
+        Some("Kitchen iPad")
+    );
+}
+
+#[test]
+fn a_router_name_beats_a_made_up_one_but_not_a_typed_one() {
+    let (mut db, oui) = (db(), Oui::new());
+    let mut o = seen(
+        Source::Router,
+        "192.168.1.40",
+        Some("00:1b:63:84:45:e6"),
+        None,
+    );
+    o.label = Some("Annes iPhone".into());
+    db.observe(&o, &oui).unwrap();
+    assert_eq!(all(&db)[0].name, "Annes iPhone");
+    // Renamed in the router: the device follows.
+    o.label = Some("Anne iPhone 15".into());
+    db.observe(&o, &oui).unwrap();
+    assert_eq!(all(&db)[0].name, "Anne iPhone 15");
+    // A host name from DHCP does not undo it.
+    db.observe(
+        &seen(Source::Dhcp, "192.168.1.40", None, Some("iphone")),
+        &oui,
+    )
+    .unwrap();
+    o.label = Some("Anne iPhone 15".into());
+    db.observe(&o, &oui).unwrap();
+    assert_eq!(all(&db)[0].name, "Anne iPhone 15");
+    // An administrator's name wins.
+    let id = all(&db)[0].id;
+    let input = DeviceInput {
+        name: "Mine".into(),
+        addresses: vec!["192.168.1.40".into()],
+        ..DeviceInput::default()
+    };
+    db.update_device(id, &input, &oui).unwrap();
+    o.label = Some("Something else".into());
+    db.observe(&o, &oui).unwrap();
+    assert_eq!(all(&db)[0].name, "Mine");
 }

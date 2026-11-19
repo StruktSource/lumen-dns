@@ -664,6 +664,8 @@ L.i18n.add('es', {
 "No encrypted transport": "Sin transporte cifrado",
 "At most {n} here.": "Aquí, como máximo {n}.",
 "Live": "En vivo",
+"Names": "Nombres",
+"Show the device name from the network inventory instead of its IP address.": "Muestra el nombre del dispositivo del inventario de red en lugar de su dirección IP.",
 "Live view adds new lookups to the list as they happen.": "La vista en vivo añade las nuevas consultas a la lista al instante.",
 "Auto reload": "Recarga automática",
 "{n} s": "{n} s",

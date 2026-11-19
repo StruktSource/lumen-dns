@@ -3,7 +3,7 @@
 
 pub mod network;
 pub use network::{
-    DiscoveryMethods, Monitor, Network, NetworkScope, SnmpAuth, SnmpPrivacy, SnmpProfile,
+    DiscoveryMethods, Fritzbox, Monitor, Network, NetworkScope, SnmpAuth, SnmpPrivacy, SnmpProfile,
     SnmpVersion,
 };
 
@@ -1530,6 +1530,11 @@ impl Config {
             {
                 *path = base.join(&*path);
             }
+        }
+        if let Some(path) = &mut config.network.fritzbox.password_file
+            && path.is_relative()
+        {
+            *path = base.join(&*path);
         }
         for profile in &mut config.network.snmp_profiles {
             for path in [

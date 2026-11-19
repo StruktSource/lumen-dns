@@ -13,7 +13,7 @@ use crate::{
     probe,
     scope::{Scopes, mac_from_client},
     snmp::{self, Client, Credentials, UsmUser, mib},
-    store::{Netmon, Observation, Source, now},
+    store::{Merged, Netmon, Observation, Source, now},
 };
 use async_trait::async_trait;
 use lumen_config::{Network, SnmpProfile, SnmpVersion};
@@ -83,7 +83,14 @@ impl Limiter {
     }
 }
 
+/// The FRITZ!Box import: one signed-in client at a time, and what the last run did.
+struct Fritz {
+    client: tokio::sync::Mutex<crate::fritz::Client>,
+    status: Mutex<crate::fritz::Status>,
+}
+
 struct Shared {
+    fritz: Option<Fritz>,
     cfg: Network,
     scopes: Scopes,
     state: PathBuf,
@@ -127,6 +134,8 @@ pub struct EngineStatus {
     pub monitor_interval_secs: u32,
     pub failures_before_offline: u8,
     pub snmp_interval_secs: u32,
+    /// The FRITZ!Box import, when it is configured.
+    pub fritzbox: Option<crate::fritz::Status>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -224,7 +233,32 @@ pub fn start(cfg: &Network, state: &Path, env: Arc<dyn Environment>) -> Result<R
             load_profile(profile).map_err(|e| format!("snmp profile {}: {e}", profile.name))?,
         );
     }
+    let fritz = if cfg.fritzbox.enabled {
+        let fb = &cfg.fritzbox;
+        let password = secret(
+            fb.password_file
+                .as_deref()
+                .ok_or("fritzbox password_file missing")?,
+        )
+        .map_err(|e| format!("fritzbox: {e}"))?;
+        Some(Fritz {
+            client: tokio::sync::Mutex::new(crate::fritz::Client::new(
+                &fb.host,
+                fb.port,
+                &fb.username,
+                password,
+            )),
+            status: Mutex::new(crate::fritz::Status {
+                host: fb.host.clone(),
+                interval_secs: fb.interval_secs,
+                ..crate::fritz::Status::default()
+            }),
+        })
+    } else {
+        None
+    };
     let shared = Arc::new(Shared {
+        fritz,
         scopes: Scopes::from_config(cfg),
         limiter: Limiter::new(cfg.packets_per_second),
         icmp4: probe::icmp_available(false),
@@ -239,9 +273,16 @@ pub fn start(cfg: &Network, state: &Path, env: Arc<dyn Environment>) -> Result<R
         snmp_failures: Mutex::new(HashMap::new()),
     });
     let mut tasks = Vec::new();
-    for task in [Task::Scheduler, Task::Monitor, Task::Snmp, Task::Upkeep] {
+    for task in [
+        Task::Scheduler,
+        Task::Monitor,
+        Task::Snmp,
+        Task::Upkeep,
+        Task::Fritz,
+    ] {
         if (task == Task::Monitor && !cfg.monitor.enabled)
             || (task == Task::Snmp && shared.profiles.is_empty())
+            || (task == Task::Fritz && shared.fritz.is_none())
         {
             continue;
         }
@@ -252,6 +293,7 @@ pub fn start(cfg: &Network, state: &Path, env: Arc<dyn Environment>) -> Result<R
                 Task::Monitor => shared.monitor().await,
                 Task::Snmp => shared.snmp_loop().await,
                 Task::Upkeep => shared.upkeep().await,
+                Task::Fritz => shared.fritz_loop().await,
             }
         }));
     }
@@ -264,6 +306,7 @@ enum Task {
     Monitor,
     Snmp,
     Upkeep,
+    Fritz,
 }
 
 /// A cheap handle for asking about, and poking, the running module.
@@ -324,6 +367,12 @@ impl Handle {
             monitor_interval_secs: s.cfg.monitor.interval_secs,
             failures_before_offline: s.cfg.monitor.failures_before_offline,
             snmp_interval_secs: s.cfg.snmp_interval_secs,
+            fritzbox: s.fritz.as_ref().map(|f| {
+                f.status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            }),
         }
     }
 
@@ -626,6 +675,21 @@ impl Shared {
             summary.new_devices += u64::from(m.created);
         }
 
+        // 6b. What the FRITZ!Box lists (when configured). A failure is a note, not a failed scan.
+        if self.fritz.is_some() {
+            match self.fritz_import().await {
+                Ok(merged) => {
+                    for (source, m) in &merged {
+                        if source.is_present() {
+                            present.insert(m.device_id);
+                        }
+                        summary.new_devices += u64::from(m.created);
+                    }
+                }
+                Err(error) => notes.push(format!("FRITZ!Box: {error}")),
+            }
+        }
+
         // 7. Devices in these networks that were not seen this time.
         summary.seen = present.len() as u64;
         let nets = self.scopes.networks();
@@ -636,6 +700,88 @@ impl Shared {
         summary.gone_devices = gone.len() as u64;
         summary.detail = notes.join("; ");
         Ok(())
+    }
+
+    // ---- FRITZ!Box ----
+
+    async fn fritz_loop(self: Arc<Self>) {
+        let interval = Duration::from_secs(u64::from(self.cfg.fritzbox.interval_secs));
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        loop {
+            // Errors are kept in the status; the next round simply tries again.
+            let _ = self.fritz_import().await;
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    /// Read the box's device list and merge it into the inventory. Only devices with an address
+    /// inside a scope are kept, so the box cannot widen what Lumen learns.
+    async fn fritz_import(self: &Arc<Self>) -> Result<Vec<(Source, Merged)>, String> {
+        let fritz = self.fritz.as_ref().ok_or("the FRITZ!Box import is off")?;
+        let result = self.fritz_fetch(fritz).await;
+        let mut status = fritz
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match result {
+            Ok((info, listed, merged)) => {
+                if let Some(info) = info {
+                    status.model = Some(info.model).filter(|m| !m.is_empty());
+                    status.firmware = Some(info.firmware).filter(|m| !m.is_empty());
+                    status.uptime_secs = Some(info.uptime_secs);
+                }
+                status.last_import = Some(now());
+                status.hosts = listed;
+                status.imported = merged.len();
+                status.error = None;
+                Ok(merged)
+            }
+            Err(error) => {
+                status.error = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    async fn fritz_fetch(
+        self: &Arc<Self>,
+        fritz: &Fritz,
+    ) -> Result<(Option<crate::fritz::BoxInfo>, usize, Vec<(Source, Merged)>), String> {
+        let (info, hosts) = {
+            let mut client = fritz.client.lock().await;
+            // The model is nice to have; the host list is the point.
+            let info = client.info().await.ok();
+            (info, client.hosts().await?)
+        };
+        let listed = hosts.len();
+        let observations: Vec<Observation> = hosts
+            .into_iter()
+            .filter_map(|host| {
+                let ip = host.ip.filter(|ip| self.scopes.contains(*ip))?;
+                let mut o = Observation::new(if host.active {
+                    Source::Router
+                } else {
+                    Source::RouterIdle
+                });
+                o.ip = Some(ip);
+                o.mac = host.mac;
+                o.label = Some(host.name).filter(|n| !n.is_empty());
+                Some(o)
+            })
+            .collect();
+        let oui = Arc::clone(&self.oui);
+        let merged = self
+            .db(move |nm| {
+                let mut out = Vec::new();
+                for o in &observations {
+                    if let Some(m) = nm.observe(o, &oui)? {
+                        out.push((o.source, m));
+                    }
+                }
+                Ok(out)
+            })
+            .await?;
+        Ok((info, listed, merged))
     }
 
     // ---- SNMP ----

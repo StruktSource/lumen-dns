@@ -17,6 +17,7 @@
 pub mod api;
 pub mod data;
 pub mod engine;
+pub mod fritz;
 pub mod health;
 pub mod model;
 pub mod neighbors;

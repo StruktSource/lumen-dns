@@ -7,6 +7,16 @@ let q = { search: '', filter: 'all' }, timer = null, form = null, working = fals
 const LIVE_KEY = 'lumen.activity.live', LIVE_MS = 2000;
 const liveSaved = () => { try { return localStorage.getItem(LIVE_KEY) === '1'; } catch { return false; } };
 let live = liveSaved(), polling = false, newest = 0;
+/* Names: show the device from the network inventory instead of its address. Remembered in this browser; on by default. */
+const NAMES_KEY = 'lumen.activity.names';
+const namesSaved = () => { try { return localStorage.getItem(NAMES_KEY) !== '0'; } catch { return true; } };
+let names = namesSaved();
+const toggleNames = () => { names = !names; try { localStorage.setItem(NAMES_KEY, names ? '1' : '0'); } catch { /* storage blocked */ } L.rerender(); };
+/* Who asked: the inventory name (or a configured device) first, then the address. The address stays underneath when a name replaces it. */
+const who = r => {
+  const label = names ? (r.name || r.device) : r.device;
+  return [label || r.client || h('span', { class: 'muted', title: 'Anonymous history does not record who asked.' }, '—'), label && r.client ? h('div', { class: 'hint mono' }, r.client) : null];
+};
 
 const MODES = [
   ['off', 'Off', 'Only counters are kept. No lookups are recorded.'],
@@ -24,7 +34,7 @@ const table = () => {
   return h('div', { id: 'hist-body' },
     h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Time (UTC)', 'Domain', 'Type', 'Device', 'Result', 'Latency'].map((x, i) => h('th', { class: i === 5 ? 'r' : '' }, x)))),
       h('tbody', {}, rows.length ? rows.map(r => h('tr', { class: live && seen && r.t > seen ? 'fresh' : '' }, h('td', { class: 'mono-c' }, new Date(r.t).toISOString().slice(11, 19)), h('td', {}, r.domain), h('td', { class: 'mono-c' }, r.type),
-        h('td', {}, r.device || r.client || h('span', { class: 'muted', title: 'Anonymous history does not record who asked.' }, '—'), r.device && r.client ? h('div', { class: 'hint mono' }, r.client) : null),
+        h('td', {}, ...who(r)),
         h('td', {}, h('span', { class: 'pill ' + (r.blocked ? 'bad' : r.rcode === 'SERVFAIL' ? 'warn' : 'ok') }, r.blocked ? 'Blocked' : r.rcode === 'NOERROR' ? 'Allowed' : r.rcode)), h('td', { class: 'mono-c r' }, r.ms.toFixed(1) + ' ms')))
         : h('tr', {}, h('td', { colspan: 6, class: 'muted' }, q.search || q.filter !== 'all' ? 'No matching entries.' : 'No queries yet. They appear here as devices look things up.'))))),
     H.next_before ? h('div', { class: 'card-b row', style: 'justify-content:center' }, h('button', { class: 'btn', onclick: () => reload(true) }, 'Show more')) : null,
@@ -97,6 +107,7 @@ L.views.activity = () => {
   const head = L.pageHead('Activity', H.mode === 'saved' ? 'Newest first. Saved in the state database.' : 'Which devices asked for what, and what happened to it.',
     showTable ? h('div', { class: 'row' },
       h('button', { class: 'btn' + (live ? ' primary' : ''), 'aria-pressed': String(live), title: 'Live view adds new lookups to the list as they happen.', onclick: toggleLive }, h('i', { class: 'live-dot' + (live ? ' on' : ''), 'aria-hidden': 'true' }), 'Live'),
+      H.detail === 'full' ? h('button', { class: 'btn' + (names ? ' primary' : ''), 'aria-pressed': String(names), title: 'Show the device name from the network inventory instead of its IP address.', onclick: toggleNames }, 'Names') : null,
       h('button', { class: 'btn', onclick: () => reload(false) }, L.ic('refresh'), 'Refresh')) : null);
   if (!showTable) return [head, controls(), h('div', { class: 'card', style: 'margin-top:16px' }, L.empty('Query history is off', 'Per-domain activity is opt-in. While it is off, the Overview still shows rates, blocked share, latency and answers, none of which identify a person.'))];
   return [head, controls(),

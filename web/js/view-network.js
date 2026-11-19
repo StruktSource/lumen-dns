@@ -298,7 +298,10 @@ const discoveryTab = () => {
       h('div', { class: 'net-fact' }, h('span', { class: 'muted' }, 'Next run'), h('span', {}, eng.next_scan ? L.fmt.time(eng.next_scan * 1000) : '—')),
       h('div', { class: 'net-fact' }, h('span', { class: 'muted' }, 'Ping (IPv4 / IPv6)'), h('span', {}, (eng.icmp_v4 ? 'Available' : 'Not allowed') + ' / ' + (eng.icmp_v6 ? 'Available' : 'Not allowed'))),
       h('div', { class: 'net-fact' }, h('span', { class: 'muted' }, 'Availability checks'), h('span', {}, eng.monitor_enabled ? L.t('every {n} s', { n: eng.monitor_interval_secs }) : 'Off')),
-      h('div', { class: 'net-fact' }, h('span', { class: 'muted' }, 'SNMP profiles'), h('span', {}, eng.snmp_profiles.join(', ') || 'None')))),
+      h('div', { class: 'net-fact' }, h('span', { class: 'muted' }, 'SNMP profiles'), h('span', {}, eng.snmp_profiles.join(', ') || 'None')),
+      eng.fritzbox ? h('div', { class: 'net-fact' }, h('span', { class: 'muted' }, 'FRITZ!Box'),
+        h('span', {}, eng.fritzbox.error ? h('span', { class: 'pill bad', title: eng.fritzbox.error }, 'Failed') : eng.fritzbox.last_import ? L.t('{model} · {n} devices, {t}', { model: eng.fritzbox.model || eng.fritzbox.host, n: eng.fritzbox.imported, t: L.fmt.time(eng.fritzbox.last_import * 1000) }) : 'Waiting for the first import')) : null,
+      eng.fritzbox?.error ? h('div', { class: 'note warn', style: 'grid-column:1/-1' }, L.ic('alert'), h('p', {}, eng.fritzbox.error)) : null)),
     h('div', { class: 'card', style: 'margin-top:16px' }, h('div', { class: 'card-h' }, h('strong', {}, 'Recent runs')),
       N().allScans.length ? h('div', { class: 'tbl-wrap' }, h('table', { class: 'tbl' }, h('thead', {}, h('tr', {}, ['Started', 'Result', 'Probed', 'Seen', 'New', 'Gone', 'Notes'].map(x => h('th', {}, x)))),
         h('tbody', {}, N().allScans.map(s => h('tr', {}, h('td', { class: 'mono-c' }, L.fmt.time(s.started * 1000)), h('td', {}, h('span', { class: 'pill ' + (s.state === 'finished' ? 'ok' : s.state === 'failed' ? 'bad' : 'warn') }, s.state)), h('td', {}, L.fmt.n(s.probed)), h('td', {}, L.fmt.n(s.seen)), h('td', {}, L.fmt.n(s.new_devices)), h('td', {}, L.fmt.n(s.gone_devices)), h('td', {}, s.detail || '—'))))))

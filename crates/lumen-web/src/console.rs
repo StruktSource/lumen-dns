@@ -1634,6 +1634,16 @@ impl Console {
         };
         let before = query_param(&request.query, "before").and_then(|v| v.parse::<i64>().ok());
         let mut next_before = None;
+        // Names come from the network inventory when that module is on, looked up now, so a
+        // rename also shows on older lookups. The log itself only ever stores the address.
+        let names = if enabled_modules(store).contains(&"network") {
+            lumen_netmon::Netmon::open(&self.state)
+                .and_then(|nm| nm.names_by_ip())
+                .unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
+        };
+        let name_of = |client: Option<&str>| client.and_then(|c| names.get(c)).cloned();
         let items: Vec<Value> = if settings.mode == HistoryMode::Memory {
             let needle = search.as_deref().map(str::to_lowercase);
             self.host
@@ -1642,11 +1652,13 @@ impl Console {
                 .filter(|r| blocked.is_none_or(|b| b == r.blocked))
                 .filter(|r| {
                     needle.as_deref().is_none_or(|n| {
+                        let client = r.client.map(|c| c.to_string());
                         let hay = format!(
-                            "{} {} {}",
+                            "{} {} {} {}",
                             r.domain,
                             r.device.as_deref().unwrap_or(""),
-                            r.client.map(|c| c.to_string()).unwrap_or_default()
+                            client.as_deref().unwrap_or(""),
+                            name_of(client.as_deref()).unwrap_or_default()
                         );
                         hay.to_lowercase().contains(n)
                     })
@@ -1656,6 +1668,7 @@ impl Console {
                     json!({
                         "t": r.unix_ms, "domain": r.domain, "type": r.qtype,
                         "client": r.client.map(|c| c.to_string()), "device": r.device,
+                        "name": name_of(r.client.map(|c| c.to_string()).as_deref()),
                         "blocked": r.blocked, "rcode": r.rcode, "ms": (r.micros as f64) / 1000.0,
                     })
                 })
@@ -1678,7 +1691,8 @@ impl Console {
                 .map(|r| {
                     json!({
                         "id": r.id, "t": r.row.t, "domain": r.row.domain, "type": r.row.qtype,
-                        "client": r.row.client, "device": r.row.device, "blocked": r.row.blocked,
+                        "client": r.row.client, "device": r.row.device, "name": name_of(r.row.client.as_deref()),
+                        "blocked": r.row.blocked,
                         "rcode": r.row.rcode, "ms": (r.row.micros as f64) / 1000.0,
                     })
                 })

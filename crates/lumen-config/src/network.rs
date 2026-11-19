@@ -38,6 +38,83 @@ pub struct Network {
     /// Seconds between SNMP polls of a device (30 to 3600).
     pub snmp_interval_secs: u32,
     pub snmp_profiles: Vec<SnmpProfile>,
+    /// Optional read-only import of the devices a FRITZ!Box knows about.
+    pub fritzbox: Fritzbox,
+}
+
+/// A FRITZ!Box to read the device list from (TR-064, read-only). Off by default. The password
+/// never sits in the configuration: `password_file` names a file (mode `0600`) that holds it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Fritzbox {
+    pub enabled: bool,
+    /// The box's address on your own network: a private IP address or a name such as `fritz.box`.
+    pub host: String,
+    /// The TR-064 port (49000 unless you changed it).
+    pub port: u16,
+    /// A FRITZ!Box user that may use "FRITZ!Box settings". Give it no more rights than that.
+    pub username: String,
+    pub password_file: Option<PathBuf>,
+    /// Seconds between imports (60 to 86400).
+    pub interval_secs: u32,
+}
+
+impl Default for Fritzbox {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "fritz.box".into(),
+            port: 49000,
+            username: String::new(),
+            password_file: None,
+            interval_secs: 300,
+        }
+    }
+}
+
+impl Fritzbox {
+    /// # Errors
+    /// Says what is wrong with the settings.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let host_ok = match self.host.parse::<std::net::IpAddr>() {
+            // Only a box on your own network: never an address on the internet.
+            Ok(std::net::IpAddr::V4(ip)) => {
+                ip.is_private() || ip.is_loopback() || ip.is_link_local()
+            }
+            Ok(std::net::IpAddr::V6(ip)) => {
+                ip.is_loopback()
+                    || (ip.segments()[0] & 0xfe00) == 0xfc00
+                    || (ip.segments()[0] & 0xffc0) == 0xfe80
+            }
+            Err(_) => {
+                (1..=253).contains(&self.host.len())
+                    && self.host.split('.').all(|l| {
+                        (1..=63).contains(&l.len())
+                            && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                            && !l.starts_with('-')
+                            && !l.ends_with('-')
+                    })
+            }
+        };
+        if !host_ok {
+            return Err(
+                "network.fritzbox.host must be a private IP address or a name such as fritz.box"
+                    .into(),
+            );
+        }
+        if self.port == 0
+            || !(1..=64).contains(&self.username.len())
+            || self.username.chars().any(|c| c.is_control() || c == '"')
+            || self.password_file.is_none()
+            || !(60..=86_400).contains(&self.interval_secs)
+        {
+            return Err("network.fritzbox needs a port, a user name (1 to 64 characters, no quotes), a password_file, and interval_secs of 60 to 86400".into());
+        }
+        Ok(())
+    }
 }
 
 impl Default for Network {
@@ -56,6 +133,7 @@ impl Default for Network {
             monitor: Monitor::default(),
             snmp_interval_secs: 300,
             snmp_profiles: Vec::new(),
+            fritzbox: Fritzbox::default(),
         }
     }
 }
@@ -360,6 +438,7 @@ impl Network {
         if self.methods.snmp && self.snmp_profiles.is_empty() {
             return Err("network.methods.snmp needs at least one snmp profile".into());
         }
+        self.fritzbox.validate()?;
         Ok(())
     }
 }
@@ -390,6 +469,27 @@ mod tests {
         let mut none = on();
         none.scopes.clear();
         assert!(none.validate().is_err());
+    }
+
+    #[test]
+    fn the_fritzbox_import_is_off_by_default_and_stays_on_your_network() {
+        assert!(!Network::default().fritzbox.enabled);
+        let mut n = on();
+        n.fritzbox = Fritzbox {
+            enabled: true,
+            username: "lumen".into(),
+            password_file: Some("/run/secrets/fritz".into()),
+            ..Fritzbox::default()
+        };
+        assert!(n.validate().is_ok(), "fritz.box is a fine name");
+        for bad_host in ["8.8.8.8", "bad host", "-x.lan", ""] {
+            n.fritzbox.host = bad_host.into();
+            assert!(n.validate().is_err(), "{bad_host}");
+        }
+        n.fritzbox.host = "192.168.178.1".into();
+        assert!(n.validate().is_ok());
+        n.fritzbox.password_file = None;
+        assert!(n.validate().is_err(), "a password file is required");
     }
 
     #[test]

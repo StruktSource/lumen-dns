@@ -12,6 +12,7 @@ cfb-mode = "0.8"
 ipnet.workspace = true
 lumen-config = { path = "../lumen-config" }
 lumen-ipam = { path = "../lumen-ipam" }
+md-5 = "0.10"
 async-trait = "0.1"
 ring = "0.17"
 rusqlite.workspace = true

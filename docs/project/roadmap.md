@@ -41,7 +41,8 @@ _Last updated 2026-11-13 for version 0.7.0._
 - mDNS self-publishing, conflict probing, DNS Push, and per-service reflection filters
 - DHCP lease and reservation links to stable device identities
 - A device and room manager with multiple addresses, nested rooms, confidence, and manual matching
-- Network-inventory links to filtering policy; optional FRITZ!Box import
+- Read-only FRITZ!Box host import and device names in the query history
+- Network-inventory links to filtering policy
 - Optional DNS threat feeds and enterprise policy
 - Finish HTTPS/SVCB and ECH-record interoperability
 
@@ -202,7 +203,7 @@ Open items, from most to least urgent. This is a recommended order, not a dated 
 ### Active feature queue
 
 1. **DNSSEC zone lifecycle (implemented, validation open).** Timer-driven successor handoff, separate KSK/ZSK keys, and signing for dynamic and split-horizon zones are implemented. Full hosted CI and a real parent/registrar KSK handoff remain under validation.
-2. **Network policy links.** The stable device identity, DHCP lease/reservation link, nested rooms, confidence, and correction UI are implemented. Still open: link that inventory to filtering profiles and optional FRITZ!Box import.
+2. **Network policy links.** The stable device identity, DHCP lease/reservation link, nested rooms, confidence, and correction UI are implemented. The optional read-only FRITZ!Box import (TR-064 host list, model, names) and device names on the Activity page are implemented. Still open: link that inventory to filtering profiles.
 3. **Threat feeds and enterprise policy.** Optional and disabled by default, without changing privacy defaults.
 4. **HTTPS/SVCB and ECH-record interoperability.** Finish the remaining Issue #36 paths. Native TLS ECH stays in smaller tails until dependencies expose it.
 

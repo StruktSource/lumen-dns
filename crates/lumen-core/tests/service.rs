@@ -3447,7 +3447,12 @@ async fn validated_forwarded_https_records_keep_ech_and_are_marked_authentic() {
 }
 
 /// A signed zone `signed.test` served by one Lumen.
+/// Boxed so the large server-start future stays off each test's own stack.
 async fn signed_authority(signing: lumen_config::ZoneSigning) -> (RunningServer, SocketAddr) {
+    Box::pin(signed_authority_inner(signing)).await
+}
+
+async fn signed_authority_inner(signing: lumen_config::ZoneSigning) -> (RunningServer, SocketAddr) {
     let upstream = fixture().await;
     let bind = address("127.0.0.1");
     let mut cfg = config(upstream.address, bind);

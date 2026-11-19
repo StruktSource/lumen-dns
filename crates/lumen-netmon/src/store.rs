@@ -101,6 +101,10 @@ pub enum Source {
     Snmp,
     /// A switch or router reported it as a neighbor (LLDP): it is on the network.
     Lldp,
+    /// A router (a FRITZ!Box) lists it, and says it is connected right now.
+    Router,
+    /// A router lists it, but not as connected.
+    RouterIdle,
     /// An administrator typed it.
     Manual,
 }
@@ -116,6 +120,7 @@ impl Source {
             Self::Dns => "dns",
             Self::Snmp => "snmp",
             Self::Lldp => "lldp",
+            Self::Router | Self::RouterIdle => "router",
             Self::Manual => "manual",
         }
     }
@@ -127,7 +132,7 @@ impl Source {
     /// It shows the device is on the network right now, awake or not.
     #[must_use]
     pub fn is_present(self) -> bool {
-        self.is_alive() || matches!(self, Self::Neighbor | Self::Lldp)
+        self.is_alive() || matches!(self, Self::Neighbor | Self::Lldp | Self::Router)
     }
 }
 
@@ -138,6 +143,9 @@ pub struct Observation {
     pub mac: Option<Mac>,
     pub dhcp_id: Option<String>,
     pub hostname: Option<String>,
+    /// A name a person chose for the device elsewhere (the FRITZ!Box device list). It need not be
+    /// a host name. It names the device unless an administrator did.
+    pub label: Option<String>,
     pub source: Source,
     pub sys: Option<SysInfo>,
 }
@@ -150,6 +158,7 @@ impl Observation {
             mac: None,
             dhcp_id: None,
             hostname: None,
+            label: None,
             source,
             sys: None,
         }
@@ -213,6 +222,30 @@ pub(crate) fn clean_hostname(value: &str) -> Option<String> {
 /// The name shown for a host name: its first label (`printer` for `printer.home.lan`).
 fn short_name(hostname: &str) -> String {
     hostname.split('.').next().unwrap_or(hostname).to_owned()
+}
+
+/// A readable name for a device that announced none: the maker's short name and the last two
+/// bytes of its hardware address (`Apple 3fa1`), so two devices of one maker stay apart.
+fn generated_name(vendor: &str, mac: &Mac) -> Option<String> {
+    let word = vendor
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .find(|w| !w.is_empty())?;
+    let word: String = word.chars().take(20).collect();
+    Some(format!("{word} {:02x}{:02x}", mac[4], mac[5]))
+}
+
+/// The name is only a stand-in Lumen made up (an address or a maker plus hardware tail), so a
+/// better one may replace it. A name an administrator typed is never a placeholder.
+fn is_placeholder(device: &Device) -> bool {
+    device.addresses.iter().any(|a| a.ip == device.name)
+        || device.macs.iter().any(|m| {
+            m.mac == device.name
+                || parse_mac(&m.mac)
+                    .zip(m.vendor.as_deref().or(device.vendor.as_deref()))
+                    .and_then(|(mac, vendor)| generated_name(vendor, &mac))
+                    .is_some_and(|generated| generated == device.name)
+        })
 }
 
 /// Guess what a device is from what is known about it. Only a guess: it is never applied over
@@ -403,6 +436,22 @@ impl Netmon {
     }
 
     // ---- reading devices ----
+
+    /// The name of every known address, so another part of Lumen can show a device instead of
+    /// its IP. Devices that are marked gone still answer, since old lookups mention them.
+    ///
+    /// # Errors
+    /// The database failed.
+    pub fn names_by_ip(&self) -> Result<std::collections::HashMap<String, String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT a.ip, d.name FROM nm_addrs a JOIN nm_devices d ON d.id = a.device_id")
+            .map_err(sql)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(sql)?;
+        rows.collect::<Result<_, _>>().map_err(sql)
+    }
 
     /// All devices matching the filter, newest activity first.
     ///
@@ -930,14 +979,23 @@ impl Netmon {
                 let sys = seen.sys.as_ref();
                 let kind = guess_kind(
                     vendor.as_deref(),
-                    hostname.as_deref().or(sys.and_then(|s| s.name.as_deref())),
+                    hostname
+                        .as_deref()
+                        .or(seen.label.as_deref())
+                        .or(sys.and_then(|s| s.name.as_deref())),
                     sys.and_then(|s| s.descr.as_deref()),
                     sys.and_then(|s| s.services),
                 );
-                let name = hostname
-                    .as_deref()
-                    .map(short_name)
+                let label = seen.label.as_deref().and_then(crate::fritz::clean_label);
+                let name = label
+                    .or_else(|| hostname.as_deref().map(short_name))
                     .or_else(|| sys.and_then(|s| s.name.clone()))
+                    .or_else(|| {
+                        vendor
+                            .as_deref()
+                            .zip(mac.as_ref())
+                            .and_then(|(v, m)| generated_name(v, m))
+                    })
                     .or_else(|| seen.ip.map(|ip| ip.to_string()))
                     .or_else(|| mac.as_ref().map(format_mac))
                     .unwrap_or_else(|| "device".into());
@@ -999,11 +1057,47 @@ impl Netmon {
             )
             .map_err(sql)?;
         }
+        // A name someone chose in the router beats any name Lumen made up. Only a name typed here
+        // (locked) is stronger.
+        if let Some(label) = seen.label.as_deref().and_then(crate::fritz::clean_label)
+            && !locked("name")
+            && label != device.name
+        {
+            tx.execute(
+                "UPDATE nm_devices SET name = ?2 WHERE id = ?1",
+                params![id, label],
+            )
+            .map_err(sql)?;
+        }
+        // A device that is still named by an address gets a readable name once its maker is known.
+        if !locked("name") && device.hostname.is_none() && is_placeholder(&device) {
+            let refreshed = load_devices(&tx, Some(id))?
+                .into_iter()
+                .next()
+                .ok_or("device missing")?;
+            let generated = refreshed
+                .macs
+                .iter()
+                .filter(|_| refreshed.hostname.is_none())
+                .find_map(|m| {
+                    let mac = parse_mac(&m.mac)?;
+                    generated_name(refreshed.vendor.as_deref().or(m.vendor.as_deref())?, &mac)
+                });
+            if let Some(name) = generated
+                && name != refreshed.name
+            {
+                tx.execute(
+                    "UPDATE nm_devices SET name = ?2 WHERE id = ?1",
+                    params![id, name],
+                )
+                .map_err(sql)?;
+            }
+        }
         if let Some(sys) = &seen.sys {
             write_sys(&tx, id, sys)?;
             if !locked("name")
                 && device.hostname.is_none()
-                && device.name == device.addresses.first().map_or("", |a| a.ip.as_str())
+                && is_placeholder(&device)
                 && let Some(name) = sys.name.as_deref().and_then(clean_hostname)
             {
                 tx.execute(

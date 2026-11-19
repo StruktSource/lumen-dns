@@ -187,6 +187,17 @@ Network discovery, the device inventory, topology, and monitoring. Off unless `e
 | `timeout_ms` | `1500` | 200 to 10000 |
 | `retries` | `1` | 0 to 5 |
 
+`[network.fritzbox]` (read-only import, see the [network guide](../guides/network.md#fritzbox-optional)):
+
+| Field | Default | Meaning |
+| :--- | :--- | :--- |
+| `enabled` | `false` | Import the FRITZ!Box host list |
+| `host` | `"fritz.box"` | A private IP address or a name; never a public address |
+| `port` | `49000` | TR-064 port |
+| `username` | | A FRITZ!Box user with only the "FRITZ!Box settings" right (1 to 64 characters, no quotes) |
+| `password_file` | | File holding the password (mode `0600`), required |
+| `interval_secs` | `300` | 60 to 86400 |
+
 ## Authoritative zones, forwarders, and TSIG keys
 
 Full guide: [Your own DNS zones](../guides/authoritative-dns.md). All of these are off until you add a table.
